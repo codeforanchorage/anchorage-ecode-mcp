@@ -143,16 +143,27 @@ def lambda_handler(
         # Get handler and process request
         handler = get_handler()
 
+        async def _run_with_cleanup():
+            try:
+                return await handler.handle_request(
+                    method=http_method,
+                    path=request_path,
+                    body=body,
+                    headers=headers,
+                    request_id=request_id,
+                )
+            finally:
+                # Close plugin HTTP clients before event loop closes.
+                # Fixes "Event loop is closed" on warm starts when tools use httpx.
+                from server import http_handler
+
+                if http_handler._plugin_manager is not None:
+                    await http_handler._plugin_manager.shutdown()
+                    http_handler._plugin_manager = None
+                    http_handler._mcp_server = None
+
         # Run async handler
-        status_code, response_headers, response_body = asyncio.run(
-            handler.handle_request(
-                method=http_method,
-                path=request_path,
-                body=body,
-                headers=headers,
-                request_id=request_id,
-            )
-        )
+        status_code, response_headers, response_body = asyncio.run(_run_with_cleanup())
 
         # Transform to Lambda response format
         lambda_response = {
