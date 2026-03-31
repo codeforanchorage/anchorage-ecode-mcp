@@ -1,4 +1,4 @@
-lambda_name     = "opencontext-mcp-server"
+lambda_name     = "boston-opencontext-mcp-staging"
 stage_name      = "staging"
 aws_region      = "us-east-1"
 config_file     = "config.yaml"

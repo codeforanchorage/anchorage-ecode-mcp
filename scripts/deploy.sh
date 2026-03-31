@@ -18,15 +18,63 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# Environment: staging (default) or prod
-ENVIRONMENT="${1:-staging}"
-if [ "$ENVIRONMENT" != "staging" ] && [ "$ENVIRONMENT" != "prod" ]; then
-    echo -e "${RED}❌ Error: Invalid environment '${ENVIRONMENT}'${NC}"
-    echo "Usage: $0 [staging|prod]"
+# Parse named arguments
+ENVIRONMENT=""
+TF_WORKSPACE=""
+
+show_usage() {
+    echo "Usage: $0 --environment <staging|prod> [--tfworkspace <name>]"
+    echo ""
+    echo "Options:"
+    echo "  --environment, -e   Deployment environment: staging or prod (required)"
+    echo "  --tfworkspace, -w   Terraform workspace name (default: boston-staging or boston-prod)"
+    echo "  --help, -h          Show this help message"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --environment|-e)
+            ENVIRONMENT="$2"
+            shift 2
+            ;;
+        --tfworkspace|-w)
+            TF_WORKSPACE="$2"
+            shift 2
+            ;;
+        --help|-h)
+            show_usage
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}❌ Error: Unknown argument '${1}'${NC}"
+            show_usage
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$ENVIRONMENT" ]; then
+    echo -e "${RED}❌ Error: --environment is required${NC}"
+    show_usage
     exit 1
 fi
 
-echo -e "${GREEN}🚀 OpenContext Deployment [${ENVIRONMENT}]${NC}"
+if [ "$ENVIRONMENT" != "staging" ] && [ "$ENVIRONMENT" != "prod" ]; then
+    echo -e "${RED}❌ Error: Invalid environment '${ENVIRONMENT}'. Must be 'staging' or 'prod'.${NC}"
+    show_usage
+    exit 1
+fi
+
+# Default workspace per environment when not explicitly provided
+if [ -z "$TF_WORKSPACE" ]; then
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        TF_WORKSPACE="boston-prod"
+    else
+        TF_WORKSPACE="boston-staging"
+    fi
+fi
+
+echo -e "${GREEN}🚀 OpenContext Deployment [${ENVIRONMENT}] (workspace: ${TF_WORKSPACE})${NC}"
 echo "================================"
 echo ""
 
@@ -249,14 +297,8 @@ fi
 # Plan first - validates configuration and catches errors before any changes
 cd terraform/aws
 
-# Select Terraform workspace: staging uses default, prod uses its own
-if [ "$ENVIRONMENT" = "prod" ]; then
-    echo "Selecting Terraform workspace: boston-prod"
-    terraform workspace select boston-prod 2>/dev/null || terraform workspace new boston-prod
-else
-    echo "Selecting Terraform workspace: default"
-    terraform workspace select default 2>/dev/null || true
-fi
+echo "Selecting Terraform workspace: ${TF_WORKSPACE}"
+terraform workspace select "$TF_WORKSPACE" 2>/dev/null || terraform workspace new "$TF_WORKSPACE"
 
 echo -e "${YELLOW}📋 Planning Terraform changes...${NC}"
 if ! terraform plan \
@@ -272,6 +314,7 @@ fi
 echo ""
 echo -e "${YELLOW}⚠️  Deployment will apply the planned changes to AWS.${NC}"
 echo -e "   Environment: ${ENVIRONMENT}"
+echo -e "   Workspace:   ${TF_WORKSPACE}"
 echo -e "   Lambda:      ${LAMBDA_NAME}"
 echo -e "   Region:      ${AWS_REGION}"
 echo ""
