@@ -1,0 +1,1851 @@
+"""Tests for Anchorage GIS plugin.
+
+Verifies plugin initialization, tool definitions, tool execution,
+error handling, and data formatting.
+"""
+
+import pytest
+from unittest.mock import AsyncMock, Mock, patch
+
+import httpx
+from pydantic import ValidationError
+
+from core.interfaces import PluginType
+from plugins.anchorage_gis.config_schema import AnchorageGISPluginConfig
+from plugins.anchorage_gis.plugin import AnchorageGISPlugin
+
+
+@pytest.fixture
+def anchorage_config():
+    """Standard Anchorage GIS plugin configuration."""
+    return {
+        "portal_base_url": "https://muniorg.maps.arcgis.com/sharing/rest",
+        "gallery_group_id": "c34ed10758ec4f4eb8aa6826ee5be3ff",
+        "org_id": "Ce3DhLRthdwbHlfF",
+        "city_name": "Municipality of Anchorage",
+        "gallery_url": (
+            "https://muniorg.maps.arcgis.com/apps/instant/filtergallery/"
+            "index.html?appid=4dac7569f1cc4beb9f22ce168c899a30"
+        ),
+        "timeout": 30,
+    }
+
+
+# ── Plugin attributes ──────────────────────────────────────────────────
+
+
+class TestPluginAttributes:
+    def test_plugin_attributes(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        assert plugin.plugin_name == "anchorage_gis"
+        assert plugin.plugin_type == PluginType.OPEN_DATA
+        assert plugin.plugin_version == "1.0.0"
+
+
+# ── Initialization ─────────────────────────────────────────────────────
+
+
+class TestInitialization:
+    @pytest.mark.asyncio
+    async def test_initialize_success(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.raise_for_status = Mock()
+            mock_response.json.return_value = {"results": []}
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_class.return_value = mock_client
+
+            result = await plugin.initialize()
+
+            assert result is True
+            assert plugin._initialized is True
+
+    @pytest.mark.asyncio
+    async def test_initialize_failure(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(
+                side_effect=httpx.ConnectError("Connection refused")
+            )
+            mock_client_class.return_value = mock_client
+
+            result = await plugin.initialize()
+
+            assert result is False
+            assert plugin._initialized is False
+
+    @pytest.mark.asyncio
+    async def test_initialize_portal_error(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.raise_for_status = Mock()
+            mock_response.json.return_value = {
+                "error": {"message": "Invalid org ID"}
+            }
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_class.return_value = mock_client
+
+            result = await plugin.initialize()
+
+            assert result is False
+
+
+# ── get_tools ──────────────────────────────────────────────────────────
+
+
+class TestGetTools:
+    def test_get_tools_returns_all_tools(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        tools = plugin.get_tools()
+
+        assert len(tools) == 11
+        tool_names = [t.name for t in tools]
+        assert "find_gis_content" in tool_names
+        assert "browse_gallery" in tool_names
+        assert "search_spatial_layers" in tool_names
+        assert "get_item_details" in tool_names
+        assert "get_layer_schema" in tool_names
+        assert "search_layers_by_field" in tool_names
+        assert "query_data" in tool_names
+        assert "spatial_query_point" in tool_names
+        assert "spatial_query_polygon" in tool_names
+        assert "aggregate_by_polygon" in tool_names
+        assert "filter_by_polygon" in tool_names
+
+    def test_most_tools_include_city_name(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        tools = plugin.get_tools()
+
+        # Most tools include city name; schema tools are generic
+        city_tools = [
+            t for t in tools if "Municipality of Anchorage" in t.description
+        ]
+        assert len(city_tools) >= 5
+
+
+# ── execute_tool ───────────────────────────────────────────────────────
+
+
+class TestExecuteTool:
+    @pytest.mark.asyncio
+    async def test_execute_tool_unknown(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        result = await plugin.execute_tool("unknown_tool", {})
+
+        assert result.success is False
+        assert "Unknown tool" in result.error_message
+
+    @pytest.mark.asyncio
+    async def test_execute_find_gis_content(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        with patch.object(
+            plugin,
+            "_search_gallery",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "id": "abc123",
+                    "title": "Flood Zone Map",
+                    "type": "Web Mapping Application",
+                    "snippet": "Shows flood zones",
+                    "tags": ["flood"],
+                    "url": "https://example.com/app",
+                }
+            ],
+        ), patch.object(
+            plugin,
+            "_search_org_layers",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            result = await plugin.execute_tool(
+                "find_gis_content", {"topic": "flood"}
+            )
+
+        assert result.success is True
+        assert len(result.content) > 0
+        assert "Flood Zone Map" in result.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_execute_browse_gallery(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        with patch.object(
+            plugin,
+            "_search_gallery",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "id": "abc123",
+                    "title": "Trails Map",
+                    "type": "Dashboard",
+                    "snippet": "Shows trails",
+                    "tags": ["trails"],
+                    "url": "",
+                }
+            ],
+        ):
+            result = await plugin.execute_tool(
+                "browse_gallery", {"keyword": "trails"}
+            )
+
+        assert result.success is True
+        assert "Trails Map" in result.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_execute_get_item_details(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc123",
+                "title": "Zoning Map",
+                "type": "Feature Service",
+                "snippet": "Zoning info",
+                "description": "Full zoning description",
+                "tags": ["zoning"],
+                "owner": "gis_admin",
+                "access": "public",
+                "numViews": 500,
+                "created": 1700000000000,
+                "modified": 1700000000000,
+                "url": "https://example.com/FeatureServer",
+            },
+        ):
+            result = await plugin.execute_tool(
+                "get_item_details", {"item_id": "abc123"}
+            )
+
+        assert result.success is True
+        assert "Zoning Map" in result.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_execute_get_item_details_missing_id(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        result = await plugin.execute_tool("get_item_details", {})
+
+        assert result.success is False
+        assert "item_id is required" in result.error_message
+
+    @pytest.mark.asyncio
+    async def test_execute_search_spatial_layers(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        with patch.object(
+            plugin,
+            "_search_org_layers",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "id": "def456",
+                    "title": "Parcels",
+                    "type": "Feature Service",
+                    "snippet": "Parcel data",
+                    "tags": ["parcels"],
+                    "url": "https://example.com/FeatureServer",
+                }
+            ],
+        ):
+            result = await plugin.execute_tool(
+                "search_spatial_layers", {"query": "parcels"}
+            )
+
+        assert result.success is True
+        assert "Parcels" in result.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_execute_search_spatial_layers_missing_query(
+        self, anchorage_config
+    ):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        result = await plugin.execute_tool("search_spatial_layers", {})
+
+        assert result.success is False
+        assert "query is required" in result.error_message
+
+    @pytest.mark.asyncio
+    async def test_execute_query_data(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        with (
+            patch.object(
+                plugin,
+                "get_dataset",
+                new_callable=AsyncMock,
+                return_value={
+                    "url": "https://example.com/FeatureServer",
+                    "type": "Feature Service",
+                },
+            ),
+            patch.object(
+                plugin,
+                "query_data",
+                new_callable=AsyncMock,
+                return_value=[{"name": "Park A", "status": "Open"}],
+            ),
+            patch.object(
+                plugin,
+                "_get_record_count",
+                new_callable=AsyncMock,
+                return_value=42,
+            ),
+        ):
+            result = await plugin.execute_tool(
+                "query_data", {"item_id": "abc123"}
+            )
+
+        assert result.success is True
+        assert "Park A" in result.content[0]["text"]
+        assert "42" in result.content[0]["text"]
+
+
+# ── query_data two-hop resolution ─────────────────────────────────────
+
+
+class TestQueryDataTwoHop:
+    @pytest.mark.asyncio
+    async def test_query_data_resolves_service_url(self, anchorage_config):
+        """Verify query_data calls get_dataset first, then queries the service."""
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        mock_client = AsyncMock()
+
+        # Mock the Feature Service query response
+        mock_query_response = Mock()
+        mock_query_response.status_code = 200
+        mock_query_response.raise_for_status = Mock()
+        mock_query_response.headers = {"content-type": "application/json"}
+        mock_query_response.json.return_value = {
+            "features": [
+                {"attributes": {"name": "Park A", "status": "Open"}},
+            ]
+        }
+        mock_client.get = AsyncMock(return_value=mock_query_response)
+        plugin.client = mock_client
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc123",
+                "title": "Parks",
+                "type": "Feature Service",
+                "url": "https://services.arcgis.com/xyz/FeatureServer/0",
+            },
+        ) as mock_get_dataset:
+            records = await plugin.query_data("abc123", {"where": "1=1"}, 100)
+
+        mock_get_dataset.assert_called_once_with("abc123")
+        mock_client.get.assert_called_once()
+        call_args = mock_client.get.call_args
+        assert "/query" in call_args[0][0]
+        assert len(records) == 1
+        assert records[0]["name"] == "Park A"
+
+    @pytest.mark.asyncio
+    async def test_query_data_return_geometry_true(self, anchorage_config):
+        """return_geometry=True switches to f=geojson, pins outSR=4326,
+        simplifies, and attaches GeoJSON geometry to each record."""
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = Mock()
+        mock_response.headers = {"content-type": "application/json"}
+        # f=geojson response shape: FeatureCollection
+        mock_response.json.return_value = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"name": "Kincaid Park"},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [[-149.9, 61.1], [-149.8, 61.1],
+                             [-149.8, 61.2], [-149.9, 61.1]]
+                        ],
+                    },
+                },
+            ],
+        }
+        mock_client.get = AsyncMock(return_value=mock_response)
+        plugin.client = mock_client
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc123",
+                "title": "Parks",
+                "type": "Feature Service",
+                "url": "https://services.arcgis.com/xyz/FeatureServer/0",
+            },
+        ):
+            records = await plugin.query_data(
+                "abc123",
+                {"where": "1=1"},
+                100,
+                return_geometry=True,
+            )
+
+        # Params sent to ArcGIS must reflect geojson + simplification
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["f"] == "geojson"
+        assert params["returnGeometry"] == "true"
+        assert params["outSR"] == "4326"
+        assert "maxAllowableOffset" in params
+        # limit cap: 100 requested but geometry mode caps at 50
+        assert params["resultRecordCount"] == 50
+
+        # Returned record merges properties with __geometry__ key
+        assert len(records) == 1
+        assert records[0]["name"] == "Kincaid Park"
+        assert records[0]["__geometry__"]["type"] == "Polygon"
+
+    @pytest.mark.asyncio
+    async def test_query_data_default_no_geometry(self, anchorage_config):
+        """Default (return_geometry=False) still uses f=json and returns
+        flat attribute dicts — backward compatibility."""
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = Mock()
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {
+            "features": [{"attributes": {"name": "Park A"}}]
+        }
+        mock_client.get = AsyncMock(return_value=mock_response)
+        plugin.client = mock_client
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "type": "Feature Service",
+                "url": "https://services.arcgis.com/xyz/FeatureServer/0",
+            },
+        ):
+            records = await plugin.query_data(
+                "abc123", {"where": "1=1"}, 100
+            )
+
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["f"] == "json"
+        assert params["returnGeometry"] == "false"
+        assert "outSR" not in params
+        assert "maxAllowableOffset" not in params
+        assert params["resultRecordCount"] == 100
+
+        assert records == [{"name": "Park A"}]
+        assert "__geometry__" not in records[0]
+
+    @pytest.mark.asyncio
+    async def test_query_data_auto_appends_layer_index(self, anchorage_config):
+        """When service_url ends with /FeatureServer (no layer), /0 is appended."""
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = Mock()
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {
+            "features": [{"attributes": {"name": "Trail X"}}]
+        }
+        mock_client.get = AsyncMock(return_value=mock_response)
+        plugin.client = mock_client
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc123",
+                "title": "Trails",
+                "type": "Feature Service",
+                "url": "https://services.arcgis.com/xyz/FeatureServer",
+            },
+        ):
+            records = await plugin.query_data("abc123", {"where": "1=1"}, 100)
+
+        url_called = mock_client.get.call_args[0][0]
+        assert "/FeatureServer/0/query" in url_called
+        assert len(records) == 1
+
+
+# ── spatial_query_point ────────────────────────────────────────────────
+
+
+def _spatial_client_mock(layer_meta, query_features):
+    """Build a mock httpx client that returns layer metadata on the
+    first GET (the service root) and query features on the second GET
+    (the /query endpoint). Both responses are JSON."""
+    meta_resp = Mock()
+    meta_resp.status_code = 200
+    meta_resp.raise_for_status = Mock()
+    meta_resp.headers = {"content-type": "application/json"}
+    meta_resp.json.return_value = layer_meta
+
+    query_resp = Mock()
+    query_resp.status_code = 200
+    query_resp.raise_for_status = Mock()
+    query_resp.headers = {"content-type": "application/json"}
+    query_resp.json.return_value = {"features": query_features}
+
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=[meta_resp, query_resp])
+    return client
+
+
+class TestSpatialQueryPoint:
+    @pytest.mark.asyncio
+    async def test_point_in_polygon_happy_path(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        plugin.client = _spatial_client_mock(
+            layer_meta={
+                "geometryType": "esriGeometryPolygon",
+                "name": "Parks",
+                "fields": [],
+            },
+            query_features=[
+                {"attributes": {"name": "Kincaid Park", "acres": 1517}},
+            ],
+        )
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc123",
+                "title": "Parks",
+                "type": "Feature Service",
+                "url": "https://services.arcgis.com/xyz/FeatureServer/0",
+            },
+        ):
+            records = await plugin.spatial_query_point(
+                "abc123", lon=-149.9003, lat=61.2181
+            )
+
+        assert len(records) == 1
+        assert records[0]["name"] == "Kincaid Park"
+
+        # Verify the query call pinned inSR=4326, used point geometry,
+        # and suppressed geometry output.
+        query_call = plugin.client.get.call_args_list[1]
+        params = query_call.kwargs["params"]
+        assert params["geometry"] == "-149.9003,61.2181"
+        assert params["geometryType"] == "esriGeometryPoint"
+        assert params["inSR"] == "4326"
+        assert params["spatialRel"] == "esriSpatialRelIntersects"
+        assert params["returnGeometry"] == "false"
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_polygon_layer(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        plugin.client = _spatial_client_mock(
+            layer_meta={
+                "geometryType": "esriGeometryPoint",
+                "name": "Fire Hydrants",
+                "fields": [],
+            },
+            query_features=[],
+        )
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc123",
+                "title": "Hydrants",
+                "type": "Feature Service",
+                "url": "https://services.arcgis.com/xyz/FeatureServer/0",
+            },
+        ):
+            with pytest.raises(ValueError, match="polygon layer"):
+                await plugin.spatial_query_point(
+                    "abc123", lon=-149.9, lat=61.2
+                )
+
+    @pytest.mark.asyncio
+    async def test_rejects_out_of_range_lon(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        plugin.client = AsyncMock()
+
+        with pytest.raises(ValueError, match="lon out of range"):
+            await plugin.spatial_query_point(
+                "abc123", lon=200.0, lat=61.2
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejects_out_of_range_lat(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        plugin.client = AsyncMock()
+
+        with pytest.raises(ValueError, match="lat out of range"):
+            await plugin.spatial_query_point(
+                "abc123", lon=-149.9, lat=95.0
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_numeric_coords(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        plugin.client = AsyncMock()
+
+        with pytest.raises(ValueError, match="numeric"):
+            await plugin.spatial_query_point(
+                "abc123", lon="not-a-number", lat=61.2
+            )
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_spatial_query_point(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        with patch.object(
+            plugin,
+            "spatial_query_point",
+            new_callable=AsyncMock,
+            return_value=[{"name": "Kincaid Park"}],
+        ) as mock_method:
+            result = await plugin.execute_tool(
+                "spatial_query_point",
+                {
+                    "item_id": "abc123",
+                    "lon": -149.9003,
+                    "lat": 61.2181,
+                },
+            )
+
+        assert result.success is True
+        mock_method.assert_called_once()
+        assert "Kincaid Park" in result.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_spatial_query_missing_coords(
+        self, anchorage_config
+    ):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        result = await plugin.execute_tool(
+            "spatial_query_point", {"item_id": "abc123"}
+        )
+
+        assert result.success is False
+        assert "lon" in result.error_message
+
+
+# ── Geometry helpers ───────────────────────────────────────────────────
+
+
+class TestGeometryHelpers:
+    # Unit square with a square hole in the middle
+    SQUARE = {
+        "type": "Polygon",
+        "coordinates": [
+            [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]],
+            [[1, 1], [3, 1], [3, 3], [1, 3], [1, 1]],
+        ],
+    }
+    # L-shape whose arithmetic centroid falls outside the polygon
+    L_SHAPE = {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [0, 0],
+                [4, 0],
+                [4, 1],
+                [1, 1],
+                [1, 4],
+                [0, 4],
+                [0, 0],
+            ]
+        ],
+    }
+
+    def test_ring_contains_point_inside(self):
+        ring = [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]]
+        assert AnchorageGISPlugin._ring_contains_point(ring, (2, 2)) is True
+
+    def test_ring_contains_point_outside(self):
+        ring = [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]]
+        assert AnchorageGISPlugin._ring_contains_point(ring, (5, 2)) is False
+
+    def test_polygon_with_hole_treats_hole_as_outside(self):
+        # Point inside the hole is NOT inside the polygon
+        assert (
+            AnchorageGISPlugin._polygon_contains_point(
+                self.SQUARE["coordinates"], (2, 2)
+            )
+            is False
+        )
+        # Point in the annulus IS inside
+        assert (
+            AnchorageGISPlugin._polygon_contains_point(
+                self.SQUARE["coordinates"], (0.5, 0.5)
+            )
+            is True
+        )
+
+    def test_multipolygon_contains_point(self):
+        geom = {
+            "type": "MultiPolygon",
+            "coordinates": [
+                [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+                [[[10, 10], [11, 10], [11, 11], [10, 11], [10, 10]]],
+            ],
+        }
+        assert AnchorageGISPlugin._geometry_contains_point(geom, (0.5, 0.5))
+        assert AnchorageGISPlugin._geometry_contains_point(geom, (10.5, 10.5))
+        assert not AnchorageGISPlugin._geometry_contains_point(geom, (5, 5))
+
+    def test_geometry_centroid_square(self):
+        square = {
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]],
+        }
+        cx, cy = AnchorageGISPlugin._geometry_centroid(square)
+        assert abs(cx - 1.0) < 1e-9
+        assert abs(cy - 1.0) < 1e-9
+
+    def test_representative_point_l_shape_is_inside(self):
+        pt = AnchorageGISPlugin._geometry_representative_point(self.L_SHAPE)
+        assert pt is not None
+        assert AnchorageGISPlugin._geometry_contains_point(self.L_SHAPE, pt)
+
+    def test_feature_to_point_uses_point_geometry_directly(self):
+        geom = {"type": "Point", "coordinates": [-149.9, 61.2]}
+        assert AnchorageGISPlugin._feature_to_point(geom, "auto") == (
+            -149.9,
+            61.2,
+        )
+
+    def test_feature_to_point_auto_falls_back_when_centroid_outside(self):
+        pt = AnchorageGISPlugin._feature_to_point(self.L_SHAPE, "auto")
+        assert pt is not None
+        assert AnchorageGISPlugin._geometry_contains_point(self.L_SHAPE, pt)
+
+
+# ── aggregate_by_polygon ───────────────────────────────────────────────
+
+
+def _ok_resp(payload):
+    r = Mock()
+    r.status_code = 200
+    r.raise_for_status = Mock()
+    r.headers = {"content-type": "application/json"}
+    r.json.return_value = payload
+    return r
+
+
+# 32-char hex item IDs used across these tests
+_SOURCE_ID = "a" * 32
+_AGG_ID = "b" * 32
+_CONTAINER_ID = "c" * 32
+
+
+class TestAggregateByPolygon:
+    @pytest.fixture
+    def plugin(self, anchorage_config):
+        p = AnchorageGISPlugin(anchorage_config)
+        p.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        return p
+
+    @pytest.mark.asyncio
+    async def test_happy_path_counts_and_sums(self, plugin):
+        # Two councils side by side: Midtown [0,0]-[2,2], Fairview [2,0]-[4,2].
+        agg_polygons = [
+            {
+                "group": "Midtown",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]
+                    ],
+                },
+            },
+            {
+                "group": "Fairview",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[2, 0], [4, 0], [4, 2], [2, 2], [2, 0]]
+                    ],
+                },
+            },
+        ]
+        # Source: 2 cleanups in Midtown, 1 in Fairview, 1 outside.
+        source_features = [
+            {
+                "geometry": {"type": "Point", "coordinates": [0.5, 1]},
+                "properties": {"Total_Pounds": 100},
+            },
+            {
+                "geometry": {"type": "Point", "coordinates": [1.5, 1]},
+                "properties": {"Total_Pounds": 200},
+            },
+            {
+                "geometry": {"type": "Point", "coordinates": [3, 1]},
+                "properties": {"Total_Pounds": 50},
+            },
+            {
+                "geometry": {"type": "Point", "coordinates": [10, 10]},
+                "properties": {"Total_Pounds": 999},
+            },
+        ]
+        source_meta = {
+            "geometryType": "esriGeometryPoint",
+            "fields": [
+                {"name": "Total_Pounds", "type": "esriFieldTypeDouble"},
+                {"name": "COUNCIL", "type": "esriFieldTypeString"},
+            ],
+        }
+
+        with patch.object(
+            plugin,
+            "_fetch_aggregation_polygons",
+            new_callable=AsyncMock,
+            return_value=agg_polygons,
+        ), patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=source_meta,
+        ), patch.object(
+            plugin,
+            "_paged_geojson_fetch",
+            new_callable=AsyncMock,
+            return_value=source_features,
+        ):
+            text = await plugin._aggregate_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "aggregation_item_id": _AGG_ID,
+                    "group_by_field": "COUNCIL",
+                    "sum_fields": ["Total_Pounds"],
+                }
+            )
+
+        assert "Midtown" in text and "Fairview" in text
+        # Midtown: count 2, sum 300
+        assert "300" in text
+        # Fairview: count 1, sum 50
+        # Unmatched: 1
+        assert "Unmatched:** 1" in text
+
+    @pytest.mark.asyncio
+    async def test_rejects_unknown_group_field(self, plugin):
+        agg_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [
+                {"name": "OBJECTID", "type": "esriFieldTypeOID"},
+                {"name": "DISTRICT", "type": "esriFieldTypeString"},
+            ],
+        }
+        with patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=agg_meta,
+        ):
+            with pytest.raises(ValueError, match="group_by_field"):
+                await plugin._aggregate_by_polygon(
+                    {
+                        "source_item_id": _SOURCE_ID,
+                        "aggregation_item_id": _AGG_ID,
+                        "group_by_field": "NOT_A_FIELD",
+                    }
+                )
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_numeric_sum_field(self, plugin):
+        agg_polygons = [
+            {
+                "group": "A",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]
+                    ],
+                },
+            }
+        ]
+        # NAME exists but is a string → can't sum
+        source_meta = {
+            "geometryType": "esriGeometryPoint",
+            "fields": [
+                {"name": "NAME", "type": "esriFieldTypeString"},
+            ],
+        }
+        with patch.object(
+            plugin,
+            "_fetch_aggregation_polygons",
+            new_callable=AsyncMock,
+            return_value=agg_polygons,
+        ), patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=source_meta,
+        ):
+            with pytest.raises(ValueError, match="numeric"):
+                await plugin._aggregate_by_polygon(
+                    {
+                        "source_item_id": _SOURCE_ID,
+                        "aggregation_item_id": _AGG_ID,
+                        "group_by_field": "NAME",
+                        "sum_fields": ["NAME"],
+                    }
+                )
+
+    @pytest.mark.asyncio
+    async def test_aggregation_layer_cache_hits_on_second_call(self, plugin):
+        # A single container polygon
+        agg_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [{"name": "COUNCIL", "type": "esriFieldTypeString"}],
+        }
+        features = [
+            {
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]
+                    ],
+                },
+                "properties": {"COUNCIL": "Midtown"},
+            }
+        ]
+
+        resolve = AsyncMock(
+            return_value="https://services.arcgis.com/x/FeatureServer/0"
+        )
+        meta = AsyncMock(return_value=agg_meta)
+        paged = AsyncMock(return_value=features)
+        with patch.object(
+            plugin, "_resolve_layer_url", new=resolve
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new=meta
+        ), patch.object(
+            plugin, "_paged_geojson_fetch", new=paged
+        ):
+            r1 = await plugin._fetch_aggregation_polygons(
+                _AGG_ID, "COUNCIL", "1=1"
+            )
+            r2 = await plugin._fetch_aggregation_polygons(
+                _AGG_ID, "COUNCIL", "1=1"
+            )
+        assert r1 == r2
+        # Second call should NOT have refetched.
+        assert resolve.await_count == 1
+        assert meta.await_count == 1
+        assert paged.await_count == 1
+
+
+# ── filter_by_polygon ──────────────────────────────────────────────────
+
+
+class TestFilterByPolygon:
+    @pytest.fixture
+    def plugin(self, anchorage_config):
+        p = AnchorageGISPlugin(anchorage_config)
+        p.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        return p
+
+    @pytest.mark.asyncio
+    async def test_zero_polygon_container_returns_error_text(self, plugin):
+        container_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [{"name": "COUNCIL", "type": "esriFieldTypeString"}],
+        }
+        plugin.client = AsyncMock()
+        plugin.client.get = AsyncMock(
+            return_value=_ok_resp({"count": 0})
+        )
+        with patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=container_meta,
+        ), patch.object(
+            plugin,
+            "spatial_query_polygon",
+            new_callable=AsyncMock,
+        ) as sqp_mock:
+            text = await plugin._filter_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "container_item_id": _CONTAINER_ID,
+                    "container_where": "COUNCIL='Fairveiw'",
+                }
+            )
+        assert "matched 0" in text
+        assert sqp_mock.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_happy_path_delegates_to_spatial_query_polygon(self, plugin):
+        container_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [{"name": "COUNCIL", "type": "esriFieldTypeString"}],
+        }
+        plugin.client = AsyncMock()
+        plugin.client.get = AsyncMock(
+            return_value=_ok_resp({"count": 1})
+        )
+        with patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=container_meta,
+        ), patch.object(
+            plugin,
+            "spatial_query_polygon",
+            new_callable=AsyncMock,
+            return_value=[
+                {"id": 1, "desc": "Public camp report A"},
+                {"id": 2, "desc": "Public camp report B"},
+            ],
+        ) as sqp_mock:
+            text = await plugin._filter_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "container_item_id": _CONTAINER_ID,
+                    "container_where": "COUNCIL='Fairview'",
+                }
+            )
+
+        assert sqp_mock.await_count == 1
+        # Passed container_item_id + where through
+        call = sqp_mock.await_args
+        assert call.kwargs["filter_item_id"] == _CONTAINER_ID
+        assert "Fairview" in call.kwargs["filter_where"]
+        assert "Public camp report A" in text
+        assert "Container polygons matched:** 1" in text
+
+    @pytest.mark.asyncio
+    async def test_multi_polygon_container_passes_in_where_through(self, plugin):
+        container_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [{"name": "COUNCIL", "type": "esriFieldTypeString"}],
+        }
+        plugin.client = AsyncMock()
+        plugin.client.get = AsyncMock(
+            return_value=_ok_resp({"count": 3})
+        )
+        with patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=container_meta,
+        ), patch.object(
+            plugin,
+            "spatial_query_polygon",
+            new_callable=AsyncMock,
+            return_value=[{"id": 1}],
+        ) as sqp_mock:
+            text = await plugin._filter_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "container_item_id": _CONTAINER_ID,
+                    "container_where": (
+                        "COUNCIL IN ('Midtown','Fairview','Mountain View')"
+                    ),
+                }
+            )
+
+        assert "Container polygons matched:** 3" in text
+        call = sqp_mock.await_args
+        assert "Midtown" in call.kwargs["filter_where"]
+        assert "Fairview" in call.kwargs["filter_where"]
+
+    @pytest.mark.asyncio
+    async def test_missing_container_where_errors(self, plugin):
+        with pytest.raises(ValueError, match="container_where"):
+            await plugin._filter_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "container_item_id": _CONTAINER_ID,
+                }
+            )
+
+
+# ── Security / private-data / DoS threat model ────────────────────────
+
+
+class TestAggregateSecurity:
+    """The new tools accept SQL WHERE clauses, field names, and item IDs from
+    potentially untrusted callers. Verify each input surface is clamped down."""
+
+    @pytest.fixture
+    def plugin(self, anchorage_config):
+        p = AnchorageGISPlugin(anchorage_config)
+        p.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        return p
+
+    # --- Injection in SQL WHERE clauses ---
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "evil_where",
+        [
+            "1=1; DROP TABLE users",
+            "1=1 UNION SELECT * FROM secrets",
+            "1=1 -- comment",
+            "1=1 /* block */",
+            "SLEEP(10)",
+            "EXEC xp_cmdshell('dir')",
+        ],
+    )
+    async def test_source_where_rejects_sql_injection(
+        self, plugin, evil_where
+    ):
+        with pytest.raises(ValueError):
+            await plugin._aggregate_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "aggregation_item_id": _AGG_ID,
+                    "group_by_field": "COUNCIL",
+                    "source_where": evil_where,
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_container_where_rejects_sql_injection(self, plugin):
+        with pytest.raises(ValueError):
+            await plugin._filter_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "container_item_id": _CONTAINER_ID,
+                    "container_where": "COUNCIL='x'; DROP TABLE users",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_agg_where_rejects_oversized_payload(self, plugin):
+        # WhereValidator caps at 2000 chars. Anything above that is a
+        # likely cache-busting or fuzz attempt — reject.
+        huge = "A" * 3000
+        with pytest.raises(ValueError):
+            await plugin._aggregate_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "aggregation_item_id": _AGG_ID,
+                    "group_by_field": "COUNCIL",
+                    "agg_where": huge,
+                }
+            )
+
+    # --- Field-name injection ---
+
+    @pytest.mark.asyncio
+    async def test_group_by_field_must_exist_on_layer(self, plugin):
+        # An attacker-supplied "group_by_field" like "*,1" must be
+        # rejected — it's not a real field on the aggregation layer.
+        agg_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [{"name": "COUNCIL", "type": "esriFieldTypeString"}],
+        }
+        with patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=agg_meta,
+        ):
+            with pytest.raises(ValueError, match="group_by_field"):
+                await plugin._aggregate_by_polygon(
+                    {
+                        "source_item_id": _SOURCE_ID,
+                        "aggregation_item_id": _AGG_ID,
+                        "group_by_field": "*,1",
+                    }
+                )
+
+    @pytest.mark.asyncio
+    async def test_sum_fields_must_exist_on_source_layer(self, plugin):
+        # A string like "OBJECTID,1=1" isn't a real field name and must
+        # fall through the exact-match check.
+        agg_polygons = [
+            {
+                "group": "A",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]
+                    ],
+                },
+            }
+        ]
+        source_meta = {
+            "geometryType": "esriGeometryPoint",
+            "fields": [
+                {"name": "OBJECTID", "type": "esriFieldTypeOID"},
+                {"name": "LBS", "type": "esriFieldTypeInteger"},
+            ],
+        }
+        with patch.object(
+            plugin,
+            "_fetch_aggregation_polygons",
+            new_callable=AsyncMock,
+            return_value=agg_polygons,
+        ), patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=source_meta,
+        ):
+            with pytest.raises(ValueError):
+                await plugin._aggregate_by_polygon(
+                    {
+                        "source_item_id": _SOURCE_ID,
+                        "aggregation_item_id": _AGG_ID,
+                        "group_by_field": "OBJECTID",
+                        "sum_fields": ["OBJECTID,1=1"],
+                    }
+                )
+
+    # --- Item-ID format (SSRF via fabricated URLs starts here) ---
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "",
+            "not-hex",
+            "a" * 31,  # too short
+            "a" * 33,  # too long
+            "../../../etc/passwd",
+            "https://evil.com/steal",
+        ],
+    )
+    async def test_aggregate_rejects_invalid_item_ids(self, plugin, bad_id):
+        with pytest.raises(ValueError):
+            await plugin._aggregate_by_polygon(
+                {
+                    "source_item_id": bad_id,
+                    "aggregation_item_id": _AGG_ID,
+                    "group_by_field": "COUNCIL",
+                }
+            )
+        with pytest.raises(ValueError):
+            await plugin._aggregate_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "aggregation_item_id": bad_id,
+                    "group_by_field": "COUNCIL",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_filter_rejects_invalid_item_ids(self, plugin):
+        with pytest.raises(ValueError):
+            await plugin._filter_by_polygon(
+                {
+                    "source_item_id": "not-hex",
+                    "container_item_id": _CONTAINER_ID,
+                    "container_where": "COUNCIL='X'",
+                }
+            )
+
+    # --- Enum validation ---
+
+    @pytest.mark.asyncio
+    async def test_rejects_unknown_centroid_mode(self, plugin):
+        with pytest.raises(ValueError, match="centroid_mode"):
+            await plugin._aggregate_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "aggregation_item_id": _AGG_ID,
+                    "group_by_field": "COUNCIL",
+                    "centroid_mode": "evil",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejects_unknown_overlap_policy(self, plugin):
+        with pytest.raises(ValueError, match="overlap_policy"):
+            await plugin._aggregate_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "aggregation_item_id": _AGG_ID,
+                    "group_by_field": "COUNCIL",
+                    "overlap_policy": "drop_table",
+                }
+            )
+
+    # --- execute_tool surface wraps errors in a clean ToolResult ---
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_wraps_injection_errors(
+        self, anchorage_config
+    ):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        result = await plugin.execute_tool(
+            "aggregate_by_polygon",
+            {
+                "source_item_id": _SOURCE_ID,
+                "aggregation_item_id": _AGG_ID,
+                "group_by_field": "COUNCIL",
+                "source_where": "1=1; DROP TABLE x",
+            },
+        )
+        assert result.success is False
+        # Error surfaces the validation failure rather than crashing
+        assert (
+            "Forbidden" in (result.error_message or "")
+            or "WHERE" in (result.error_message or "")
+        )
+
+
+class TestUpstreamLoad:
+    """Guard against amplification into the upstream ESRI server: bound
+    request counts, cap fetch volumes, and ensure the aggregation-layer
+    cache both serves repeats and refuses unbounded growth."""
+
+    @pytest.fixture
+    def plugin(self, anchorage_config):
+        p = AnchorageGISPlugin(anchorage_config)
+        p.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        return p
+
+    @pytest.mark.asyncio
+    async def test_max_source_features_hard_capped(self, plugin):
+        # Even if a caller passes 1,000,000, the server-side cap holds.
+        agg_polygons = [
+            {
+                "group": "A",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]
+                    ],
+                },
+            }
+        ]
+        source_meta = {
+            "geometryType": "esriGeometryPoint",
+            "fields": [{"name": "OBJECTID", "type": "esriFieldTypeOID"}],
+        }
+        paged = AsyncMock(return_value=[])
+        with patch.object(
+            plugin,
+            "_fetch_aggregation_polygons",
+            new_callable=AsyncMock,
+            return_value=agg_polygons,
+        ), patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=source_meta,
+        ), patch.object(
+            plugin, "_paged_geojson_fetch", new=paged
+        ):
+            await plugin._aggregate_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "aggregation_item_id": _AGG_ID,
+                    "group_by_field": "OBJECTID",
+                    "max_source_features": 1_000_000,
+                }
+            )
+        call = paged.await_args
+        assert call.kwargs["limit"] <= plugin.AGG_SOURCE_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_paged_fetch_stops_on_short_page(self, plugin):
+        # Simulate a server whose first page returns fewer features than
+        # requested — we must not keep paging forever.
+        short_page = [
+            {"geometry": {"type": "Point", "coordinates": [0, 0]}, "properties": {}}
+        ]
+        resp = _ok_resp({"features": short_page})
+        plugin.client = AsyncMock()
+        plugin.client.get = AsyncMock(return_value=resp)
+
+        features = await plugin._paged_geojson_fetch(
+            "https://services.arcgis.com/x/FeatureServer/0",
+            where="1=1",
+            out_fields="*",
+            limit=5000,
+        )
+        # Only one upstream request, not 5 (5000/1000).
+        assert plugin.client.get.await_count == 1
+        assert len(features) == 1
+
+    @pytest.mark.asyncio
+    async def test_cache_evicts_oldest_under_pressure(self, plugin):
+        # Fill the cache past its cap with synthetic entries and verify
+        # the LRU drops the oldest. This is the mitigation for
+        # cache-busting DoS via agg_where variants like
+        # "1=1 AND 1=1", "1=1 AND 2=2", etc.
+        plugin.AGG_CACHE_MAX_ENTRIES = 3  # tighten for the test
+
+        agg_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [{"name": "COUNCIL", "type": "esriFieldTypeString"}],
+        }
+        features = [
+            {
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]
+                    ],
+                },
+                "properties": {"COUNCIL": "X"},
+            }
+        ]
+
+        with patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=agg_meta,
+        ), patch.object(
+            plugin,
+            "_paged_geojson_fetch",
+            new_callable=AsyncMock,
+            return_value=features,
+        ):
+            # Five distinct WHERE variants
+            for i in range(5):
+                await plugin._fetch_aggregation_polygons(
+                    _AGG_ID, "COUNCIL", f"OBJECTID<>{i}"
+                )
+
+        assert len(plugin._agg_layer_cache) == 3
+        # Oldest (i=0, i=1) should be gone; newest (i=4) kept.
+        keys = list(plugin._agg_layer_cache.keys())
+        wheres = [k[2] for k in keys]
+        assert "OBJECTID<>0" not in wheres
+        assert "OBJECTID<>1" not in wheres
+        assert "OBJECTID<>4" in wheres
+
+    @pytest.mark.asyncio
+    async def test_cache_expiry_refetches_and_does_not_accumulate(
+        self, plugin
+    ):
+        # Expired entries must refresh, not pile up as zombies.
+        plugin.AGG_CACHE_TTL_SECONDS = 0  # instant expiry
+
+        agg_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [{"name": "COUNCIL", "type": "esriFieldTypeString"}],
+        }
+        features = [
+            {
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]
+                    ],
+                },
+                "properties": {"COUNCIL": "X"},
+            }
+        ]
+        paged = AsyncMock(return_value=features)
+        with patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=agg_meta,
+        ), patch.object(
+            plugin, "_paged_geojson_fetch", new=paged
+        ):
+            await plugin._fetch_aggregation_polygons(
+                _AGG_ID, "COUNCIL", "1=1"
+            )
+            await plugin._fetch_aggregation_polygons(
+                _AGG_ID, "COUNCIL", "1=1"
+            )
+        # Both calls refetched (TTL 0 means always expired)
+        assert paged.await_count == 2
+        # Cache has exactly one entry for this key, not two
+        assert len(plugin._agg_layer_cache) == 1
+
+    @pytest.mark.asyncio
+    async def test_filter_zero_polygon_short_circuits_before_spatial_query(
+        self, plugin
+    ):
+        # The 0-polygon error path must NOT invoke spatial_query_polygon:
+        # that would be a wasted request and potentially expensive.
+        container_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [{"name": "COUNCIL", "type": "esriFieldTypeString"}],
+        }
+        plugin.client = AsyncMock()
+        plugin.client.get = AsyncMock(return_value=_ok_resp({"count": 0}))
+        with patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=container_meta,
+        ), patch.object(
+            plugin,
+            "spatial_query_polygon",
+            new_callable=AsyncMock,
+        ) as sqp:
+            await plugin._filter_by_polygon(
+                {
+                    "source_item_id": _SOURCE_ID,
+                    "container_item_id": _CONTAINER_ID,
+                    "container_where": "COUNCIL='nope'",
+                }
+            )
+        assert sqp.await_count == 0
+
+
+class TestPrivateDataSurface:
+    """These tools must not expose data the existing query_data does not
+    also expose: no portal-level metadata leakage, no error messages that
+    echo raw upstream responses."""
+
+    @pytest.fixture
+    def plugin(self, anchorage_config):
+        p = AnchorageGISPlugin(anchorage_config)
+        p.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        return p
+
+    @pytest.mark.asyncio
+    async def test_unknown_field_error_does_not_dump_full_schema(
+        self, plugin
+    ):
+        # An aggregation layer might have hundreds of internal fields.
+        # Error messages should hint at the first handful, not paste the
+        # whole schema (which could leak unpublished/internal columns).
+        agg_meta = {
+            "geometryType": "esriGeometryPolygon",
+            "fields": [
+                {"name": f"FIELD_{i:03d}", "type": "esriFieldTypeString"}
+                for i in range(200)
+            ],
+        }
+        with patch.object(
+            plugin,
+            "_resolve_layer_url",
+            new_callable=AsyncMock,
+            return_value="https://services.arcgis.com/x/FeatureServer/0",
+        ), patch.object(
+            plugin,
+            "_fetch_layer_meta",
+            new_callable=AsyncMock,
+            return_value=agg_meta,
+        ):
+            with pytest.raises(ValueError) as exc:
+                await plugin._aggregate_by_polygon(
+                    {
+                        "source_item_id": _SOURCE_ID,
+                        "aggregation_item_id": _AGG_ID,
+                        "group_by_field": "NOT_A_FIELD",
+                    }
+                )
+        msg = str(exc.value)
+        # Tolerable hint: first ~12 names plus an ellipsis marker
+        assert msg.count("FIELD_") <= 20
+        assert "..." in msg
+
+
+# ── Layer URL helper ───────────────────────────────────────────────────
+
+
+class TestEnsureLayerUrl:
+    def test_appends_layer_to_feature_server_root(self):
+        result = AnchorageGISPlugin._ensure_layer_url(
+            "https://services.arcgis.com/xyz/FeatureServer"
+        )
+        assert result == "https://services.arcgis.com/xyz/FeatureServer/0"
+
+    def test_preserves_existing_layer_index(self):
+        result = AnchorageGISPlugin._ensure_layer_url(
+            "https://services.arcgis.com/xyz/FeatureServer/3"
+        )
+        assert result == "https://services.arcgis.com/xyz/FeatureServer/3"
+
+    def test_handles_map_server(self):
+        result = AnchorageGISPlugin._ensure_layer_url(
+            "https://services.arcgis.com/xyz/MapServer"
+        )
+        assert result == "https://services.arcgis.com/xyz/MapServer/0"
+
+    def test_strips_trailing_slash(self):
+        result = AnchorageGISPlugin._ensure_layer_url(
+            "https://services.arcgis.com/xyz/FeatureServer/"
+        )
+        assert result == "https://services.arcgis.com/xyz/FeatureServer/0"
+
+
+# ── Formatters ─────────────────────────────────────────────────────────
+
+
+class TestFormatters:
+    def test_format_summary(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        item = {
+            "id": "abc123",
+            "title": "Flood Map",
+            "type": "Web Mapping Application",
+            "snippet": "Shows flood zones in Anchorage",
+            "tags": ["flood", "hazard"],
+            "url": "https://example.com/app",
+        }
+        result = plugin._format_summary(item)
+        assert "Flood Map" in result
+        assert "abc123" in result
+        assert "flood" in result
+
+    def test_format_details(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        item = {
+            "id": "abc123",
+            "title": "Zoning",
+            "type": "Feature Service",
+            "snippet": "Zoning summary",
+            "description": "Full zoning description",
+            "tags": ["zoning"],
+            "categories": ["Planning"],
+            "owner": "admin",
+            "access": "public",
+            "numViews": 1234,
+            "created": 1700000000000,
+            "modified": 1700000000000,
+            "url": "https://example.com/FeatureServer",
+            "extent": [[-150.0, 61.0], [-149.0, 61.5]],
+        }
+        result = plugin._format_details(item)
+        assert "## Zoning" in result
+        assert "public" in result
+        assert "1,234" in result
+        assert "Spatial Extent" in result
+
+    def test_ms_to_date(self):
+        assert AnchorageGISPlugin._ms_to_date(1700000000000) == "2023-11-14"
+        assert AnchorageGISPlugin._ms_to_date(None) == "Unknown"
+        assert AnchorageGISPlugin._ms_to_date("invalid") == "Unknown"
+
+    def test_format_query_results_with_geometry(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        records = [
+            {
+                "name": "Kincaid Park",
+                "__geometry__": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[-149.9, 61.1], [-149.8, 61.1],
+                         [-149.8, 61.2], [-149.9, 61.1]]
+                    ],
+                },
+            }
+        ]
+        text = plugin._format_query_results(records, limit=50)
+        assert "Kincaid Park" in text
+        assert "geometry (GeoJSON, WGS84)" in text
+        assert "Polygon" in text
+        # __geometry__ key itself should not appear as a "field"
+        assert "  __geometry__:" not in text
+
+    def test_format_query_results_truncates_large_geometry(
+        self, anchorage_config
+    ):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        # Build a polygon with enough vertices to exceed GEOMETRY_STR_MAX
+        ring = [[-149.9 + i * 0.0001, 61.1 + i * 0.0001] for i in range(500)]
+        records = [
+            {
+                "name": "Huge Shape",
+                "__geometry__": {
+                    "type": "Polygon",
+                    "coordinates": [ring],
+                },
+            }
+        ]
+        text = plugin._format_query_results(records, limit=50)
+        assert "truncated" in text
+        assert "chars total" in text
+
+
+# ── Config schema ──────────────────────────────────────────────────────
+
+
+class TestConfigSchema:
+    def test_config_schema_valid(self):
+        config = AnchorageGISPluginConfig(
+            portal_base_url="https://muniorg.maps.arcgis.com/sharing/rest",
+            gallery_group_id="c34ed10758ec4f4eb8aa6826ee5be3ff",
+            org_id="Ce3DhLRthdwbHlfF",
+            city_name="Municipality of Anchorage",
+            gallery_url=(
+                "https://muniorg.maps.arcgis.com/apps/instant/filtergallery/"
+                "index.html?appid=4dac7569f1cc4beb9f22ce168c899a30"
+            ),
+            timeout=30,
+        )
+        assert config.city_name == "Municipality of Anchorage"
+        assert config.org_id == "Ce3DhLRthdwbHlfF"
+        assert config.timeout == 30
+
+    def test_config_schema_rejects_extra_fields(self):
+        with pytest.raises(ValidationError):
+            AnchorageGISPluginConfig(
+                portal_base_url="https://muniorg.maps.arcgis.com/sharing/rest",
+                gallery_group_id="test",
+                org_id="test",
+                city_name="Test",
+                gallery_url="https://example.com/gallery",
+                unknown_field="oops",
+            )
+
+    def test_config_schema_strips_trailing_slash(self):
+        config = AnchorageGISPluginConfig(
+            portal_base_url="https://muniorg.maps.arcgis.com/sharing/rest/",
+            gallery_group_id="test",
+            org_id="test",
+            city_name="Test",
+            gallery_url="https://example.com/gallery",
+        )
+        assert config.portal_base_url == (
+            "https://muniorg.maps.arcgis.com/sharing/rest"
+        )
+
+    def test_config_schema_rejects_invalid_url(self):
+        with pytest.raises(ValidationError):
+            AnchorageGISPluginConfig(
+                portal_base_url="not-a-url",
+                gallery_group_id="test",
+                org_id="test",
+                city_name="Test",
+                gallery_url="https://example.com/gallery",
+            )
+
+    def test_config_schema_rejects_empty_portal_url(self):
+        with pytest.raises(ValidationError):
+            AnchorageGISPluginConfig(
+                portal_base_url="",
+                gallery_group_id="test",
+                org_id="test",
+                city_name="Test",
+                gallery_url="https://example.com/gallery",
+            )
+
+    def test_config_schema_rejects_empty_gallery_url(self):
+        with pytest.raises(ValidationError):
+            AnchorageGISPluginConfig(
+                portal_base_url="https://muniorg.maps.arcgis.com/sharing/rest",
+                gallery_group_id="test",
+                org_id="test",
+                city_name="Test",
+                gallery_url="",
+            )
