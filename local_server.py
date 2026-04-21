@@ -73,6 +73,7 @@ async def start_server():
 
     app = web.Application()
     app.router.add_post("/", handle_mcp_request)
+    app.router.add_post("/mcp", handle_mcp_request)
 
     runner = web.AppRunner(app)
     await runner.setup()
