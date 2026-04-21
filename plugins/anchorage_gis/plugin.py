@@ -2119,10 +2119,10 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="get_layer_schema",
                 description=(
-                    f"Fetch the schema (field names, types, aliases, coded "
-                    f"domains) for a Feature Service or Map Service layer. "
-                    f"Use to discover what attributes a dataset contains. "
-                    f"Accepts an ArcGIS item ID or a direct service URL."
+                    "Fetch the schema (field names, types, aliases, coded "
+                    "domains) for a Feature Service or Map Service layer. "
+                    "Use to discover what attributes a dataset contains. "
+                    "Accepts an ArcGIS item ID or a direct service URL."
                 ),
                 input_schema={
                     "type": "object",
