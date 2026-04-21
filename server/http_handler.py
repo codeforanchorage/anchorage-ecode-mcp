@@ -136,8 +136,8 @@ class UniversalHTTPHandler:
         """
         return {
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "content-type",
+            "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "content-type, accept, mcp-session-id",
             "Access-Control-Expose-Headers": "x-request-id, mcp-session-id",
         }
 
@@ -386,8 +386,8 @@ class UniversalHTTPHandler:
         request_id = request_id or "unknown"
         cors_headers = {
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "content-type",
+            "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "content-type, accept, mcp-session-id",
             "Access-Control-Expose-Headers": "x-request-id, mcp-session-id",
             "Access-Control-Max-Age": "86400",
             "Content-Type": "application/json",

@@ -195,8 +195,14 @@ class TestCORS:
             )
 
             assert headers["Access-Control-Allow-Origin"] == "*"
-            assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
-            assert headers["Access-Control-Allow-Headers"] == "content-type"
+            assert (
+                headers["Access-Control-Allow-Methods"]
+                == "GET, POST, DELETE, OPTIONS"
+            )
+            assert (
+                headers["Access-Control-Allow-Headers"]
+                == "content-type, accept, mcp-session-id"
+            )
 
     def test_handle_options_returns_cors_headers(self):
         """Test that OPTIONS handler returns CORS headers."""
@@ -206,8 +212,14 @@ class TestCORS:
 
         assert status == 200
         assert headers["Access-Control-Allow-Origin"] == "*"
-        assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
-        assert headers["Access-Control-Allow-Headers"] == "content-type"
+        assert (
+            headers["Access-Control-Allow-Methods"]
+            == "GET, POST, DELETE, OPTIONS"
+        )
+        assert (
+            headers["Access-Control-Allow-Headers"]
+            == "content-type, accept, mcp-session-id"
+        )
         assert headers["Access-Control-Max-Age"] == "86400"
         assert body == ""
 
