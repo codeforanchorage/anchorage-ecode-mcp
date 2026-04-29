@@ -72,11 +72,11 @@ class AnchorageGISPlugin(DataPlugin):
         "Table",
     }
 
-    # Host suffixes we will make outbound HTTP calls to. Anything else is
-    # rejected to prevent SSRF via user-supplied service URLs or item URLs
-    # returned from search results. Covers Esri-hosted (*.arcgis.com) and
-    # MOA on-prem GIS (*.muni.org).
-    ALLOWED_HOST_SUFFIXES = (".arcgis.com", ".muni.org")
+    # On-prem MOA hosts we'll proxy without further checks. ArcGIS Online
+    # hosts (*.arcgis.com) are handled separately in _validate_service_url:
+    # they must either be this org's portal or carry the configured org_id
+    # in the URL path, so we can't be coerced into proxying other tenants.
+    ONPREM_HOST_SUFFIXES = (".muni.org",)
 
     ITEM_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
@@ -167,12 +167,23 @@ class AnchorageGISPlugin(DataPlugin):
     async def _search_org_layers(
         self, query: str, item_types: List[str], limit: int
     ) -> List[Dict[str, Any]]:
-        """Search the organization's spatial layers."""
+        """Search the organization's spatial layers.
+
+        We scope the upstream query with ``orgid:<org_id>``; the
+        post-filter below is defense-in-depth in case Esri ever returns
+        results that don't honor that filter (e.g. shared items, cross-
+        org content, indexing quirks).
+        """
         type_filter = " OR ".join(f'type:"{t}"' for t in item_types)
         clauses = [f"orgid:{self.plugin_config.org_id}", f"({type_filter})"]
         if query:
             clauses.append(query)
-        return await self._run_search(" AND ".join(clauses), limit)
+        results = await self._run_search(" AND ".join(clauses), limit)
+        configured = (self.plugin_config.org_id or "").lower()
+        return [
+            r for r in results
+            if (r.get("orgId") or "").lower() == configured
+        ]
 
     # ── Formatters ────────────────────────────────────────────────────────
 
@@ -328,7 +339,14 @@ class AnchorageGISPlugin(DataPlugin):
         return gallery + layers
 
     async def get_dataset(self, dataset_id: str) -> Dict[str, Any]:
-        """Get item details by ArcGIS item ID."""
+        """Get item details by ArcGIS item ID.
+
+        Rejects items not owned by the configured org. ArcGIS portals
+        will happily return any *public* item from any org, so without
+        this check a caller could browse arbitrary ArcGIS Online content
+        through this MCP and use item descriptions as a prompt-injection
+        vector against the calling LLM.
+        """
         dataset_id = self._validate_item_id(dataset_id)
         resp = await self.client.get(
             f"{self.plugin_config.portal_base_url}/content/items/{dataset_id}",
@@ -340,7 +358,20 @@ class AnchorageGISPlugin(DataPlugin):
             raise RuntimeError(
                 item["error"].get("message", str(item["error"]))
             )
+        self._assert_owned_by_configured_org(item)
         return item
+
+    def _assert_owned_by_configured_org(self, item: Dict[str, Any]) -> None:
+        """Fail-closed ownership check. Missing orgId is also a rejection."""
+        configured = (self.plugin_config.org_id or "").lower()
+        item_org = (item.get("orgId") or "").lower()
+        if not item_org or item_org != configured:
+            raise ValueError(
+                f"Item {item.get('id')!r} belongs to org "
+                f"{item.get('orgId')!r}, not the configured org "
+                f"{self.plugin_config.org_id!r}; this MCP only serves "
+                f"{self.plugin_config.city_name} data."
+            )
 
     # Cap on records when geometry is requested — polygons can be
     # orders of magnitude larger than attribute rows, so we keep this
@@ -726,6 +757,13 @@ class AnchorageGISPlugin(DataPlugin):
             ]
         return [f.get("attributes", {}) for f in features]
 
+    # Caps on inbound filter polygons. ArcGIS will accept far larger geometries,
+    # but huge inputs translate into huge POST bodies upstream and slow
+    # spatial-query plans. Real Anchorage admin boundaries (council districts,
+    # parks, plats) sit well under these limits. Raise with evidence.
+    MAX_FILTER_RINGS = 1000
+    MAX_FILTER_COORDS = 10000
+
     @staticmethod
     def _geojson_to_esri_polygon(geojson: Any) -> Dict[str, Any]:
         """Convert GeoJSON Polygon / MultiPolygon / Feature to Esri polygon JSON."""
@@ -753,6 +791,24 @@ class AnchorageGISPlugin(DataPlugin):
             )
         if not rings:
             raise ValueError("filter_geometry has no polygon rings")
+
+        ring_count = len(rings)
+        if ring_count > AnchorageGISPlugin.MAX_FILTER_RINGS:
+            raise ValueError(
+                f"filter_geometry has {ring_count} rings; "
+                f"max is {AnchorageGISPlugin.MAX_FILTER_RINGS}. "
+                f"Simplify the polygon or use filter_item_id with a "
+                f"published boundary layer."
+            )
+        coord_count = sum(len(r) for r in rings if isinstance(r, list))
+        if coord_count > AnchorageGISPlugin.MAX_FILTER_COORDS:
+            raise ValueError(
+                f"filter_geometry has {coord_count} coordinates; "
+                f"max is {AnchorageGISPlugin.MAX_FILTER_COORDS}. "
+                f"Simplify the polygon (e.g. mapshaper at 1% tolerance) "
+                f"or use filter_item_id with a published boundary layer."
+            )
+
         return {
             "rings": rings,
             "spatialReference": {"wkid": 4326},
@@ -1047,6 +1103,12 @@ class AnchorageGISPlugin(DataPlugin):
                 f"No services found matching '{effective_service_filter}'."
             )
 
+        # Bound concurrent ArcGIS calls. Without this, a 20-candidate search
+        # can fire 20 service-root fetches plus 20*N layer-schema fetches in
+        # parallel against the upstream portal — a polite-burst that still
+        # looks like a small DDoS to muniorg.maps.arcgis.com.
+        inspect_sem = asyncio.Semaphore(5)
+
         async def check_service(
             item: Dict[str, Any],
         ) -> List[Dict[str, Any]]:
@@ -1057,6 +1119,12 @@ class AnchorageGISPlugin(DataPlugin):
                 self._validate_service_url(url)
             except ValueError:
                 return []
+            async with inspect_sem:
+                return await _inspect_service(item, url)
+
+        async def _inspect_service(
+            item: Dict[str, Any], url: str
+        ) -> List[Dict[str, Any]]:
             try:
                 # Fetch service root to discover all layers
                 resp = await self.client.get(
@@ -1160,12 +1228,20 @@ class AnchorageGISPlugin(DataPlugin):
 
     # ── Static helpers ────────────────────────────────────────────────────
 
-    @classmethod
-    def _validate_service_url(cls, url: str) -> str:
+    def _validate_service_url(self, url: str) -> str:
         """Reject any URL whose host is not on the allowlist.
 
-        Prevents SSRF via user-supplied service URLs and item URLs returned
-        from portal search results.
+        Prevents SSRF and tenant-scope creep via user-supplied service
+        URLs or item URLs returned from portal search results.
+
+        For ``*.arcgis.com`` (ArcGIS Online), the URL must either match
+        this org's portal host (e.g. ``muniorg.maps.arcgis.com``) or
+        include the configured ``org_id`` as the first path segment
+        (e.g. ``services.arcgis.com/<org_id>/...``,
+        ``tiles7.arcgis.com/<org_id>/...``). This keeps the MCP from
+        being used as an open proxy for arbitrary ArcGIS Online tenants.
+
+        On-prem MOA hosts (``*.muni.org``) are accepted by suffix.
         """
         if not url:
             raise ValueError("service URL cannot be empty")
@@ -1177,15 +1253,36 @@ class AnchorageGISPlugin(DataPlugin):
         host = (parsed.hostname or "").lower()
         if not host:
             raise ValueError("service URL must include a hostname")
-        if not any(
+
+        if any(
             host == suffix.lstrip(".") or host.endswith(suffix)
-            for suffix in cls.ALLOWED_HOST_SUFFIXES
+            for suffix in self.ONPREM_HOST_SUFFIXES
         ):
+            return url
+
+        if host == "arcgis.com" or host.endswith(".arcgis.com"):
+            portal_host = self._portal_host
+            if portal_host and host == portal_host:
+                return url
+            org_id = (self.plugin_config.org_id or "").lower() if self.plugin_config else ""
+            if org_id and parsed.path.lower().startswith(f"/{org_id}/"):
+                return url
             raise ValueError(
-                f"service URL host {host!r} is not on the allowlist "
-                f"({', '.join(cls.ALLOWED_HOST_SUFFIXES)})"
+                f"service URL host {host!r} (path {parsed.path!r}) is not "
+                f"scoped to org {org_id!r}; refusing to proxy other "
+                f"ArcGIS Online tenants"
             )
-        return url
+
+        raise ValueError(
+            f"service URL host {host!r} is not on the allowlist"
+        )
+
+    @property
+    def _portal_host(self) -> str:
+        """Hostname of the configured ArcGIS portal (lowercased)."""
+        if not self.plugin_config or not self.plugin_config.portal_base_url:
+            return ""
+        return (urlparse(self.plugin_config.portal_base_url).hostname or "").lower()
 
     @classmethod
     def _validate_item_id(cls, item_id: str) -> str:
@@ -1285,8 +1382,10 @@ class AnchorageGISPlugin(DataPlugin):
     # Safety cap on source features pulled for a single aggregation call.
     # A council-by-council rollup of a city-wide dataset is typically a few
     # hundred to a few thousand features; beyond this the analysis is
-    # probably better served by a server-side stats endpoint.
-    AGG_SOURCE_LIMIT = 5000
+    # probably better served by a server-side stats endpoint. 2000 is the
+    # tightest value that still covers all real Anchorage rollups observed
+    # in CloudWatch — raise only with evidence of legitimate truncation.
+    AGG_SOURCE_LIMIT = 2000
 
     # ArcGIS maxRecordCount is usually 1000 or 2000. We page through with
     # resultOffset at this step until AGG_SOURCE_LIMIT is reached.
@@ -1544,11 +1643,154 @@ class AnchorageGISPlugin(DataPlugin):
             return (float(v[0]), float(v[1]))
         return centroid
 
+    # ── Polyline reduction helpers ────────────────────────────────────────
+    # Coordinates arrive in WGS84 (outSR=4326) so segment lengths are in
+    # degrees. That's fine for finding a midpoint — the result is exact in
+    # Euclidean degree-space and still lies on the line. Anchorage spans ~3°
+    # at lat 61°N where 1° lon ≈ 0.5 × 111 km, so the along-line position is
+    # geodesically biased ~2× longward, but that bias is shared by the line
+    # itself (same projection) so the chosen point lands on the right segment.
+    @staticmethod
+    def _segment_length(p1: List[float], p2: List[float]) -> float:
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        return (dx * dx + dy * dy) ** 0.5
+
+    @classmethod
+    def _polyline_total_length(cls, coords: List[List[float]]) -> float:
+        n = len(coords)
+        if n < 2:
+            return 0.0
+        return sum(
+            cls._segment_length(coords[i], coords[i + 1])
+            for i in range(n - 1)
+        )
+
+    @classmethod
+    def _polyline_point_at_length(
+        cls, coords: List[List[float]], target: float
+    ) -> Optional[Tuple[float, float]]:
+        """Walk the polyline and return the point at `target` arc length."""
+        n = len(coords)
+        if n == 0:
+            return None
+        if n == 1 or target <= 0:
+            return (float(coords[0][0]), float(coords[0][1]))
+        accum = 0.0
+        for i in range(n - 1):
+            seg = cls._segment_length(coords[i], coords[i + 1])
+            if accum + seg >= target:
+                t = (target - accum) / seg if seg > 0 else 0.0
+                x = coords[i][0] + t * (coords[i + 1][0] - coords[i][0])
+                y = coords[i][1] + t * (coords[i + 1][1] - coords[i][1])
+                return (float(x), float(y))
+            accum += seg
+        return (float(coords[-1][0]), float(coords[-1][1]))
+
+    @classmethod
+    def _polyline_midpoint(
+        cls, coords: List[List[float]]
+    ) -> Optional[Tuple[float, float]]:
+        """Midpoint along a LineString by arc length (always lies on the line)."""
+        total = cls._polyline_total_length(coords)
+        return cls._polyline_point_at_length(coords, total / 2.0)
+
+    @classmethod
+    def _polyline_centroid(
+        cls, coords: List[List[float]]
+    ) -> Optional[Tuple[float, float]]:
+        """Length-weighted centroid of a LineString.
+
+        For a curved or U-shaped line the result can fall off the line.
+        Use _polyline_midpoint when the point must lie on the line itself.
+        """
+        n = len(coords)
+        if n == 0:
+            return None
+        if n == 1:
+            return (float(coords[0][0]), float(coords[0][1]))
+        sum_x = 0.0
+        sum_y = 0.0
+        sum_len = 0.0
+        for i in range(n - 1):
+            seg = cls._segment_length(coords[i], coords[i + 1])
+            mid_x = (coords[i][0] + coords[i + 1][0]) / 2.0
+            mid_y = (coords[i][1] + coords[i + 1][1]) / 2.0
+            sum_x += mid_x * seg
+            sum_y += mid_y * seg
+            sum_len += seg
+        if sum_len == 0:
+            sx = sum(p[0] for p in coords) / n
+            sy = sum(p[1] for p in coords) / n
+            return (float(sx), float(sy))
+        return (sum_x / sum_len, sum_y / sum_len)
+
+    @classmethod
+    def _multilinestring_midpoint(
+        cls, lines: List[List[List[float]]]
+    ) -> Optional[Tuple[float, float]]:
+        """Midpoint along the concatenated arc length of all sub-lines."""
+        if not lines:
+            return None
+        sub_lengths = [cls._polyline_total_length(line) for line in lines]
+        total = sum(sub_lengths)
+        if total == 0:
+            for line in lines:
+                if line:
+                    return (float(line[0][0]), float(line[0][1]))
+            return None
+        target = total / 2.0
+        accum = 0.0
+        for line, seg_total in zip(lines, sub_lengths):
+            if accum + seg_total >= target:
+                return cls._polyline_point_at_length(line, target - accum)
+            accum += seg_total
+        for line in reversed(lines):
+            if line:
+                return (float(line[-1][0]), float(line[-1][1]))
+        return None
+
+    @classmethod
+    def _multilinestring_centroid(
+        cls, lines: List[List[List[float]]]
+    ) -> Optional[Tuple[float, float]]:
+        """Length-weighted centroid of a MultiLineString."""
+        if not lines:
+            return None
+        sum_x = 0.0
+        sum_y = 0.0
+        sum_len = 0.0
+        for line in lines:
+            seg_total = cls._polyline_total_length(line)
+            if seg_total == 0:
+                continue
+            c = cls._polyline_centroid(line)
+            if c is None:
+                continue
+            sum_x += c[0] * seg_total
+            sum_y += c[1] * seg_total
+            sum_len += seg_total
+        if sum_len == 0:
+            for line in lines:
+                if line:
+                    return (float(line[0][0]), float(line[0][1]))
+            return None
+        return (sum_x / sum_len, sum_y / sum_len)
+
     @classmethod
     def _feature_to_point(
         cls, geometry: Dict[str, Any], centroid_mode: str
     ) -> Optional[Tuple[float, float]]:
-        """Reduce a feature's geometry to a single (lon, lat) point."""
+        """Reduce a feature's geometry to a single (lon, lat) point.
+
+        Handles Point/MultiPoint, LineString/MultiLineString (e.g. road
+        centerlines, trails, transit routes), and Polygon/MultiPolygon.
+        For lines, `centroid_mode` has line-specific meaning:
+          - 'centroid' = length-weighted centroid (cheap; can fall off the line)
+          - 'representative_point' / 'auto' = midpoint along arc length
+            (always lies on the line — the right default for "which polygon
+            does this road segment belong to" bucketing).
+        """
         if not geometry:
             return None
         gtype = geometry.get("type", "")
@@ -1558,6 +1800,20 @@ class AnchorageGISPlugin(DataPlugin):
         if gtype == "MultiPoint":
             coords = geometry.get("coordinates") or []
             return (float(coords[0][0]), float(coords[0][1])) if coords else None
+        if gtype == "LineString":
+            coords = geometry.get("coordinates") or []
+            if not coords:
+                return None
+            if centroid_mode == "centroid":
+                return cls._polyline_centroid(coords)
+            return cls._polyline_midpoint(coords)
+        if gtype == "MultiLineString":
+            lines = geometry.get("coordinates") or []
+            if not lines:
+                return None
+            if centroid_mode == "centroid":
+                return cls._multilinestring_centroid(lines)
+            return cls._multilinestring_midpoint(lines)
         if centroid_mode == "centroid":
             return cls._geometry_centroid(geometry)
         if centroid_mode == "representative_point":
@@ -2473,11 +2729,14 @@ class AnchorageGISPlugin(DataPlugin):
                     f"Use this instead of calling spatial_query_point in a "
                     f"loop. Answers questions like 'how many X per "
                     f"community council', 'total Y by assembly district', "
-                    f"'cleanup tonnage by neighborhood'. If you find "
-                    f"yourself calling spatial_query_point more than 5 "
-                    f"times, switch to this. Returns a table of "
-                    f"count + summed numeric fields per bucket, plus an "
-                    f"unmatched count for data-quality signal."
+                    f"'total road miles per district', 'cleanup tonnage "
+                    f"by neighborhood'. Source layer can be points, "
+                    f"polylines (road centerlines, trails, transit), or "
+                    f"polygons. If you find yourself calling "
+                    f"spatial_query_point more than 5 times, switch to "
+                    f"this. Returns a table of count + summed numeric "
+                    f"fields per bucket, plus an unmatched count for "
+                    f"data-quality signal."
                 ),
                 input_schema={
                     "type": "object",
@@ -2486,8 +2745,8 @@ class AnchorageGISPlugin(DataPlugin):
                             "type": "string",
                             "description": (
                                 "ArcGIS item ID of the layer whose "
-                                "records you want to bucket (points or "
-                                "polygons)."
+                                "records you want to bucket (points, "
+                                "polylines, or polygons)."
                             ),
                         },
                         "aggregation_item_id": {
@@ -2548,13 +2807,28 @@ class AnchorageGISPlugin(DataPlugin):
                                 "representative_point",
                             ],
                             "description": (
-                                "How to reduce source polygons to a "
-                                "point for the join. 'centroid' is "
-                                "cheap; 'representative_point' stays "
-                                "inside L-shaped/donut polygons; "
-                                "'auto' (default) uses centroid unless "
-                                "it falls outside, then "
-                                "representative_point."
+                                "How to reduce source features to a "
+                                "single point for the join. For "
+                                "polygons: 'centroid' is cheap, "
+                                "'representative_point' stays inside "
+                                "L-shaped/donut shapes, 'auto' (default) "
+                                "uses centroid unless it falls outside. "
+                                "For polylines (road centerlines, "
+                                "trails, transit routes): 'auto' and "
+                                "'representative_point' use the line "
+                                "midpoint, interpolated at 50% along the "
+                                "line's arc length — always on the line "
+                                "itself. 'centroid' uses the "
+                                "length-weighted centroid of the line "
+                                "(NOT a bounding-box centroid); on a "
+                                "curved or U-shaped line that point can "
+                                "fall off the line, so prefer 'auto' for "
+                                "polyline sources. Note: a road segment "
+                                "straddling two districts is assigned to "
+                                "whichever district contains its "
+                                "midpoint, not both — use "
+                                "spatial_query_polygon if you need "
+                                "intersects-based assignment."
                             ),
                             "default": "auto",
                         },
