@@ -28,6 +28,12 @@ variable "lambda_timeout" {
   default     = 120
 }
 
+variable "lambda_reserved_concurrency" {
+  description = "Reserved concurrent executions cap for the Lambda. -1 means unreserved (default account limit). Set to a small integer (e.g. 10) to bound cost and blast radius from traffic spikes."
+  type        = number
+  default     = 10
+}
+
 variable "api_quota_limit" {
   description = "API Gateway daily request quota"
   type        = number

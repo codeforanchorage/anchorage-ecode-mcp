@@ -86,20 +86,25 @@ resource "aws_api_gateway_integration" "mcp_delete_integration" {
   uri                     = aws_lambda_function.mcp_server.invoke_arn
 }
 
-# Lambda Integration for OPTIONS (mock response for CORS)
+# Lambda Integration for OPTIONS (preflight handled by Lambda so the
+# Origin allowlist enforced in server/http_handler.py:_get_cors_headers
+# applies to preflight as well as POST. Previously this was a MOCK
+# integration that returned hard-coded `Access-Control-Allow-Origin: *`,
+# which made the Lambda-level allowlist useless for browser clients —
+# preflight is what the browser checks first.)
 resource "aws_api_gateway_integration" "mcp_options_integration" {
   rest_api_id = aws_api_gateway_rest_api.mcp_api.id
   resource_id = aws_api_gateway_resource.mcp.id
   http_method = aws_api_gateway_method.mcp_options.http_method
 
-  type = "MOCK"
-
-  request_templates = {
-    "application/json" = "{\"statusCode\": 200}"
-  }
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
 }
 
-# Method Response for POST
+# Method Response for POST. With AWS_PROXY integrations the headers in
+# the Lambda response pass through directly, so this resource is only
+# documenting which CORS headers can appear; it does not enforce values.
 resource "aws_api_gateway_method_response" "mcp_post_response_200" {
   rest_api_id = aws_api_gateway_rest_api.mcp_api.id
   resource_id = aws_api_gateway_resource.mcp.id
@@ -111,40 +116,6 @@ resource "aws_api_gateway_method_response" "mcp_post_response_200" {
     "method.response.header.Access-Control-Allow-Headers" = true
     "method.response.header.Access-Control-Allow-Methods" = true
   }
-}
-
-# Method Response for OPTIONS
-resource "aws_api_gateway_method_response" "mcp_options_response_200" {
-  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
-  resource_id = aws_api_gateway_resource.mcp.id
-  http_method = aws_api_gateway_method.mcp_options.http_method
-  status_code = "200"
-
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Origin"  = true
-    "method.response.header.Access-Control-Allow-Headers" = true
-    "method.response.header.Access-Control-Allow-Methods" = true
-  }
-}
-
-# Integration Response for OPTIONS
-resource "aws_api_gateway_integration_response" "mcp_options_integration_response" {
-  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
-  resource_id = aws_api_gateway_resource.mcp.id
-  http_method = aws_api_gateway_method.mcp_options.http_method
-  status_code = aws_api_gateway_method_response.mcp_options_response_200.status_code
-
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Origin"  = "'*'"
-    "method.response.header.Access-Control-Allow-Headers" = "'Content-Type,Accept,Mcp-Session-Id'"
-    "method.response.header.Access-Control-Allow-Methods" = "'GET,POST,DELETE,OPTIONS'"
-  }
-
-  response_templates = {
-    "application/json" = ""
-  }
-
-  depends_on = [aws_api_gateway_integration.mcp_options_integration]
 }
 
 # Lambda Permission for API Gateway
@@ -191,8 +162,6 @@ resource "aws_api_gateway_deployment" "mcp_deployment" {
     aws_api_gateway_integration.mcp_delete_integration,
     aws_api_gateway_integration.mcp_options_integration,
     aws_api_gateway_method_response.mcp_post_response_200,
-    aws_api_gateway_method_response.mcp_options_response_200,
-    aws_api_gateway_integration_response.mcp_options_integration_response,
   ]
 }
 

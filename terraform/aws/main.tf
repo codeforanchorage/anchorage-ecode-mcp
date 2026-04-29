@@ -79,6 +79,11 @@ resource "aws_lambda_function" "mcp_server" {
   memory_size      = local.lambda_memory
   timeout          = local.lambda_timeout
 
+  # Cap concurrency so a traffic spike (or denial-of-wallet attack) cannot
+  # autoscale to the AWS account limit. WAF should already block bad traffic
+  # at the per-IP level; this is defense in depth and cost protection.
+  reserved_concurrent_executions = var.lambda_reserved_concurrency
+
   environment {
     variables = {
       OPENCONTEXT_CONFIG = local.config_json
