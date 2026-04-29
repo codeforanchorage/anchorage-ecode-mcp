@@ -1,1 +1,39 @@
-examples/dc-arcgis/config.yaml
+---
+server_name: "Anchorage GIS MCP"
+description: "Municipality of Anchorage GIS MCP server - Safe, conversational access to Anchorage GIS maps, apps, and spatial data"
+organization: "Municipality of Anchorage"
+
+plugins:
+  anchorage_gis:
+    enabled: true
+    portal_base_url: "https://muniorg.maps.arcgis.com/sharing/rest"
+    gallery_group_id: "c34ed10758ec4f4eb8aa6826ee5be3ff"
+    org_id: "Ce3DhLRthdwbHlfF"
+    city_name: "Municipality of Anchorage"
+    gallery_url: "https://muniorg.maps.arcgis.com/apps/instant/filtergallery/index.html?appid=4dac7569f1cc4beb9f22ce168c899a30"
+    timeout: 30
+
+  ckan:
+    enabled: false
+    base_url: "https://data.example.gov/"
+    portal_url: "https://data.example.gov/"
+    city_name: "Example"
+    timeout: 120
+
+  arcgis:
+    enabled: false
+    portal_url: "https://hub.arcgis.com"
+    city_name: "Example"
+    timeout: 120
+
+aws:
+  region: "us-west-2"
+  lambda_name: "anchorage-gis-mcp-staging"
+  # Sized for aggregate_by_polygon, which holds up to 5000 source
+  # features plus a bounded 32-entry polygon cache in memory.
+  lambda_memory: 1024
+  lambda_timeout: 120
+
+logging:
+  level: "INFO"
+  format: "json"
