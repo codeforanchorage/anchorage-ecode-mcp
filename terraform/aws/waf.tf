@@ -71,16 +71,17 @@ resource "aws_wafv2_web_acl" "mcp_api" {
     }
   }
 
-  # Common rule set in Count mode for the first rollout — some rules
-  # (SizeRestrictions_BODY, NoUserAgent_HEADER) can false-positive on
-  # JSON-RPC clients. Observe metrics for a few days, then flip
-  # override_action to `none {}` to enforce.
+  # Common rule set: enforced (Block) after observation period confirmed
+  # the JSON-RPC traffic does not false-positive on SizeRestrictions_BODY
+  # or NoUserAgent_HEADER. To temporarily revert to logging-only, change
+  # `none {}` back to `count {}` and watch CloudWatch metric
+  # `<lambda>-CommonRuleSet`.
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 3
 
     override_action {
-      count {}
+      none {}
     }
 
     statement {
