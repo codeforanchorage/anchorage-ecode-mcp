@@ -279,6 +279,28 @@ class AnchorageGISPlugin(DataPlugin):
         lines += [
             f"**Portal Page:** {self._portal_home}/home/item.html?id={item_id}"
         ]
+        queryable = item_type in (
+            "Feature Service",
+            "Feature Layer",
+            "Map Service",
+            "Table",
+        )
+        lines += ["", "---"]
+        if queryable:
+            lines += [
+                "**NEXT STEPS:** this is a queryable layer. Use "
+                f"`query_data('{item_id}', limit=1)` to count records "
+                f"(read the TOTAL COUNT line); "
+                f"`get_layer_schema('{item_id}')` to see field names; "
+                f"`query_data('{item_id}', where=..., limit=N)` to list."
+            ]
+        else:
+            lines += [
+                f"**NOTE:** type '{item_type}' is not directly queryable. "
+                "It may bundle queryable layers — open the Portal Page "
+                "above to inspect, or use `find_gis_content` to find a "
+                "related Feature Service."
+            ]
         return "\n".join(lines)
 
     # Upper bound on how many chars of a single feature's geometry we
@@ -299,7 +321,15 @@ class AnchorageGISPlugin(DataPlugin):
         count_part = f"{len(records)}"
         if total_count is not None:
             count_part += f" of {total_count:,} total"
-        lines = [f"Returned {count_part} record(s) (limit: {limit}):\n"]
+        lines = [f"Returned {count_part} record(s) (limit: {limit})."]
+        if total_count is not None:
+            lines.append(
+                f"TOTAL COUNT (records matching the WHERE clause): "
+                f"{total_count:,}. "
+                f"This is the answer to 'how many?' — use it directly "
+                f"instead of counting the records below."
+            )
+        lines.append("")
         for i, record in enumerate(records, 1):
             lines.append(f"Record {i}:")
             geometry = record.get("__geometry__")
@@ -899,7 +929,12 @@ class AnchorageGISPlugin(DataPlugin):
         """Combined search: gallery + spatial layers."""
         topic = args.get("topic", "").strip()
         if not topic:
-            raise ValueError("topic is required")
+            raise ValueError(
+                "topic is required — pass the subject of the user's "
+                "question as a 1-2 word topic (e.g. 'parks', 'trails', "
+                "'flood', 'zoning'). Do not ask the user for clarification "
+                "if the topic is obvious from their message."
+            )
         limit = min(int(args.get("limit", 8)), 50)
 
         gallery_results, layer_results = await asyncio.gather(
@@ -915,8 +950,14 @@ class AnchorageGISPlugin(DataPlugin):
         if not gallery_results and not layer_results:
             return (
                 f"No {city} GIS content found for topic '{topic}'.\n\n"
-                f"Try different keywords, or browse the full gallery:\n"
-                f"{gallery_url}"
+                f"NEXT STEP: retry with a broader, simpler keyword. "
+                f"Strip qualifiers like 'parcels', 'data', 'boundaries', "
+                f"'zones', 'areas' — e.g. 'park parcels' → 'parks', "
+                f"'flood zone boundaries' → 'flood', 'school district "
+                f"areas' → 'schools'. Use the most distinctive single "
+                f"word first.\n\n"
+                f"If still no results after retry, browse the full "
+                f"gallery: {gallery_url}"
             )
 
         text = f"## {city} GIS Content: '{topic}'\n\n"
@@ -936,7 +977,19 @@ class AnchorageGISPlugin(DataPlugin):
                 text += self._format_summary(item)
         text += (
             "\n---\n"
-            "_Use `get_item_details` with an item ID for full description._\n"
+            "**NEXT STEPS** (pick based on the user's question):\n"
+            "- COUNT records ('how many?'): "
+            "`query_data(item_id, limit=1)` — read the TOTAL COUNT "
+            "line in the response.\n"
+            "- LIST records: "
+            "`query_data(item_id, where=..., limit=N)`.\n"
+            "- DESCRIBE an item: `get_item_details(item_id)`.\n"
+            "- DISCOVER fields before filtering: "
+            "`get_layer_schema(item_id)`.\n"
+            "Item IDs are the `ID:` values shown above. Pick the item "
+            "whose title/type best matches the user's intent (a "
+            "'Feature Layer' or 'Feature Service' is queryable; a "
+            "'Web Map' or 'Dashboard' is not).\n"
             f"_Full gallery: {gallery_url}_"
         )
         return text
@@ -977,7 +1030,14 @@ class AnchorageGISPlugin(DataPlugin):
 
         results = await self._search_org_layers(query, item_types, limit)
         if not results:
-            return f"No {city} spatial layers/data found matching '{query}'."
+            return (
+                f"No {city} spatial layers/data found matching "
+                f"'{query}'.\n\n"
+                f"NEXT STEP: retry with a broader keyword (strip "
+                f"'parcels', 'data', 'boundaries' — e.g. 'park "
+                f"parcels' → 'parks'), or call `find_gis_content` "
+                f"to also search the curated public gallery."
+            )
 
         text = (
             f"## {city} Spatial Layers: '{query}' "
@@ -985,6 +1045,14 @@ class AnchorageGISPlugin(DataPlugin):
         )
         for item in results:
             text += self._format_summary(item)
+        text += (
+            "\n---\n"
+            "**NEXT STEPS:** `query_data(item_id, limit=1)` to count "
+            "records (read the TOTAL COUNT line); "
+            "`query_data(item_id, where=..., limit=N)` to list; "
+            "`get_layer_schema(item_id)` to see field names; "
+            "`get_item_details(item_id)` for the full description.\n"
+        )
         return text
 
     async def _get_layer_schema(self, args: Dict[str, Any]) -> str:
@@ -1075,6 +1143,14 @@ class AnchorageGISPlugin(DataPlugin):
         if domain_lines:
             text += "\n### Coded Domains\n" + "\n".join(domain_lines)
 
+        text += (
+            "\n\n---\n"
+            "**NEXT STEPS:** use the field names above in `query_data` — "
+            "set `where` to a SQL filter (e.g. "
+            "`Park_Classification = 'Community Use'`), `out_fields` to "
+            "a comma-separated list to narrow the response, and "
+            "`limit=1` to just count matches via the TOTAL COUNT line."
+        )
         return text
 
     async def _search_layers_by_field(self, args: Dict[str, Any]) -> str:
@@ -2268,12 +2344,24 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="find_gis_content",
                 description=(
-                    f"Search {city}'s GIS portal for maps, apps, and datasets "
-                    f"related to a topic. Use when someone asks 'do you have "
-                    f"data about X?' — e.g. 'flood zones', 'trails', 'zoning', "
-                    f"'schools', 'crime', 'avalanche', 'parks'. Searches both "
-                    f"the curated public gallery AND the organization's raw "
-                    f"spatial layers."
+                    f"START HERE for any {city} GIS question. Searches the "
+                    f"GIS portal for maps, apps, and datasets on a topic. "
+                    f"Use whenever the user asks 'do you have data about "
+                    f"X?', 'how many X are there?', 'where is X?', 'show "
+                    f"me X' — e.g. 'flood zones', 'trails', 'zoning', "
+                    f"'schools', 'parks'. Searches both the curated public "
+                    f"gallery AND raw spatial layers in one call.\n\n"
+                    f"TYPICAL CHAIN: this tool returns a list of items, "
+                    f"each with an `id`. Then call:\n"
+                    f"  • `query_data(item_id, limit=1)` to COUNT records "
+                    f"(read the 'TOTAL COUNT' line in the response — that "
+                    f"answers 'how many?').\n"
+                    f"  • `query_data(item_id, where=..., limit=N)` to "
+                    f"LIST records.\n"
+                    f"  • `get_item_details(item_id)` for a full "
+                    f"description.\n"
+                    f"  • `get_layer_schema(item_id)` to see field names "
+                    f"before writing a WHERE clause."
                 ),
                 input_schema={
                     "type": "object",
@@ -2281,8 +2369,14 @@ class AnchorageGISPlugin(DataPlugin):
                         "topic": {
                             "type": "string",
                             "description": (
-                                "Topic to search for, e.g. 'flood zones', "
-                                "'trails', 'zoning'."
+                                "Topic to search for. REQUIRED — extract "
+                                "from the user's question. Use the "
+                                "simplest 1-2 word form: 'parks' (not "
+                                "'park parcels'), 'flood' (not 'flood "
+                                "zone boundaries'), 'trails', 'zoning', "
+                                "'schools'. If a multi-word topic returns "
+                                "nothing, retry with the most distinctive "
+                                "single word."
                             ),
                         },
                         "limit": {
@@ -2323,7 +2417,11 @@ class AnchorageGISPlugin(DataPlugin):
                     f"Feature Services, Map Services, tile layers, Web Maps, "
                     f"and downloadable data (GeoJSON, Shapefile, CSV). Use "
                     f"when the user wants underlying GIS data rather than a "
-                    f"pre-built viewer."
+                    f"pre-built viewer. Prefer `find_gis_content` for "
+                    f"general questions — it also searches the public "
+                    f"gallery. Use this tool when you specifically need a "
+                    f"queryable layer to pass to `query_data`. Use simple "
+                    f"1-2 word keywords (e.g. 'parks' not 'park parcels')."
                 ),
                 input_schema={
                     "type": "object",
@@ -2460,8 +2558,19 @@ class AnchorageGISPlugin(DataPlugin):
                 description=(
                     f"Query records from a {city} ArcGIS Feature Service. "
                     f"Provide the item ID — the plugin resolves the service "
-                    f"URL automatically. Use get_item_details first to confirm "
-                    f"the item has a queryable service URL."
+                    f"URL automatically.\n\n"
+                    f"COUNTING ('how many X?'): set `limit=1` and read the "
+                    f"'TOTAL COUNT' line at the top of the response. The "
+                    f"total reflects the WHERE clause (default `1=1` = "
+                    f"all records).\n"
+                    f"LISTING: set `limit` to how many records you want "
+                    f"and (optionally) `where` to filter.\n"
+                    f"DISCOVERING FIELD NAMES: call `get_layer_schema` "
+                    f"first to see the available fields before writing a "
+                    f"WHERE clause or selecting `out_fields`.\n"
+                    f"PRECONDITION: the item must be a Feature Service or "
+                    f"Map Service (not a Web Map or app). If unsure, "
+                    f"`get_item_details` shows the type and service URL."
                 ),
                 input_schema={
                     "type": "object",
