@@ -979,12 +979,7 @@ class AnchorageGISPlugin(DataPlugin):
             for item in gallery_results:
                 text += self._format_summary(item)
         if layer_results:
-            text += (
-                f"### Spatial Layers & Data "
-                f"({len(layer_results)} found)\n\n"
-            )
-            for item in layer_results:
-                text += self._format_summary(item)
+            text += self._format_layer_section(layer_results)
         text += (
             "\n---\n"
             "**NEXT STEPS** (pick based on the user's question):\n"
@@ -996,12 +991,55 @@ class AnchorageGISPlugin(DataPlugin):
             "- DESCRIBE an item: `get_item_details(item_id)`.\n"
             "- DISCOVER fields before filtering: "
             "`get_layer_schema(item_id)`.\n"
-            "Item IDs are the `ID:` values shown above. Pick the item "
-            "whose title/type best matches the user's intent (a "
-            "'Feature Layer' or 'Feature Service' is queryable; a "
-            "'Web Map' or 'Dashboard' is not).\n"
+            "**Pick from the QUERYABLE section above** — those are "
+            "Feature/Map Services that work with `query_data`. Items "
+            "in the OTHER section are viewers, web maps, and "
+            "downloadable files (not directly queryable).\n"
             f"_Full gallery: {gallery_url}_"
         )
+        return text
+
+    def _format_layer_section(
+        self, layer_results: List[Dict[str, Any]]
+    ) -> str:
+        """Render the spatial-layers block, split queryable vs other.
+
+        Esri's relevance ranking already puts canonical Feature
+        Services first within their type, but interleaving them with
+        Web Maps in a single list lets weaker models latch onto a
+        non-queryable item. The split makes the queryable choices
+        visually unmistakable.
+        """
+        queryable, other = [], []
+        for item in layer_results:
+            if item.get("type") in self.QUERYABLE_TYPES:
+                queryable.append(item)
+            else:
+                other.append(item)
+
+        text = (
+            f"### Spatial Layers & Data "
+            f"({len(layer_results)} found)\n\n"
+        )
+        if queryable:
+            text += (
+                f"#### QUERYABLE — Feature/Map Services "
+                f"({len(queryable)})\n"
+                f"_Use these directly with `query_data`, "
+                f"`get_layer_schema`, `spatial_query_*`._\n\n"
+            )
+            for item in queryable:
+                text += self._format_summary(item)
+        if other:
+            text += (
+                f"#### OTHER — Web Maps & Downloadable Data "
+                f"({len(other)})\n"
+                f"_Viewers and reference items. Not directly "
+                f"queryable; use for context or to find the underlying "
+                f"Feature Service via `get_item_details`._\n\n"
+            )
+            for item in other:
+                text += self._format_summary(item)
         return text
 
     async def _browse_gallery(self, keyword: str, limit: int) -> str:
@@ -1053,15 +1091,16 @@ class AnchorageGISPlugin(DataPlugin):
             f"## {city} Spatial Layers: '{query}' "
             f"({len(results)} results)\n\n"
         )
-        for item in results:
-            text += self._format_summary(item)
+        text += self._format_layer_section(results)
         text += (
             "\n---\n"
             "**NEXT STEPS:** `query_data(item_id, limit=1)` to count "
             "records (read the TOTAL COUNT line); "
             "`query_data(item_id, where=..., limit=N)` to list; "
             "`get_layer_schema(item_id)` to see field names; "
-            "`get_item_details(item_id)` for the full description.\n"
+            "`get_item_details(item_id)` for the full description. "
+            "Pick from the QUERYABLE section above for `query_data` "
+            "calls.\n"
         )
         return text
 

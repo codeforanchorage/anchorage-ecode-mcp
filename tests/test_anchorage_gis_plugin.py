@@ -278,6 +278,65 @@ class TestExecuteTool:
         assert "Parcels" in result.content[0]["text"]
 
     @pytest.mark.asyncio
+    async def test_layer_section_splits_queryable_from_other(
+        self, anchorage_config
+    ):
+        # Regression for the trails search where the model picked a
+        # non-queryable Web Map. Subdivide the layers block so Feature
+        # /Map Services appear under a clear QUERYABLE header above
+        # Web Maps and downloadable data.
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        with patch.object(
+            plugin, "_search_gallery", new_callable=AsyncMock,
+            return_value=[],
+        ), patch.object(
+            plugin,
+            "_search_org_layers",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "id": "1" * 32,
+                    "title": "Trails Web Map",
+                    "type": "Web Map",
+                    "tags": [],
+                    "url": "",
+                },
+                {
+                    "id": "2" * 32,
+                    "title": "ParksRec_Trails_Merged",
+                    "type": "Feature Service",
+                    "tags": [],
+                    "url": "",
+                },
+                {
+                    "id": "3" * 32,
+                    "title": "Trail Downloads",
+                    "type": "GeoJSON",
+                    "tags": [],
+                    "url": "",
+                },
+            ],
+        ):
+            result = await plugin.execute_tool(
+                "find_gis_content", {"topic": "trails"}
+            )
+
+        text = result.content[0]["text"]
+        assert "QUERYABLE" in text
+        assert "OTHER" in text
+        # Feature Service must appear before the Web Map and GeoJSON
+        # (Esri's relevance order is preserved within each subsection,
+        # but the subsection split puts queryable items physically
+        # above non-queryable ones in the rendered text).
+        fs_pos = text.index("ParksRec_Trails_Merged")
+        wm_pos = text.index("Trails Web Map")
+        gj_pos = text.index("Trail Downloads")
+        assert fs_pos < wm_pos
+        assert fs_pos < gj_pos
+
+    @pytest.mark.asyncio
     async def test_execute_search_spatial_layers_missing_query(
         self, anchorage_config
     ):
