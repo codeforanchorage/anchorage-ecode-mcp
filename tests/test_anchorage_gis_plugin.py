@@ -1868,6 +1868,10 @@ class TestSearchOrgLayersFilter:
 
     @pytest.mark.asyncio
     async def test_drops_results_from_other_orgs(self, plugin):
+        # Items with a *different* orgId are the real cross-org leak we
+        # care about — those are dropped. Items with no orgId are kept
+        # (see test_keeps_items_with_missing_orgid below); the upstream
+        # orgid: query already vouched for them.
         with patch.object(
             plugin,
             "_run_search",
@@ -1875,12 +1879,37 @@ class TestSearchOrgLayersFilter:
             return_value=[
                 {"id": "1" * 32, "orgId": "Ce3DhLRthdwbHlfF", "title": "ours"},
                 {"id": "2" * 32, "orgId": _OTHER_ORG, "title": "theirs"},
-                {"id": "3" * 32, "title": "no orgid"},
             ],
         ):
             results = await plugin._search_org_layers("any", ["Feature Service"], 10)
         titles = [r["title"] for r in results]
         assert titles == ["ours"]
+
+    @pytest.mark.asyncio
+    async def test_keeps_items_with_missing_orgid(self, plugin):
+        # Regression: FEMA-imported items (e.g. FEMA_FloodAreas_Hosted)
+        # show up in this tenant with orgId=None in the response payload,
+        # even though the upstream orgid: query confirmed they belong to
+        # the org. Previously the post-filter dropped them, hiding flood
+        # data from search results. The post-filter only rejects items
+        # set to a *different* org now.
+        with patch.object(
+            plugin,
+            "_run_search",
+            new_callable=AsyncMock,
+            return_value=[
+                {"id": "1" * 32, "orgId": None, "title": "fema-imported"},
+                {"id": "2" * 32, "title": "no orgid field at all"},
+                {"id": "3" * 32, "orgId": "", "title": "empty-string orgid"},
+            ],
+        ):
+            results = await plugin._search_org_layers("any", ["Feature Service"], 10)
+        titles = [r["title"] for r in results]
+        assert titles == [
+            "fema-imported",
+            "no orgid field at all",
+            "empty-string orgid",
+        ]
 
 
 # ── Service URL allowlist ──────────────────────────────────────────────

@@ -173,6 +173,14 @@ class AnchorageGISPlugin(DataPlugin):
         post-filter below is defense-in-depth in case Esri ever returns
         results that don't honor that filter (e.g. shared items, cross-
         org content, indexing quirks).
+
+        Items with ``orgId`` unset (None / empty) are kept — many
+        legitimate items in this tenant (FEMA-imported feeds, older
+        items predating the field) have a null ``orgId`` in the
+        response, even though the upstream ``orgid:`` query confirmed
+        they belong to this org. The post-filter only rejects items
+        whose ``orgId`` is set to a *different* organization, which is
+        the actual cross-org leak we care about.
         """
         type_filter = " OR ".join(f'type:"{t}"' for t in item_types)
         clauses = [f"orgid:{self.plugin_config.org_id}", f"({type_filter})"]
@@ -180,10 +188,12 @@ class AnchorageGISPlugin(DataPlugin):
             clauses.append(query)
         results = await self._run_search(" AND ".join(clauses), limit)
         configured = (self.plugin_config.org_id or "").lower()
-        return [
-            r for r in results
-            if (r.get("orgId") or "").lower() == configured
-        ]
+        kept: List[Dict[str, Any]] = []
+        for r in results:
+            item_org = (r.get("orgId") or "").lower()
+            if not item_org or item_org == configured:
+                kept.append(r)
+        return kept
 
     # ── Formatters ────────────────────────────────────────────────────────
 
