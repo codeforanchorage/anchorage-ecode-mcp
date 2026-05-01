@@ -324,6 +324,9 @@ class AnchorageGISPlugin(DataPlugin):
         limit: int,
         total_count: Optional[int] = None,
         date_fields: Optional[set] = None,
+        geometry_type: Optional[str] = None,
+        name_field: Optional[str] = None,
+        item_id: Optional[str] = None,
     ) -> str:
         if not records:
             return "No records returned."
@@ -338,6 +341,46 @@ class AnchorageGISPlugin(DataPlugin):
                 f"{total_count:,}. "
                 f"This is the answer to 'how many?' — use it directly "
                 f"instead of counting the records below."
+            )
+        # Polyline-grain warning: a single named entity (a trail, a
+        # road, a transit route) is typically stored as MULTIPLE line
+        # segments. Reporting "1,123 trails" when the layer holds
+        # 1,123 segments is wrong — there might be 200 unique named
+        # trails. Surface this whenever the layer is polyline-typed
+        # AND a count was requested, so the model frames its answer
+        # honestly. If we know a likely name field, suggest the
+        # follow-up call to count unique entities.
+        if (
+            geometry_type == "esriGeometryPolyline"
+            and total_count is not None
+        ):
+            id_arg = (
+                f"item_id='{item_id}'" if item_id else "item_id=<id>"
+            )
+            if name_field:
+                follow_up = (
+                    f"`get_distinct_values({id_arg}, "
+                    f"field='{name_field}', limit=500)` and count "
+                    f"the distinct values returned"
+                )
+            else:
+                follow_up = (
+                    f"`get_layer_schema({id_arg})` to find the "
+                    f"name/identifier field, then "
+                    f"`get_distinct_values` on it to count unique "
+                    f"entities"
+                )
+            lines.append(
+                f"**GRAIN NOTE (polyline layer):** the count above "
+                f"is the number of LINE SEGMENTS (geometry features), "
+                f"NOT the number of unique named entities. A single "
+                f"named trail, road, or route is typically stored as "
+                f"multiple connected segments — so '{total_count:,} "
+                f"records' usually means fewer than {total_count:,} "
+                f"distinct named features. When answering the user, "
+                f"say e.g. '{total_count:,} trail segments' rather "
+                f"than '{total_count:,} trails'. To count unique "
+                f"named entities, call {follow_up}."
             )
         lines.append("")
         for i, record in enumerate(records, 1):
@@ -1760,25 +1803,52 @@ class AnchorageGISPlugin(DataPlugin):
         except Exception:
             return None
 
-    async def _get_date_fields(self, service_url: str) -> Optional[set]:
-        """Fetch field names with esriFieldTypeDate type (best-effort)."""
+    async def _get_layer_quick_meta(
+        self, service_url: str
+    ) -> Dict[str, Any]:
+        """Fetch a small bundle of layer metadata used by the query
+        formatter: date field names (for epoch→ISO conversion) and
+        geometry type (for the polyline-grain warning on counts).
+        Best-effort — returns an empty dict on any error so callers
+        can degrade gracefully.
+
+        Returns ``{date_fields: set|None, geometry_type: str|None,
+        name_field: str|None}``. ``name_field`` is the first
+        natural-ID-style field present, used to suggest a follow-up
+        get_distinct_values call when warning about polyline grain.
+        """
         try:
             self._validate_service_url(service_url)
         except ValueError:
-            return None
+            return {}
         try:
             resp = await self.client.get(
                 service_url, params={"f": "json"}
             )
             resp.raise_for_status()
             data = resp.json()
-            return {
-                f["name"]
-                for f in data.get("fields", [])
-                if f.get("type") == "esriFieldTypeDate"
-            } or None
         except Exception:
-            return None
+            return {}
+        fields = data.get("fields") or []
+        date_fields = {
+            f["name"]
+            for f in fields
+            if f.get("type") == "esriFieldTypeDate"
+        } or None
+        field_names = {f.get("name") for f in fields}
+        name_field = next(
+            (
+                f
+                for f in self.NATURAL_ID_FIELD_PRIORITY
+                if f in field_names
+            ),
+            None,
+        )
+        return {
+            "date_fields": date_fields,
+            "geometry_type": data.get("geometryType"),
+            "name_field": name_field,
+        }
 
     # ── Aggregation helpers ───────────────────────────────────────────────
 
@@ -4801,6 +4871,11 @@ class AnchorageGISPlugin(DataPlugin):
                 )
                 validated_where = WhereValidator.validate(where)
 
+                # Always fetch layer quick-meta — date_fields for
+                # epoch→ISO rendering, geometry_type for the
+                # polyline-grain warning. One round-trip serves both
+                # so the cost is the same as the old date-fields-only
+                # fetch.
                 parallel_tasks = [
                     self.query_data(
                         item_id,
@@ -4809,25 +4884,30 @@ class AnchorageGISPlugin(DataPlugin):
                         return_geometry=return_geometry,
                     ),
                     self._get_record_count(service_url, validated_where),
+                    self._get_layer_quick_meta(service_url),
                 ]
-                # When return_geometry=true the backend is f=geojson,
-                # which renders dates as ISO strings already — skip the
-                # epoch-to-date conversion path.
-                want_dates = (
-                    date_format != "epoch" and not return_geometry
-                )
-                if want_dates:
-                    parallel_tasks.append(
-                        self._get_date_fields(service_url)
-                    )
 
                 results = await asyncio.gather(*parallel_tasks)
                 records = results[0]
                 total_count = results[1]
-                date_fields = results[2] if want_dates else None
+                quick_meta = results[2] or {}
+                # When return_geometry=true the backend is f=geojson,
+                # which renders dates as ISO strings already — skip the
+                # epoch-to-date conversion path.
+                date_fields = (
+                    quick_meta.get("date_fields")
+                    if (date_format != "epoch" and not return_geometry)
+                    else None
+                )
 
                 text = self._format_query_results(
-                    records, effective_limit, total_count, date_fields
+                    records,
+                    effective_limit,
+                    total_count,
+                    date_fields,
+                    geometry_type=quick_meta.get("geometry_type"),
+                    name_field=quick_meta.get("name_field"),
+                    item_id=item_id,
                 )
                 if not records:
                     text += self._no_data_hint(where)
