@@ -2613,10 +2613,24 @@ class TestFindFeaturesSpanningClassifications:
             plugin,
             "_fetch_layer_meta",
             new_callable=AsyncMock,
-            return_value={
-                "geometryType": "esriGeometryPolygon",
-                "fields": [{"name": "ZONE_CODE"}],
-            },
+            # Classification meta is queried first (cls_meta), then
+            # source meta (src_meta) for the natural-ID pre-flight.
+            # Source includes a `Name` field so the natural-ID check
+            # passes — without it the pre-flight would refuse before
+            # the spatial loop runs.
+            side_effect=[
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [{"name": "ZONE_CODE"}],
+                },
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [
+                        {"name": "OBJECTID"},
+                        {"name": "Name"},
+                    ],
+                },
+            ],
         ), patch.object(
             plugin,
             "_get_record_count",
@@ -2686,10 +2700,23 @@ class TestFindFeaturesSpanningClassifications:
             plugin,
             "_fetch_layer_meta",
             new_callable=AsyncMock,
-            return_value={
-                "geometryType": "esriGeometryPolygon",
-                "fields": [{"name": "ZONE_CODE"}],
-            },
+            # Two meta fetches: classification first (in cls validation),
+            # source second (in natural-ID pre-flight). Source includes
+            # `Name` so the natural-ID check passes and we reach the
+            # source-count cap check.
+            side_effect=[
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [{"name": "ZONE_CODE"}],
+                },
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [
+                        {"name": "OBJECTID"},
+                        {"name": "Name"},
+                    ],
+                },
+            ],
         ), patch.object(
             plugin,
             "_get_record_count",
@@ -2737,6 +2764,119 @@ class TestFindFeaturesSpanningClassifications:
                 })
 
     @pytest.mark.asyncio
+    async def test_self_intersection_refused(self, plugin):
+        # Same item_id for source and classification is meaningless —
+        # every feature trivially touches itself. The model has
+        # picked this combination when reasoning was muddled and
+        # produced "no parcels found" or all-features-qualify
+        # answers; refuse fast with a redirect to the right layer
+        # shapes.
+        with pytest.raises(
+            ValueError,
+            match="same layer.*Self-intersection is meaningless",
+        ):
+            await plugin._find_features_spanning_classifications({
+                "source_item_id": "a" * 32,
+                "classification_item_id": "a" * 32,
+                "classification_field": "ZONE_CODE",
+            })
+
+    @pytest.mark.asyncio
+    async def test_source_without_natural_id_field_is_refused(
+        self, plugin
+    ):
+        # A source layer with only OBJECTID + Shape__* fields is
+        # almost always an aggregate / boundary layer (zoning
+        # districts, council areas), not a per-record layer. Refuse
+        # before running the spatial loop so the model never sees
+        # OBJECTIDs without parcel-style IDs to mis-report.
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            side_effect=[
+                "https://example.com/source/0",
+                "https://example.com/cls/0",
+            ],
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            side_effect=[
+                # Classification layer: polygon, has the field.
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [{"name": "ZONE_CODE"}],
+                },
+                # Source layer: only OBJECTID + Shape__ fields → no
+                # natural-ID candidate.
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [
+                        {"name": "OBJECTID"},
+                        {"name": "Shape__Area"},
+                        {"name": "Shape__Length"},
+                        {"name": "ZoneNumber"},
+                    ],
+                },
+            ],
+        ):
+            with pytest.raises(
+                ValueError,
+                match="no user-facing identifier field",
+            ):
+                await plugin._find_features_spanning_classifications({
+                    "source_item_id": "a" * 32,
+                    "classification_item_id": "b" * 32,
+                    "classification_field": "ZONE_CODE",
+                })
+
+    @pytest.mark.asyncio
+    async def test_explicit_out_fields_overrides_natural_id_check(
+        self, plugin
+    ):
+        # The natural-ID check is opt-out via explicit out_fields.
+        # A user who knows what fields a layer has should not be
+        # forced through the parcels redirect — e.g., legitimate
+        # roads/trails questions where the source layer's natural
+        # field name we don't recognise out of the box.
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            side_effect=[
+                "https://example.com/source/0",
+                "https://example.com/cls/0",
+            ],
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            side_effect=[
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [{"name": "ZONE_CODE"}],
+                },
+                # Source has no natural-ID field, but caller will
+                # pass explicit out_fields so the check is skipped.
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [
+                        {"name": "OBJECTID"},
+                        {"name": "ROAD_SEGMENT_ID"},
+                    ],
+                },
+            ],
+        ), patch.object(
+            plugin, "_get_record_count", new_callable=AsyncMock,
+            return_value=0,
+        ):
+            # Should NOT raise the "no user-facing identifier" error.
+            # (It will fall through to the "0 features" branch which
+            # returns a benign message — fine for this test.)
+            text = await plugin._find_features_spanning_classifications(
+                {
+                    "source_item_id": "a" * 32,
+                    "classification_item_id": "b" * 32,
+                    "classification_field": "ZONE_CODE",
+                    "out_fields": "ROAD_SEGMENT_ID",
+                }
+            )
+            assert "no user-facing identifier" not in text
+
+    @pytest.mark.asyncio
     async def test_lead_identifier_is_natural_id_not_objectid(
         self, plugin
     ):
@@ -2775,10 +2915,22 @@ class TestFindFeaturesSpanningClassifications:
             ],
         ), patch.object(
             plugin, "_fetch_layer_meta", new_callable=AsyncMock,
-            return_value={
-                "geometryType": "esriGeometryPolygon",
-                "fields": [{"name": "ZONE_CODE"}],
-            },
+            # Two meta fetches: classification first, source second
+            # (for the natural-ID pre-flight). Source includes
+            # `Parcel_ID` so the pre-flight passes through.
+            side_effect=[
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [{"name": "ZONE_CODE"}],
+                },
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [
+                        {"name": "OBJECTID"},
+                        {"name": "Parcel_ID"},
+                    ],
+                },
+            ],
         ), patch.object(
             plugin, "_get_record_count", new_callable=AsyncMock,
             return_value=1,
@@ -2871,10 +3023,22 @@ class TestFindFeaturesSpanningClassifications:
             ],
         ), patch.object(
             plugin, "_fetch_layer_meta", new_callable=AsyncMock,
-            return_value={
-                "geometryType": "esriGeometryPolygon",
-                "fields": [{"name": "ZONE_CODE"}],
-            },
+            # Two meta fetches: classification first, source second
+            # (for the natural-ID pre-flight). Source includes
+            # `Parcel_ID` so the pre-flight passes through.
+            side_effect=[
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [{"name": "ZONE_CODE"}],
+                },
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [
+                        {"name": "OBJECTID"},
+                        {"name": "Parcel_ID"},
+                    ],
+                },
+            ],
         ), patch.object(
             plugin, "_get_record_count", new_callable=AsyncMock,
             return_value=2,
@@ -2971,10 +3135,22 @@ class TestFindFeaturesSpanningClassifications:
             ],
         ), patch.object(
             plugin, "_fetch_layer_meta", new_callable=AsyncMock,
-            return_value={
-                "geometryType": "esriGeometryPolygon",
-                "fields": [{"name": "ZONE_CODE"}],
-            },
+            # Two meta fetches: classification first, source second
+            # (for the natural-ID pre-flight). Source includes
+            # `Parcel_ID` so the pre-flight passes through.
+            side_effect=[
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [{"name": "ZONE_CODE"}],
+                },
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [
+                        {"name": "OBJECTID"},
+                        {"name": "Parcel_ID"},
+                    ],
+                },
+            ],
         ), patch.object(
             plugin, "_get_record_count", new_callable=AsyncMock,
             return_value=2,

@@ -3017,6 +3017,25 @@ class AnchorageGISPlugin(DataPlugin):
             self.SPANNING_SOURCE_LIMIT,
         )
 
+        # Self-intersection makes no sense — every feature touches
+        # itself, every feature qualifies, the answer is trivially
+        # "all of them". A weak model occasionally picks the same
+        # layer for both args when reasoning is muddled; refuse fast
+        # so we don't waste a spatial loop and confuse the user.
+        if source_item_id == classification_item_id:
+            raise ValueError(
+                "source_item_id and classification_item_id are the "
+                "same layer. Self-intersection is meaningless — "
+                "every feature trivially touches itself. For a "
+                "'parcels spanning multiple zones' question, source "
+                "should be a parcels layer (e.g. MOA_Parcels_Hosted, "
+                "TaxParcels_Hosted) and classification should be a "
+                "zoning layer (e.g. Zoning_Hosted). Use "
+                "`find_gis_content(topic='parcels')` and "
+                "`find_gis_content(topic='zoning')` to discover the "
+                "right item IDs for each side."
+            )
+
         source_url = await self._resolve_layer_url(source_item_id)
         classification_url = await self._resolve_layer_url(
             classification_item_id
@@ -3045,6 +3064,52 @@ class AnchorageGISPlugin(DataPlugin):
                 f"they are CASE-SENSITIVE. Available: "
                 f"{sorted(cls_field_names)[:12]}..."
             )
+
+        # Source layer must have a user-facing identifier field, OR
+        # the caller must have explicitly chosen out_fields (which
+        # signals "I know what fields this layer has").
+        # Without this check, a model that picks an aggregate layer
+        # (zoning districts, council areas) as source produces output
+        # that lists OBJECTIDs as "parcel numbers" — the exact bug
+        # the user keeps hitting.
+        if out_fields == "*":
+            src_meta = await self._fetch_layer_meta(source_url)
+            src_field_names = {
+                f.get("name") for f in src_meta.get("fields", [])
+            }
+            has_natural = any(
+                f in src_field_names
+                for f in self.NATURAL_ID_FIELD_PRIORITY
+            )
+            if not has_natural:
+                visible_fields = [
+                    f for f in sorted(src_field_names)
+                    if f
+                    and not f.startswith("Shape__")
+                    and f not in ("OBJECTID", "OID", "FID")
+                ][:12]
+                raise ValueError(
+                    f"source_item_id `{source_item_id}` has no "
+                    f"user-facing identifier field (no Parcel_ID, "
+                    f"Name, Address, Title, etc.). Without one, "
+                    f"results would only have internal OBJECTIDs — "
+                    f"unsafe to report as parcel numbers / "
+                    f"addresses / names.\n\n"
+                    f"This layer's non-shape fields: "
+                    f"{visible_fields or '(none)'}.\n\n"
+                    f"This is most likely a wrong layer choice — "
+                    f"aggregate / boundary layers (zoning districts, "
+                    f"council areas, regions) typically have only "
+                    f"OBJECTID + Shape fields and are meant to be "
+                    f"the CLASSIFICATION, not the source. For "
+                    f"'parcels spanning multiple X' use "
+                    f"`find_gis_content(topic='parcels')` and pick "
+                    f"a layer with `Parcel_ID` (e.g. "
+                    f"MOA_Parcels_Hosted, TaxParcels_Hosted, "
+                    f"PropertyInformation_Hosted) from the "
+                    f"QUERYABLE section. To override and proceed "
+                    f"anyway, pass `out_fields` explicitly."
+                )
 
         # Pre-flight: refuse if the source layer has more features
         # matching source_where than the cap. Doing this up front saves
@@ -4412,6 +4477,27 @@ class AnchorageGISPlugin(DataPlugin):
                     f"on a flood zone boundary', 'roads crossing "
                     f"district lines', 'addresses on a council "
                     f"boundary'.\n\n"
+                    f"**SOURCE vs CLASSIFICATION — the most common "
+                    f"mistake to avoid:**\n"
+                    f"- `source_item_id` = the layer of THINGS YOU "
+                    f"WANT BACK (parcels, roads, addresses). Must "
+                    f"have a user-facing identifier field "
+                    f"(Parcel_ID, Name, Address) — typically "
+                    f"thousands+ of features.\n"
+                    f"- `classification_item_id` = the layer of "
+                    f"REGIONS that partition space (zoning, flood, "
+                    f"districts). MUST be polygon-typed — typically "
+                    f"dozens to hundreds of features.\n"
+                    f"- For 'parcels spanning multiple zones': "
+                    f"source = a parcels layer (e.g. "
+                    f"MOA_Parcels_Hosted), classification = a "
+                    f"zoning layer (e.g. Zoning_Hosted). Do NOT use "
+                    f"the same layer for both — self-intersection "
+                    f"is meaningless.\n"
+                    f"- If unsure, run "
+                    f"`find_gis_content(topic='parcels')` and pick "
+                    f"a Feature Service that has a `Parcel_ID` "
+                    f"field for source.\n\n"
                     f"WHY NOT `aggregate_by_polygon`: that tool "
                     f"reduces each source feature to a single point "
                     f"and assigns it to one polygon — a parcel "
