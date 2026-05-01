@@ -2195,6 +2195,77 @@ class TestFormatters:
         assert AnchorageGISPlugin._ms_to_date(None) == "Unknown"
         assert AnchorageGISPlugin._ms_to_date("invalid") == "Unknown"
 
+    def test_format_query_results_polyline_grain_warning(
+        self, anchorage_config
+    ):
+        # Regression: counts on polyline layers (trails, roads,
+        # transit) are SEGMENT counts, not unique-named-entity
+        # counts. The formatter must surface this whenever a count
+        # is reported on a polyline layer, so the model frames the
+        # answer honestly ("1,123 trail segments", not "1,123
+        # trails") and knows how to fetch the unique count.
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        records = [{"OBJECTID": 1, "TRAIL_NAME": "Coastal Trail"}]
+        text = plugin._format_query_results(
+            records,
+            limit=1,
+            total_count=1123,
+            geometry_type="esriGeometryPolyline",
+            name_field="TRAIL_NAME",
+            item_id="abc" * 10 + "ab",
+        )
+        assert "GRAIN NOTE" in text
+        assert "LINE SEGMENTS" in text
+        # The exact recommended user-facing phrasing must appear so
+        # the model can adopt it verbatim.
+        assert "1,123 trail segments" in text
+        # The follow-up call to get unique entities must include the
+        # detected name field and the actual item_id.
+        assert "get_distinct_values" in text
+        assert "TRAIL_NAME" in text
+
+    def test_format_query_results_polygon_no_grain_warning(
+        self, anchorage_config
+    ):
+        # Polygons are usually 1:1 with named entities (one park =
+        # one polygon, one zone = one polygon — give or take). No
+        # warning should fire, otherwise we'd cry wolf on every
+        # parks/zoning count.
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        records = [{"OBJECTID": 1, "Name": "Town Square Park"}]
+        text = plugin._format_query_results(
+            records,
+            limit=1,
+            total_count=318,
+            geometry_type="esriGeometryPolygon",
+            name_field="Name",
+        )
+        assert "GRAIN NOTE" not in text
+        assert "LINE SEGMENTS" not in text
+
+    def test_format_query_results_polyline_no_count_no_warning(
+        self, anchorage_config
+    ):
+        # If no total_count is provided (e.g., a list query without
+        # the count side-task), don't emit the grain warning either —
+        # it only makes sense in the context of a "how many?" answer.
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        records = [{"OBJECTID": 1, "TRAIL_NAME": "Coastal Trail"}]
+        text = plugin._format_query_results(
+            records,
+            limit=1,
+            total_count=None,  # no count requested
+            geometry_type="esriGeometryPolyline",
+            name_field="TRAIL_NAME",
+        )
+        assert "GRAIN NOTE" not in text
+
     def test_format_query_results_with_geometry(self, anchorage_config):
         plugin = AnchorageGISPlugin(anchorage_config)
         plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
