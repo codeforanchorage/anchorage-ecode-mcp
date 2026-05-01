@@ -2539,6 +2539,24 @@ class TestPickNaturalId:
         attrs = {"OBJECTID": 1747, "Shape__Area": 12345}
         assert AnchorageGISPlugin._pick_natural_id(attrs) is None
 
+    def test_polyline_name_fields_outrank_generic_name(self):
+        # When a polyline layer has both a specific name field
+        # (Trail_Name, Road_Name, Route_Name) AND the generic Name
+        # field, the specific one must win — matters for the
+        # grain-warning's get_distinct_values follow-up suggestion
+        # (a more specific field is friendlier for the user).
+        for specific in (
+            "Trail_Name",
+            "Road_Name",
+            "Street_Name",
+            "Route_Name",
+        ):
+            attrs = {specific: "Coastal Trail", "Name": "Generic"}
+            picked = AnchorageGISPlugin._pick_natural_id(attrs)
+            assert picked == (specific, "Coastal Trail"), (
+                f"{specific} should outrank generic Name; got {picked}"
+            )
+
     def test_recognises_propertyinformation_field_variants(self):
         # PropertyInformation has several parcel-ish field names —
         # the picker walks the priority list and grabs the first

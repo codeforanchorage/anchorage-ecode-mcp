@@ -554,6 +554,15 @@ class AnchorageGISPlugin(DataPlugin):
         "Parcel_Number", "ParcelNumber",
         "GIS_ParcelNum8Formatted", "GIS_ParcelNum11Formatted",
         "GIS_ParcelNum8", "GIS_ParcelNum11",
+        # Polyline-entity name fields — listed BEFORE generic `Name`
+        # so a trails/roads layer with both `Trail_Name` and `Name`
+        # picks the more specific one. These also drive the grain
+        # warning's follow-up suggestion when query_data hits a
+        # polyline layer.
+        "Trail_Name", "TRAIL_NAME", "TrailName",
+        "Road_Name", "ROAD_NAME", "RoadName",
+        "Street_Name", "STREET_NAME", "StreetName",
+        "Route_Name", "ROUTE_NAME", "RouteName",
         # Generic record-name fields (next-best fallback).
         "Name", "NAME", "FullName", "Full_Name",
         "Site_Name", "SiteName",
