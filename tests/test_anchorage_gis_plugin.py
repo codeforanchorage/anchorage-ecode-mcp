@@ -2430,6 +2430,58 @@ class TestGetDistinctValues:
                 })
 
 
+class TestPickNaturalId:
+    """A 4o-class model latches onto the FIRST identifier-shaped
+    value it sees in the rendered output. If the lead line says
+    'OBJECTID 778', the model reports 778 as the parcel number even
+    when Parcel_ID sits right below. The natural-ID picker promotes
+    a user-facing field into the lead position to short-circuit
+    that failure mode."""
+
+    def test_prefers_parcel_id_over_name(self):
+        # Parcel_ID outranks Name when both are present — parcel
+        # questions are the canonical "report the ID" use case.
+        attrs = {"Name": "Some name", "Parcel_ID": "07502103000"}
+        assert AnchorageGISPlugin._pick_natural_id(attrs) == (
+            "Parcel_ID",
+            "07502103000",
+        )
+
+    def test_falls_back_to_name_when_no_parcel_field(self):
+        attrs = {"Name": "Far North Bicentennial Park"}
+        assert AnchorageGISPlugin._pick_natural_id(attrs) == (
+            "Name",
+            "Far North Bicentennial Park",
+        )
+
+    def test_skips_null_values(self):
+        # None / empty-string values should not be picked as the lead.
+        attrs = {"Parcel_ID": None, "Parcel_Num": "", "Name": "Lot A"}
+        assert AnchorageGISPlugin._pick_natural_id(attrs) == (
+            "Name",
+            "Lot A",
+        )
+
+    def test_returns_none_when_no_natural_field(self):
+        # OBJECTID/internal-only attrs → no natural ID, lead falls
+        # back to OBJECTID in the rendering.
+        attrs = {"OBJECTID": 1747, "Shape__Area": 12345}
+        assert AnchorageGISPlugin._pick_natural_id(attrs) is None
+
+    def test_recognises_propertyinformation_field_variants(self):
+        # PropertyInformation has several parcel-ish field names —
+        # the picker walks the priority list and grabs the first
+        # match that has a value.
+        attrs = {
+            "GIS_ParcelNum8Formatted": "003-184-87",
+            "GIS_ParcelNum11": "00318487000",
+        }
+        # Parcel_ID appears earlier in the priority list, so the
+        # 8Formatted form wins because Parcel_ID is absent.
+        out = AnchorageGISPlugin._pick_natural_id(attrs)
+        assert out == ("GIS_ParcelNum8Formatted", "003-184-87")
+
+
 class TestNormalizeParcelVariants:
     """Pure normaliser for MOA parcel IDs. Generates the four
     canonical formats (8-digit compact + hyphenated, 11-digit
@@ -2683,6 +2735,105 @@ class TestFindFeaturesSpanningClassifications:
                     "classification_item_id": "b" * 32,
                     "classification_field": "made_up_field",
                 })
+
+    @pytest.mark.asyncio
+    async def test_lead_identifier_is_natural_id_not_objectid(
+        self, plugin
+    ):
+        # Regression for the GPT-4o-reports-OBJECTID-as-parcel-number
+        # bug. When attributes include a user-facing identifier
+        # (Parcel_ID), the rendered lead line MUST feature it
+        # prominently and demote OBJECTID to a parenthetical. Without
+        # this the model's eye lands on the first identifier-shaped
+        # token and reports OBJECTID as "the parcel number".
+        cls_polys = [
+            {
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [0, 0], [1, 0], [1, 1], [0, 1], [0, 0],
+                    ]],
+                },
+                "properties": {"ZONE_CODE": "R-1"},
+            },
+            {
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [1, 0], [2, 0], [2, 1], [1, 1], [1, 0],
+                    ]],
+                },
+                "properties": {"ZONE_CODE": "R-2M"},
+            },
+        ]
+
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            side_effect=[
+                "https://example.com/source/0",
+                "https://example.com/cls/0",
+            ],
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            return_value={
+                "geometryType": "esriGeometryPolygon",
+                "fields": [{"name": "ZONE_CODE"}],
+            },
+        ), patch.object(
+            plugin, "_get_record_count", new_callable=AsyncMock,
+            return_value=1,
+        ), patch.object(
+            plugin, "_paged_geojson_fetch", new_callable=AsyncMock,
+            return_value=cls_polys,
+        ):
+            async def fake_post(url, data=None):
+                resp = Mock()
+                resp.status_code = 200
+                resp.raise_for_status = Mock()
+                if (data or {}).get("objectIds"):
+                    # Attribute fetch returns the parcel with both
+                    # OBJECTID and Parcel_ID populated.
+                    resp.json.return_value = {
+                        "features": [
+                            {
+                                "attributes": {
+                                    "OBJECTID": 778,
+                                    "Parcel_ID": "07502103000",
+                                    "DataSource": "HLB",
+                                }
+                            }
+                        ]
+                    }
+                else:
+                    # Both zones contain parcel 778 → it qualifies.
+                    resp.json.return_value = {"objectIds": [778]}
+                return resp
+
+            plugin.client = Mock()
+            plugin.client.post = fake_post
+
+            text = await plugin._find_features_spanning_classifications(
+                {
+                    "source_item_id": "a" * 32,
+                    "classification_item_id": "b" * 32,
+                    "classification_field": "ZONE_CODE",
+                }
+            )
+
+        # The lead line for the qualifying feature must carry the
+        # Parcel_ID, not OBJECTID, as the prominent identifier.
+        # OBJECTID appears as a parenthetical for traceability but
+        # the natural ID is the one in bold.
+        assert "**`07502103000`**" in text
+        assert "(Parcel_ID;" in text
+        # Section header tells the model which field to report.
+        assert (
+            "user-facing identifier in this layer is `Parcel_ID`"
+            in text
+        )
+        assert "REPORT TO THE USER" in text
+        # The dangerous old leading-OBJECTID format must not appear.
+        assert "**OBJECTID 778**" not in text
 
     @pytest.mark.asyncio
     async def test_attribute_fetch_failure_warns_loudly(self, plugin):

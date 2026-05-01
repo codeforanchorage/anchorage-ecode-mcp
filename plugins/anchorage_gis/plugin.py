@@ -497,6 +497,49 @@ class AnchorageGISPlugin(DataPlugin):
             "`where='1=1'`."
         )
 
+    # Field-name priority for picking the user-facing identifier from
+    # a feature's attributes. A 4o-class model latches onto the first
+    # identifier-shaped value it sees in the response and reports it
+    # back as canonical — if the lead line says "OBJECTID 778" the
+    # model will say "parcel 778" even when Parcel_ID is right below.
+    # We promote one of these field names into the lead position so
+    # the wrong identifier never even appears first.
+    NATURAL_ID_FIELD_PRIORITY = (
+        # Parcel-style identifiers (most common request shape).
+        "Parcel_ID", "PARCEL_ID", "ParcelID", "PARCELID",
+        "Parcel_Num", "PARCEL_NUM", "ParcelNum", "PARCELNUM",
+        "Parcel_Number", "ParcelNumber",
+        "GIS_ParcelNum8Formatted", "GIS_ParcelNum11Formatted",
+        "GIS_ParcelNum8", "GIS_ParcelNum11",
+        # Generic record-name fields (next-best fallback).
+        "Name", "NAME", "FullName", "Full_Name",
+        "Site_Name", "SiteName",
+        "Site_Address", "Address", "ADDRESS",
+        "Title", "TITLE",
+        # Common code/identifier fields.
+        "Permit_Number", "PermitNumber",
+        "Project_Name", "ProjectName",
+        "Plat_Number", "PlatNumber",
+    )
+
+    @classmethod
+    def _pick_natural_id(
+        cls, attrs: Dict[str, Any]
+    ) -> Optional[Tuple[str, Any]]:
+        """Pick the most likely user-facing identifier from a feature's
+        attributes. Returns (field_name, value) or None.
+
+        Priority is: parcel-ish IDs > name-ish fields > misc codes.
+        Skips None/empty values so the lead line never says
+        "Parcel_ID None".
+        """
+        for field in cls.NATURAL_ID_FIELD_PRIORITY:
+            if field in attrs:
+                v = attrs[field]
+                if v is not None and v != "":
+                    return (field, v)
+        return None
+
     @staticmethod
     def _normalize_parcel_variants(raw: Any) -> List[str]:
         """Generate MOA parcel ID format variants for cross-dataset
@@ -3305,6 +3348,26 @@ class AnchorageGISPlugin(DataPlugin):
                 f"_Truncated to limit={limit}. Increase `limit` to "
                 f"see more._"
             )
+
+        # Detect the natural-ID field across the loaded attributes so
+        # we can promote it to the lead position of each entry. Pick
+        # the first feature's natural ID — schemas are consistent
+        # within a layer, so any one feature's pick applies to all.
+        natural_id_field: Optional[str] = None
+        for attrs in features_by_oid.values():
+            pick = self._pick_natural_id(attrs)
+            if pick:
+                natural_id_field = pick[0]
+                break
+        if natural_id_field:
+            lines.append("")
+            lines.append(
+                f"> **The user-facing identifier in this layer is "
+                f"`{natural_id_field}`** — that is the value to "
+                f"REPORT TO THE USER for each feature below. "
+                f"`OBJECTID` is an internal layer row ID; do NOT "
+                f"report it as a parcel number, address, or name."
+            )
         lines.append("")
 
         # If the attribute fetch failed or returned nothing, surface
@@ -3361,11 +3424,24 @@ class AnchorageGISPlugin(DataPlugin):
                 )
                 lines.append("")
                 continue
-            lines.append(
-                f"**OBJECTID {oid}** — touches {len(vals)} "
-                f"value(s): "
-                + ", ".join(f"`{v}`" for v in vals)
-            )
+            # Lead with the user-facing identifier when one is
+            # detectable; demote OBJECTID to a parenthetical so the
+            # model never reports it as the answer.
+            natural = self._pick_natural_id(attrs)
+            if natural:
+                nat_field, nat_value = natural
+                lines.append(
+                    f"**`{nat_value}`** ({nat_field}; internal "
+                    f"OBJECTID {oid}) — touches {len(vals)} "
+                    f"value(s): "
+                    + ", ".join(f"`{v}`" for v in vals)
+                )
+            else:
+                lines.append(
+                    f"**OBJECTID {oid}** — touches {len(vals)} "
+                    f"value(s): "
+                    + ", ".join(f"`{v}`" for v in vals)
+                )
             for k, v in attrs.items():
                 if k in ("OBJECTID", "OID", "FID"):
                     continue
