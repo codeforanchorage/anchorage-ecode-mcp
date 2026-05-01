@@ -2836,15 +2836,12 @@ class TestFindFeaturesSpanningClassifications:
         assert "**OBJECTID 778**" not in text
 
     @pytest.mark.asyncio
-    async def test_attribute_fetch_failure_warns_loudly(self, plugin):
-        # Regression for the GPT-4o-reports-OBJECTID-as-parcel-number
-        # bug: when the bulk attribute fetch returns no records (rate
-        # limit, transient upstream error), the response MUST warn
-        # the model that OBJECTIDs are NOT user-facing identifiers
-        # and must not be reported as parcel numbers / addresses.
-        # Previously the silent fallback to "_note: attributes
-        # unavailable" let the model render "OBJECTID 1747" as the
-        # answer to "list parcel numbers".
+    async def test_per_oid_fallback_recovers_attributes(self, plugin):
+        # When the bulk attribute fetch fails (rate limit), the per-
+        # OID fallback should silently recover the attributes so the
+        # model NEVER sees raw OBJECTIDs without their parcel numbers
+        # — that's the only way to stop weak models from reporting
+        # the wrong identifier.
         cls_polys = [
             {
                 "geometry": {
@@ -2890,18 +2887,33 @@ class TestFindFeaturesSpanningClassifications:
                 resp.status_code = 200
                 resp.raise_for_status = Mock()
                 if (data or {}).get("objectIds"):
-                    # Simulate the rate-limit failure: no error key,
-                    # just an empty features list (the silent shape
-                    # we used to render as "_note: attributes
-                    # unavailable").
+                    # Bulk attr fetch fails (the rate-limit shape).
                     resp.json.return_value = {"features": []}
                 else:
-                    # Spatial-query side: both zones contain parcel 100.
+                    # Spatial query side: both zones contain parcel 100.
                     resp.json.return_value = {"objectIds": [100]}
+                return resp
+
+            async def fake_get(url, params=None):
+                # Per-OID fallback succeeds with a single record.
+                resp = Mock()
+                resp.status_code = 200
+                resp.raise_for_status = Mock()
+                resp.json.return_value = {
+                    "features": [
+                        {
+                            "attributes": {
+                                "OBJECTID": 100,
+                                "Parcel_ID": "07502103000",
+                            }
+                        }
+                    ]
+                }
                 return resp
 
             plugin.client = Mock()
             plugin.client.post = fake_post
+            plugin.client.get = fake_get
 
             text = await plugin._find_features_spanning_classifications(
                 {
@@ -2911,19 +2923,106 @@ class TestFindFeaturesSpanningClassifications:
                 }
             )
 
-        # Parcel 100 touches both zones → qualifies. Attribute fetch
-        # returned empty → the warning must fire.
-        assert "WARNING" in text
-        assert "INTERNAL LAYER ROW IDs" in text
-        assert "DO NOT report them" in text
-        # The model is told how to recover.
-        assert "query_data" in text
-        assert "OBJECTID=" in text
-        # The qualifying OID is still surfaced (with the value set)
-        # so the model has something to work with.
-        assert "100" in text
-        # The dangerous old marker must not be present anywhere.
-        assert "_note: attributes unavailable" not in text
+        # Fallback succeeded → render the entry with Parcel_ID in the
+        # lead, NOT a CANNOT-RETURN refusal.
+        assert "07502103000" in text
+        assert "**`07502103000`**" in text
+        assert "(Parcel_ID;" in text
+        # Transparency: the response should note that fallback was used.
+        assert "per-OID fallback" in text
+        # The CANNOT-RETURN refusal MUST NOT appear when fallback
+        # succeeded.
+        assert "CANNOT RETURN PARCEL NUMBERS" not in text
+
+    @pytest.mark.asyncio
+    async def test_total_attribute_failure_refuses_to_list_oids(
+        self, plugin
+    ):
+        # If even the per-OID fallback fails, refuse to list raw
+        # OBJECTIDs. Weak models report them as parcel numbers no
+        # matter how loud the warning is — the only safe move is to
+        # not give them anything to mis-report.
+        cls_polys = [
+            {
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [0, 0], [1, 0], [1, 1], [0, 1], [0, 0],
+                    ]],
+                },
+                "properties": {"ZONE_CODE": "R-1"},
+            },
+            {
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [1, 0], [2, 0], [2, 1], [1, 1], [1, 0],
+                    ]],
+                },
+                "properties": {"ZONE_CODE": "R-2M"},
+            },
+        ]
+
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            side_effect=[
+                "https://example.com/source/0",
+                "https://example.com/cls/0",
+            ],
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            return_value={
+                "geometryType": "esriGeometryPolygon",
+                "fields": [{"name": "ZONE_CODE"}],
+            },
+        ), patch.object(
+            plugin, "_get_record_count", new_callable=AsyncMock,
+            return_value=2,
+        ), patch.object(
+            plugin, "_paged_geojson_fetch", new_callable=AsyncMock,
+            return_value=cls_polys,
+        ):
+            async def fake_post(url, data=None):
+                resp = Mock()
+                resp.status_code = 200
+                resp.raise_for_status = Mock()
+                if (data or {}).get("objectIds"):
+                    resp.json.return_value = {"features": []}
+                else:
+                    resp.json.return_value = {"objectIds": [100]}
+                return resp
+
+            async def fake_get(url, params=None):
+                # Per-OID fallback also returns nothing.
+                resp = Mock()
+                resp.status_code = 200
+                resp.raise_for_status = Mock()
+                resp.json.return_value = {"features": []}
+                return resp
+
+            plugin.client = Mock()
+            plugin.client.post = fake_post
+            plugin.client.get = fake_get
+
+            text = await plugin._find_features_spanning_classifications(
+                {
+                    "source_item_id": "a" * 32,
+                    "classification_item_id": "b" * 32,
+                    "classification_field": "ZONE_CODE",
+                }
+            )
+
+        # The refusal must be unambiguous and must NOT list raw OIDs.
+        assert "CANNOT RETURN PARCEL NUMBERS" in text
+        assert "DO NOT report internal OBJECTIDs" in text
+        # The qualifying OID 100 must NOT appear as a bullet/lead —
+        # leaving it absent is what stops the model from mis-reporting.
+        # (It's fine if "100" appears in totals text; the dangerous
+        # form is "OBJECTID `100`" or "OBJECTID 100" as a leading
+        # token.)
+        assert "OBJECTID `100`" not in text
+        assert "OBJECTID 100 " not in text
+        assert "**OBJECTID 100**" not in text
 
     @pytest.mark.asyncio
     async def test_classification_must_be_polygon(self, plugin):

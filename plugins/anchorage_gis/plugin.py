@@ -3337,6 +3337,55 @@ class AnchorageGISPlugin(DataPlugin):
                 if oid is not None:
                     features_by_oid[oid] = attrs
 
+        # Per-OID fallback: if the bulk fetch failed (rate limit, URL
+        # length, transient upstream error) we MUST get attributes
+        # before rendering. Weak models report OBJECTIDs as parcel
+        # numbers when shown raw, no matter how loud the warning. Per-
+        # OID queries are cheap (1 record each) and survive rate
+        # limiting that kills the bulk path. Bounded concurrency to
+        # stay polite to the upstream.
+        fallback_used = False
+        fallback_recovered = 0
+        if not features_by_oid and qualifying_oids:
+            fallback_used = True
+            fallback_sem = asyncio.Semaphore(3)
+
+            async def fetch_one_oid(oid: Any) -> None:
+                # AND with source_where so the fallback honors the
+                # same predicate as the bulk path.
+                if source_where and source_where != "1=1":
+                    where_one = f"({source_where}) AND OBJECTID={oid}"
+                else:
+                    where_one = f"OBJECTID={oid}"
+                where_one = WhereValidator.validate(where_one)
+                async with fallback_sem:
+                    try:
+                        r = await self.client.get(
+                            f"{source_url}/query",
+                            params={
+                                "where": where_one,
+                                "outFields": out_fields,
+                                "returnGeometry": "false",
+                                "f": "json",
+                            },
+                        )
+                        r.raise_for_status()
+                        d = r.json()
+                    except Exception:
+                        return
+                    if "error" in d:
+                        return
+                    feats = d.get("features") or []
+                    if feats:
+                        attrs = feats[0].get("attributes") or {}
+                        if attrs:
+                            features_by_oid[oid] = attrs
+
+            await asyncio.gather(
+                *[fetch_one_oid(o) for o in qualifying_oids]
+            )
+            fallback_recovered = len(features_by_oid)
+
         showing = len(qualifying_oids)
         total = len(qualifying)
         lines.append(
@@ -3347,6 +3396,12 @@ class AnchorageGISPlugin(DataPlugin):
             lines.append(
                 f"_Truncated to limit={limit}. Increase `limit` to "
                 f"see more._"
+            )
+        if fallback_used and fallback_recovered:
+            lines.append(
+                f"_Bulk attribute fetch failed (likely upstream "
+                f"rate limit); recovered {fallback_recovered:,} of "
+                f"{showing:,} via per-OID fallback._"
             )
 
         # Detect the natural-ID field across the loaded attributes so
@@ -3370,43 +3425,39 @@ class AnchorageGISPlugin(DataPlugin):
             )
         lines.append("")
 
-        # If the attribute fetch failed or returned nothing, surface
-        # that loudly and DO NOT pretend OBJECTIDs are user-facing
-        # identifiers. The previous "_note: attributes unavailable"
-        # fallback was silently dangerous: GPT-4o-class models would
-        # report "OBJECTID 1747" as if it were a parcel number.
+        # If even the per-OID fallback couldn't load attributes, we
+        # must NOT surface raw OBJECTIDs — GPT-4o-class models report
+        # them as parcel numbers no matter how loud the warning sits
+        # next to them. Return a clean refusal with concrete recovery
+        # steps for the model to give the user, instead of dangerous
+        # raw data.
         if not features_by_oid and qualifying_oids:
             reason = (
                 attrs_error
                 or "the upstream returned 0 records for the OIDs "
-                "sent. Most common cause is a transient rate-limit "
-                "from the Esri portal — retry in 60 seconds."
+                "sent, AND the per-OID fallback also failed. Most "
+                "common cause is a sustained rate-limit from the "
+                "Esri portal."
             )
             lines.append(
-                "> **WARNING: attributes could not be loaded for the "
-                "qualifying features.** The spanning analysis "
-                f"itself succeeded ({total:,} features identified), "
-                "but the bulk attribute fetch returned no records.\n"
+                "> **CANNOT RETURN PARCEL NUMBERS RIGHT NOW.** "
+                f"The spanning analysis identified {total:,} "
+                "qualifying features, but the upstream layer would "
+                "not return their attributes (the user-facing "
+                "identifiers).\n"
                 f">\n"
                 f"> Reason: {reason}\n"
                 f">\n"
-                f"> The OBJECTIDs below are INTERNAL LAYER ROW IDs, "
-                f"not user-facing identifiers (parcel numbers, "
-                f"addresses, names). DO NOT report them to the user "
-                f"as parcel numbers. To recover the real "
-                f"identifiers, query each OID individually with "
-                f"`query_data(item_id='{source_item_id}', "
-                f"where='OBJECTID=<oid>', limit=1)`, or wait and "
-                f"retry this whole call."
+                f"> **DO NOT report internal OBJECTIDs to the user "
+                f"as parcel numbers** — they are not parcel numbers, "
+                f"addresses, or any identifier the user would "
+                f"recognize. Tell the user the upstream is "
+                f"temporarily rate-limiting bulk lookups and "
+                f"suggest one of: (1) retry in 60 seconds, (2) "
+                f"narrow the request to a smaller area via "
+                f"`source_where`, or (3) ask for fewer results "
+                f"(`limit=5`)."
             )
-            lines.append("")
-            for oid in qualifying_oids:
-                vals = sorted(str(v) for v in qualifying[oid])
-                lines.append(
-                    f"- OBJECTID `{oid}` (internal ID, not a "
-                    f"parcel#) — touches {len(vals)} value(s): "
-                    + ", ".join(f"`{v}`" for v in vals)
-                )
             return "\n".join(lines)
 
         for oid in qualifying_oids:
