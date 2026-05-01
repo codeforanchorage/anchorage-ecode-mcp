@@ -1026,8 +1026,26 @@ class AnchorageGISPlugin(DataPlugin):
                 f"#### QUERYABLE — Feature/Map Services "
                 f"({len(queryable)})\n"
                 f"_Use these directly with `query_data`, "
-                f"`get_layer_schema`, `spatial_query_*`._\n\n"
+                f"`get_layer_schema`, `spatial_query_*`._\n"
             )
+            if len(queryable) >= 2:
+                text += (
+                    "\n> **AMBIGUITY WARNING:** multiple queryable "
+                    "layers match this topic. They may be maintained "
+                    "by different agencies (e.g. municipal vs state "
+                    "vs federal) or cover different subsets (e.g. "
+                    "all trails vs nordic trails only). For 'how "
+                    "many?' / 'list all' questions, do NOT silently "
+                    "pick the first one — either (a) query each "
+                    "layer with `limit=1` and report a breakdown of "
+                    "totals, or (b) ask the user which subset they "
+                    "mean (e.g. 'municipal Parks & Rec', 'state-"
+                    "managed', 'all combined'). The titles below "
+                    "hint at scope (look for agency prefixes like "
+                    "'ADNR', 'USFS', 'ParksRec', 'NSAA').\n\n"
+                )
+            else:
+                text += "\n"
             for item in queryable:
                 text += self._format_summary(item)
         if other:

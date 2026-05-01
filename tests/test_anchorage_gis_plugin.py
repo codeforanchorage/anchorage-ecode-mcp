@@ -335,6 +335,63 @@ class TestExecuteTool:
         gj_pos = text.index("Trail Downloads")
         assert fs_pos < wm_pos
         assert fs_pos < gj_pos
+        # Single queryable layer → no ambiguity warning shown.
+        assert "AMBIGUITY WARNING" not in text
+
+    @pytest.mark.asyncio
+    async def test_ambiguity_warning_when_multiple_queryable(
+        self, anchorage_config
+    ):
+        # Regression for the trails count: ParksRec_Trails_Merged
+        # (1,123) and ADNR_USFS_Trails_Hosted (124) are both valid
+        # answers to "how many trails in Anchorage?". When multiple
+        # queryable layers match the topic, surface a warning so the
+        # model reports a breakdown or asks the user instead of
+        # silently picking the first one.
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+
+        with patch.object(
+            plugin, "_search_gallery", new_callable=AsyncMock,
+            return_value=[],
+        ), patch.object(
+            plugin,
+            "_search_org_layers",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "id": "a" * 32,
+                    "title": "ADNR_USFS_Trails_Hosted",
+                    "type": "Feature Service",
+                    "tags": [],
+                    "url": "",
+                },
+                {
+                    "id": "b" * 32,
+                    "title": "ParksRec_Trails_Merged",
+                    "type": "Feature Service",
+                    "tags": [],
+                    "url": "",
+                },
+                {
+                    "id": "c" * 32,
+                    "title": "NordicTrails",
+                    "type": "Feature Service",
+                    "tags": [],
+                    "url": "",
+                },
+            ],
+        ):
+            result = await plugin.execute_tool(
+                "find_gis_content", {"topic": "trails"}
+            )
+
+        text = result.content[0]["text"]
+        assert "AMBIGUITY WARNING" in text
+        # Warning must appear before the layer entries, not after.
+        assert text.index("AMBIGUITY WARNING") < text.index(
+            "ADNR_USFS_Trails_Hosted"
+        )
 
     @pytest.mark.asyncio
     async def test_execute_search_spatial_layers_missing_query(
