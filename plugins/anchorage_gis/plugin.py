@@ -413,6 +413,108 @@ class AnchorageGISPlugin(DataPlugin):
                 f"{self.plugin_config.city_name} data."
             )
 
+    @staticmethod
+    def _rewrite_arcgis_error(
+        msg: str,
+        details: List[str],
+        resource_id: Optional[str] = None,
+        has_out_fields: bool = False,
+        has_where: bool = False,
+    ) -> str:
+        """Turn raw ArcGIS REST errors into actionable instructions.
+
+        ArcGIS error messages assume a developer audience that knows
+        the schema and the REST contract. A weaker model reading
+        "Cannot perform query. Invalid query parameters." has no idea
+        what to do next. We pattern-match the common shapes and append
+        the concrete tool call the model should make to recover.
+        """
+        msg = msg or "Unknown error"
+        detail_str = "; ".join(details) if details else ""
+        full = f"{msg}" + (f" — {detail_str}" if detail_str else "")
+        item_arg = (
+            f"item_id='{resource_id}'" if resource_id else "item_id=<id>"
+        )
+        # Case A: ArcGIS named the bad field (WHERE-clause case).
+        m = re.search(
+            r"[Ii]nvalid\s+field\s*:\s*([A-Za-z0-9_]+)", full
+        )
+        if m:
+            bad = m.group(1)
+            return (
+                f"Field '{bad}' does not exist on this layer. "
+                f"Field names are CASE-SENSITIVE. To recover: call "
+                f"`get_layer_schema({item_arg})` to see valid field "
+                f"names, then retry with the exact name shown there. "
+                f"(Underlying error: {full})"
+            )
+        # Case B: generic "Invalid query parameters" — usually
+        # out_fields contains a name that doesn't exist. ArcGIS does
+        # NOT echo the bad name back, so the model has to discover it.
+        if "Invalid query parameters" in full:
+            hint_parts = []
+            if has_out_fields:
+                hint_parts.append(
+                    "out_fields may reference a field that does not "
+                    "exist (ArcGIS does not name it in the error). "
+                    "Try out_fields='*' to confirm, then narrow."
+                )
+            if has_where:
+                hint_parts.append(
+                    "the WHERE clause may reference a missing field "
+                    "or use the wrong type (string values must be "
+                    "single-quoted)."
+                )
+            hint_parts.append(
+                f"Call `get_layer_schema({item_arg})` to see valid "
+                f"field names — they are CASE-SENSITIVE."
+            )
+            return f"{full}\n\nLikely cause: " + " ".join(hint_parts)
+        return full
+
+    @staticmethod
+    def _no_data_hint(where_clause: str) -> str:
+        """Hint to append after an empty result with a non-trivial WHERE.
+
+        A 4o-class model frequently writes ``Field='exact value'`` when
+        what it wanted is ``Field LIKE '%substring%'``. ArcGIS returns
+        zero rows silently and the model reports the data does not
+        exist. Append a recovery instruction so the model retries.
+        """
+        normalized = (where_clause or "").strip()
+        if not normalized or normalized == "1=1":
+            return ""
+        return (
+            "\n\n_If you expected matches:_\n"
+            "- For TEXT fields, exact-match `=` is strict and "
+            "case-sensitive. Try `Field LIKE '%substring%'` "
+            "(% is the wildcard).\n"
+            "- For NUMERIC/DATE fields, verify the value type "
+            "matches the schema.\n"
+            "- Field names are CASE-SENSITIVE — call "
+            "`get_layer_schema(item_id=<id>)` to confirm.\n"
+            "- To verify the layer has data, retry with "
+            "`where='1=1'`."
+        )
+
+    @staticmethod
+    def _not_queryable_message(
+        item_id: str, item_type: str = ""
+    ) -> str:
+        type_note = (
+            f" (item type: '{item_type}')" if item_type else ""
+        )
+        return (
+            f"Item '{item_id}' is not a queryable Feature/Map "
+            f"Service{type_note}. Web Maps, Apps, Dashboards, and "
+            f"Story Maps are VIEWERS, not data — they cannot be "
+            f"queried for records. To recover: call "
+            f"`find_gis_content(topic=<your topic>)` and pick from "
+            f"the **QUERYABLE** section (Feature/Map Services), or "
+            f"`get_item_details(item_id='{item_id}')` to inspect "
+            f"this item's relationships."
+        )
+
     # Cap on records when geometry is requested — polygons can be
     # orders of magnitude larger than attribute rows, so we keep this
     # much tighter than the no-geometry cap of 1000.
@@ -450,19 +552,17 @@ class AnchorageGISPlugin(DataPlugin):
 
         if not service_url:
             raise ValueError(
-                f"Item {resource_id} does not have a queryable service URL"
+                self._not_queryable_message(resource_id, item_type)
             )
         if item_type and item_type not in self.QUERYABLE_TYPES:
             raise ValueError(
-                f"Item type '{item_type}' is not queryable. "
-                f"query_data supports: {', '.join(sorted(self.QUERYABLE_TYPES))}."
+                self._not_queryable_message(resource_id, item_type)
             )
 
         where_clause = filters.get("where", "1=1") if filters else "1=1"
         where_clause = WhereValidator.validate(where_clause)
-        out_fields = OutFieldsValidator.validate(
-            filters.get("out_fields", "*") if filters else "*"
-        )
+        raw_out_fields = filters.get("out_fields", "*") if filters else "*"
+        out_fields = OutFieldsValidator.validate(raw_out_fields)
         order_by = OrderByValidator.validate(
             filters.get("order_by") or "" if filters else ""
         )
@@ -516,10 +616,15 @@ class AnchorageGISPlugin(DataPlugin):
             code = error_in_body.get("code", "unknown")
             msg = error_in_body.get("message", "Unknown error")
             details = error_in_body.get("details", [])
-            detail_str = "; ".join(details) if details else ""
             raise RuntimeError(
-                f"Feature Service query failed (code {code}): {msg}"
-                + (f" — {detail_str}" if detail_str else "")
+                f"Feature Service query failed (code {code}): "
+                + self._rewrite_arcgis_error(
+                    msg,
+                    details,
+                    resource_id=resource_id,
+                    has_out_fields=raw_out_fields not in ("*", ""),
+                    has_where=where_clause not in ("1=1", ""),
+                )
             )
 
         features = data.get("features", [])
@@ -561,21 +666,17 @@ class AnchorageGISPlugin(DataPlugin):
 
         if not service_url:
             raise ValueError(
-                f"Item {resource_id} does not have a queryable service URL"
+                self._not_queryable_message(resource_id, item_type)
             )
         if item_type and item_type not in self.QUERYABLE_TYPES:
             raise ValueError(
-                f"Item type '{item_type}' is not queryable. "
-                f"spatial_query_point supports: "
-                f"{', '.join(sorted(self.QUERYABLE_TYPES))}."
+                self._not_queryable_message(resource_id, item_type)
             )
 
-        where_clause = WhereValidator.validate(
-            (filters or {}).get("where", "1=1")
-        )
-        out_fields = OutFieldsValidator.validate(
-            (filters or {}).get("out_fields", "*")
-        )
+        raw_where = (filters or {}).get("where", "1=1")
+        raw_out_fields = (filters or {}).get("out_fields", "*")
+        where_clause = WhereValidator.validate(raw_where)
+        out_fields = OutFieldsValidator.validate(raw_out_fields)
 
         service_url = self._ensure_layer_url(service_url)
         self._validate_service_url(service_url)
@@ -638,10 +739,15 @@ class AnchorageGISPlugin(DataPlugin):
             code = error_in_body.get("code", "unknown")
             msg = error_in_body.get("message", "Unknown error")
             details = error_in_body.get("details", [])
-            detail_str = "; ".join(details) if details else ""
             raise RuntimeError(
                 f"Feature Service spatial query failed (code {code}): "
-                f"{msg}" + (f" — {detail_str}" if detail_str else "")
+                + self._rewrite_arcgis_error(
+                    msg,
+                    details,
+                    resource_id=resource_id,
+                    has_out_fields=raw_out_fields not in ("*", ""),
+                    has_where=raw_where not in ("1=1", ""),
+                )
             )
 
         features = data.get("features", [])
@@ -712,24 +818,20 @@ class AnchorageGISPlugin(DataPlugin):
         item_type = item.get("type", "")
         if not target_url:
             raise ValueError(
-                f"Item {resource_id} does not have a queryable service URL"
+                self._not_queryable_message(resource_id, item_type)
             )
         if item_type and item_type not in self.QUERYABLE_TYPES:
             raise ValueError(
-                f"Item type '{item_type}' is not queryable. "
-                f"spatial_query_polygon supports: "
-                f"{', '.join(sorted(self.QUERYABLE_TYPES))}."
+                self._not_queryable_message(resource_id, item_type)
             )
 
         target_url = self._ensure_layer_url(target_url)
         self._validate_service_url(target_url)
 
-        where_clause = WhereValidator.validate(
-            (filters or {}).get("where", "1=1")
-        )
-        out_fields = OutFieldsValidator.validate(
-            (filters or {}).get("out_fields", "*")
-        )
+        raw_where = (filters or {}).get("where", "1=1")
+        raw_out_fields = (filters or {}).get("out_fields", "*")
+        where_clause = WhereValidator.validate(raw_where)
+        out_fields = OutFieldsValidator.validate(raw_out_fields)
 
         max_records = (
             self.GEOMETRY_LIMIT_CAP if return_geometry else 1000
@@ -780,10 +882,15 @@ class AnchorageGISPlugin(DataPlugin):
             code = error_in_body.get("code", "unknown")
             msg = error_in_body.get("message", "Unknown error")
             details = error_in_body.get("details", [])
-            detail_str = "; ".join(details) if details else ""
             raise RuntimeError(
                 f"Feature Service spatial query failed (code {code}): "
-                f"{msg}" + (f" — {detail_str}" if detail_str else "")
+                + self._rewrite_arcgis_error(
+                    msg,
+                    details,
+                    resource_id=resource_id,
+                    has_out_fields=raw_out_fields not in ("*", ""),
+                    has_where=raw_where not in ("1=1", ""),
+                )
             )
 
         features = data.get("features", [])
@@ -1079,7 +1186,16 @@ class AnchorageGISPlugin(DataPlugin):
         text = header
         for item in results:
             text += self._format_summary(item)
-        text += f"\n_Full gallery: {gallery_url}_"
+        text += (
+            "\n---\n"
+            "**These are VIEWERS — not directly queryable.** Web "
+            "Maps, Dashboards, and Apps cannot be passed to "
+            "`query_data` for record counts or filtered lists. If "
+            "the user asked 'how many?' or 'list X', call "
+            "`find_gis_content(topic=...)` to find the underlying "
+            "Feature Service instead.\n"
+            f"_Full gallery: {gallery_url}_"
+        )
         return text
 
     async def _search_spatial_layers(
@@ -1210,13 +1326,47 @@ class AnchorageGISPlugin(DataPlugin):
         if domain_lines:
             text += "\n### Coded Domains\n" + "\n".join(domain_lines)
 
+        # Pick a real text-typed field from THIS layer for the
+        # example, so the model sees a concrete, copy-pasteable call
+        # instead of a generic placeholder. Falls back to "<field>"
+        # if no string fields exist (rare for a public Feature
+        # Service — most have at least a name/title column).
+        sample_text_field = next(
+            (
+                f.get("name")
+                for f in fields
+                if f.get("type") == "esriFieldTypeString"
+                and f.get("name")
+                and f.get("name").upper() != "OBJECTID"
+            ),
+            None,
+        )
+        sample_id_arg = (
+            f"item_id='{item_id}'" if item_id else "item_id=<id>"
+        )
+        if sample_text_field:
+            example_call = (
+                f"`query_data({sample_id_arg}, "
+                f"where=\"{sample_text_field} LIKE '%foo%'\", "
+                f"limit=10)`"
+            )
+        else:
+            example_call = (
+                f"`query_data({sample_id_arg}, where=\"<Field>=<value>\", "
+                f"limit=10)`"
+            )
+
         text += (
             "\n\n---\n"
-            "**NEXT STEPS:** use the field names above in `query_data` — "
-            "set `where` to a SQL filter (e.g. "
-            "`Park_Classification = 'Community Use'`), `out_fields` to "
-            "a comma-separated list to narrow the response, and "
-            "`limit=1` to just count matches via the TOTAL COUNT line."
+            "**NEXT STEPS:** use the field names above in `query_data` "
+            "— field names are CASE-SENSITIVE (use the exact `Field "
+            "Name` column, not the alias). Quote string literals "
+            "with single quotes. For text searches prefer `LIKE "
+            "'%substring%'` over `=` (which requires the full exact "
+            "value).\n\n"
+            f"Example: {example_call}\n\n"
+            "To just COUNT matches, set `limit=1` and read the "
+            "TOTAL COUNT line in the response."
         )
         return text
 
@@ -2458,9 +2608,18 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="browse_gallery",
                 description=(
-                    f"Browse or search {city}'s curated public GIS gallery — "
-                    f"interactive maps, dashboards, apps, and StoryMaps. "
-                    f"Optionally filter by keyword."
+                    f"Browse or search {city}'s curated public GIS "
+                    f"gallery — interactive maps, dashboards, apps, "
+                    f"and StoryMaps. Optionally filter by keyword.\n\n"
+                    f"NOTE: gallery items are VIEWERS (Web Maps, "
+                    f"Dashboards, Apps), NOT queryable data. Use this "
+                    f"tool only when the user wants to *visit a "
+                    f"viewer* — e.g. 'show me the parks app', "
+                    f"'where's the flood zone map?'. For 'how many?' "
+                    f"or 'list X' questions you need queryable data: "
+                    f"call `find_gis_content(topic=...)` instead and "
+                    f"pick a Feature Service from the QUERYABLE "
+                    f"section."
                 ),
                 input_schema={
                     "type": "object",
@@ -3234,6 +3393,8 @@ class AnchorageGISPlugin(DataPlugin):
                 text = self._format_query_results(
                     records, effective_limit, total_count, date_fields
                 )
+                if not records:
+                    text += self._no_data_hint(where)
 
             elif tool_name == "spatial_query_point":
                 item_id = arguments.get("item_id", "").strip()

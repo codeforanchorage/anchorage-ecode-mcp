@@ -2237,6 +2237,79 @@ class TestFormatters:
         assert "chars total" in text
 
 
+class TestErrorRewriter:
+    """Reactive rewriting of ArcGIS error messages so weaker models
+    can recover. The upstream messages assume a developer audience
+    that already knows the schema; we translate them into concrete
+    next-step instructions the model can follow."""
+
+    def test_invalid_field_in_where_names_recovery_call(self):
+        # ArcGIS does name the bad field when it's in a WHERE clause.
+        # We surface it and tell the model exactly which tool to call
+        # to fix it — including the item_id pre-filled in the example.
+        msg = "Cannot perform query. Invalid query parameters."
+        details = ["'Invalid field: madeUpField' parameter is invalid"]
+        out = AnchorageGISPlugin._rewrite_arcgis_error(
+            msg, details, resource_id="abc123",
+            has_where=True, has_out_fields=False,
+        )
+        assert "madeUpField" in out
+        assert "does not exist" in out
+        assert "get_layer_schema" in out
+        assert "abc123" in out
+        assert "CASE-SENSITIVE" in out
+
+    def test_generic_invalid_query_with_out_fields_hints_at_cause(
+        self,
+    ):
+        # ArcGIS does NOT echo a bad out_fields name back, so the
+        # rewriter has to guess — when out_fields was non-default
+        # it's the most likely cause.
+        msg = "Cannot perform query. Invalid query parameters."
+        details = ["Unable to perform query. Please check your parameters."]
+        out = AnchorageGISPlugin._rewrite_arcgis_error(
+            msg, details, resource_id="abc123",
+            has_out_fields=True, has_where=False,
+        )
+        assert "out_fields" in out
+        assert "get_layer_schema" in out
+        assert "abc123" in out
+
+    def test_unknown_error_passes_through_with_original_text(self):
+        # Errors we don't recognize should still surface the upstream
+        # message — better a verbose error than a misleading one.
+        msg = "Some upstream failure"
+        details = ["Database connection lost"]
+        out = AnchorageGISPlugin._rewrite_arcgis_error(
+            msg, details, resource_id="abc123",
+        )
+        assert "Some upstream failure" in out
+        assert "Database connection lost" in out
+
+    def test_no_data_hint_skips_trivial_where(self):
+        # An empty/1=1 WHERE returning 0 records means the layer is
+        # empty, not that the query was wrong — no LIKE hint helps.
+        assert AnchorageGISPlugin._no_data_hint("") == ""
+        assert AnchorageGISPlugin._no_data_hint("1=1") == ""
+        assert AnchorageGISPlugin._no_data_hint("  1=1  ") == ""
+
+    def test_no_data_hint_emits_for_non_trivial_where(self):
+        out = AnchorageGISPlugin._no_data_hint("Name='Town Square'")
+        assert "LIKE" in out
+        assert "%" in out
+        assert "CASE-SENSITIVE" in out
+        assert "1=1" in out  # also tells the model how to confirm
+
+    def test_not_queryable_message_names_recovery_path(self):
+        out = AnchorageGISPlugin._not_queryable_message(
+            "abc123", "Web Map"
+        )
+        assert "abc123" in out
+        assert "Web Map" in out
+        assert "find_gis_content" in out
+        assert "QUERYABLE" in out
+
+
 # ── Config schema ──────────────────────────────────────────────────────
 
 
