@@ -2828,6 +2828,98 @@ class TestFindFeaturesSpanningClassifications:
                 })
 
     @pytest.mark.asyncio
+    async def test_parcel_grain_classification_layer_is_refused(
+        self, plugin
+    ):
+        # User regression: model picked PropertyInformation (a per-
+        # parcel layer with 84K records) as classification because
+        # it has a `Zoning_District` field. With our 1,000-polygon
+        # cap, only 997 random parcels were sampled — most source
+        # parcels missed the sample, result was "0 qualifying".
+        # Detect this by checking if the classification has parcel-
+        # identifier fields (it's per-parcel, not per-zone).
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            side_effect=[
+                "https://example.com/source/0",
+                "https://example.com/cls/0",
+            ],
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            # Classification looks like PropertyInformation: has
+            # Parcel_ID + Zoning_District. Wrong grain.
+            return_value={
+                "geometryType": "esriGeometryPolygon",
+                "fields": [
+                    {"name": "OBJECTID"},
+                    {"name": "Parcel_ID"},
+                    {"name": "Zoning_District"},
+                ],
+            },
+        ):
+            with pytest.raises(
+                ValueError,
+                match="per-parcel layer.*parcel grain",
+            ):
+                await plugin._find_features_spanning_classifications({
+                    "source_item_id": "a" * 32,
+                    "classification_item_id": "b" * 32,
+                    "classification_field": "Zoning_District",
+                })
+
+    @pytest.mark.asyncio
+    async def test_parcel_grain_check_allows_parcel_id_field(
+        self, plugin
+    ):
+        # Edge case: if the user deliberately spans on a parcel-id
+        # field (e.g., sanity check to find parcels that geographically
+        # overlap multiple distinct parcel IDs), we should NOT block
+        # — that's a legit if unusual analysis.
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            side_effect=[
+                "https://example.com/source/0",
+                "https://example.com/cls/0",
+            ],
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            side_effect=[
+                # Classification is parcel-grain BUT the field IS a
+                # parcel ID, so the user clearly knows what they're
+                # asking for.
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [
+                        {"name": "OBJECTID"},
+                        {"name": "Parcel_ID"},
+                    ],
+                },
+                # Source meta with a natural-ID field so the source
+                # pre-flight passes too.
+                {
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": [
+                        {"name": "OBJECTID"},
+                        {"name": "Name"},
+                    ],
+                },
+            ],
+        ), patch.object(
+            plugin, "_get_record_count", new_callable=AsyncMock,
+            return_value=0,
+        ):
+            # Should reach the source-count branch ("0 features") not
+            # the parcel-grain refusal.
+            text = await plugin._find_features_spanning_classifications(
+                {
+                    "source_item_id": "a" * 32,
+                    "classification_item_id": "b" * 32,
+                    "classification_field": "Parcel_ID",
+                }
+            )
+            assert "per-parcel layer" not in text
+
+    @pytest.mark.asyncio
     async def test_explicit_out_fields_overrides_natural_id_check(
         self, plugin
     ):

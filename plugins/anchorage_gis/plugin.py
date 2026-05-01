@@ -522,6 +522,21 @@ class AnchorageGISPlugin(DataPlugin):
         "Plat_Number", "PlatNumber",
     )
 
+    # Subset of NATURAL_ID_FIELD_PRIORITY that strongly indicates a
+    # layer is at parcel grain (one row per legal parcel). Used to
+    # detect when a classification arg is the wrong shape — e.g., a
+    # parcels-with-Zoning_District-attribute layer being used as the
+    # classification for "parcels spanning multiple zones". The right
+    # classification is a zoning-polygon layer where many polygons
+    # share each zone code.
+    PARCEL_INDICATOR_FIELDS = frozenset((
+        "Parcel_ID", "PARCEL_ID", "ParcelID", "PARCELID",
+        "Parcel_Num", "PARCEL_NUM", "ParcelNum", "PARCELNUM",
+        "Parcel_Number", "ParcelNumber",
+        "GIS_ParcelNum8", "GIS_ParcelNum11",
+        "GIS_ParcelNum8Formatted", "GIS_ParcelNum11Formatted",
+    ))
+
     @classmethod
     def _pick_natural_id(
         cls, attrs: Dict[str, Any]
@@ -3065,6 +3080,55 @@ class AnchorageGISPlugin(DataPlugin):
                 f"{sorted(cls_field_names)[:12]}..."
             )
 
+        # Wrong-grain classification detection. A classification layer
+        # that has parcel-identifier fields is itself a per-parcel
+        # layer (one polygon per legal parcel) — its `Zoning_District`
+        # or similar field is an attribute on each parcel, NOT a
+        # categorisation across few polygons. Spatial-intersecting
+        # parcels against parcels mostly produces "0 qualifying"
+        # because of the 1,000-polygon classification cap. The right
+        # classification is a dedicated zoning-polygon layer. If the
+        # caller deliberately wants to span on another parcel-grain
+        # field, they can pass that field explicitly — only refuse
+        # when classification_field is NOT itself a parcel-id
+        # (otherwise we'd block the legit "find parcels with multiple
+        # parcel IDs" sanity-check use case).
+        cls_is_parcel_grain = bool(
+            self.PARCEL_INDICATOR_FIELDS & cls_field_names
+        )
+        if (
+            cls_is_parcel_grain
+            and classification_field not in self.PARCEL_INDICATOR_FIELDS
+        ):
+            parcel_fields_present = sorted(
+                self.PARCEL_INDICATOR_FIELDS & cls_field_names
+            )
+            raise ValueError(
+                f"classification_item_id `{classification_item_id}` "
+                f"looks like a per-parcel layer — it has parcel "
+                f"identifier field(s) "
+                f"{parcel_fields_present}. That means each polygon is "
+                f"one parcel, and `{classification_field}` is an "
+                f"attribute stored on each parcel record (parcel "
+                f"grain), NOT a categorisation across a small number "
+                f"of zone polygons (zone grain).\n\n"
+                f"Spanning analysis needs the classification layer to "
+                f"have FEW polygons (zones, districts, regions) where "
+                f"many polygons share each distinct value. Otherwise "
+                f"the upstream cap of "
+                f"{self.SPANNING_CLASSIFICATION_LIMIT} polygons "
+                f"forces a random sample and the spatial join misses "
+                f"most matches.\n\n"
+                f"For zoning specifically, use the dedicated zoning "
+                f"layer — call `find_gis_content(topic='zoning')` "
+                f"and pick a Feature Service whose name is "
+                f"`Zoning_Hosted` or similar (NOT a parcels or "
+                f"property-information layer). Confirm with "
+                f"`get_layer_schema` that the layer has a "
+                f"`GeneralizedZone` or `ZONING_DESIGNATIONS` field "
+                f"and only ~1,000 polygons total."
+            )
+
         # Source layer must have a user-facing identifier field, OR
         # the caller must have explicitly chosen out_fields (which
         # signals "I know what fields this layer has").
@@ -3149,6 +3213,14 @@ class AnchorageGISPlugin(DataPlugin):
                 f"Verify with `query_data(item_id="
                 f"'{classification_item_id}', limit=1)`."
             )
+        # Detect cap-hit. The fetch tops out at SPANNING_CLASSIFICATION
+        # _LIMIT — anything ≥ 95% of cap probably means there are more
+        # polygons than we sampled, and the spatial join is operating
+        # on a partial view. Surface this so the model knows results
+        # are not exhaustive.
+        cls_cap_hit = (
+            len(cls_polys) >= 0.95 * self.SPANNING_CLASSIFICATION_LIMIT
+        )
 
         # Drop polygons whose classification value is NULL — they would
         # falsely contribute "no value" as a distinct classification.
@@ -3321,6 +3393,18 @@ class AnchorageGISPlugin(DataPlugin):
                 f"**Skipped:** {skipped_polys} classification "
                 f"polygon(s) — too complex for spatial query payload "
                 f"or upstream error. {note}"
+            )
+        if cls_cap_hit:
+            lines.append(
+                f"**Cap reached:** classification layer fetch "
+                f"hit the {self.SPANNING_CLASSIFICATION_LIMIT:,}-"
+                f"polygon cap — results are based on a partial "
+                f"sample. If qualifying count looks unexpectedly "
+                f"low, the classification layer is probably at the "
+                f"wrong grain (e.g., per-parcel instead of per-zone) "
+                f"or has more polygons than the cap allows. Narrow "
+                f"`classification_where` to a region or use a layer "
+                f"with fewer, larger polygons."
             )
         lines.append("")
 
