@@ -498,6 +498,68 @@ class AnchorageGISPlugin(DataPlugin):
         )
 
     @staticmethod
+    def _normalize_parcel_variants(raw: Any) -> List[str]:
+        """Generate MOA parcel ID format variants for cross-dataset
+        lookup.
+
+        MOA parcel IDs are stored in two related canonical forms across
+        layers:
+          - 8-digit base: ``XXXXXXXX`` (compact) or ``XXX-XXX-XX``
+            (hyphenated) — e.g. ``00318487`` / ``003-184-87``.
+          - 11-digit extended: 8-digit base + 3-digit sub-parcel
+            suffix (``000`` means no sub) — e.g. ``00318487000`` /
+            ``003-184-87-000``.
+
+        TaxParcels stores 11-digit compact in ``Parcel_Num``/``Name``;
+        PropertyInformation has all four variants in separate columns
+        (``GIS_ParcelNum8``, ``GIS_ParcelNum8Formatted``,
+        ``GIS_ParcelNum11``, ``GIS_ParcelNum11Formatted``). The model
+        rarely knows which form a given layer uses, so we generate
+        all four for use in ``WHERE field IN (...)``.
+
+        Input handling: extracts digits from the input, pads/splits
+        based on length to recover the 8-digit base + 3-digit sub.
+        Hyphens, leading zeros, and prefixes/suffixes are flexible.
+        """
+        if raw is None:
+            return []
+        digits = "".join(c for c in str(raw) if c.isdigit())
+        if not digits or len(digits) < 5:
+            return []
+
+        if len(digits) >= 11:
+            # Take the LAST 11 digits — accommodates inputs like
+            # "Parcel 00318487000" if any non-digit prefixes slipped
+            # through.
+            tail = digits[-11:]
+            base8 = tail[:8]
+            sub3 = tail[8:11]
+        elif len(digits) >= 9:
+            # 9 or 10 digits — pad on the left to 11, then split.
+            padded = digits.rjust(11, "0")
+            base8 = padded[:8]
+            sub3 = padded[8:11]
+        else:
+            # 5-8 digits — pad on the left to 8, default to no
+            # sub-parcel.
+            base8 = digits.rjust(8, "0")
+            sub3 = "000"
+
+        variants: set = set()
+        variants.add(base8)
+        variants.add(f"{base8[0:3]}-{base8[3:6]}-{base8[6:8]}")
+        variants.add(base8 + sub3)
+        variants.add(
+            f"{base8[0:3]}-{base8[3:6]}-{base8[6:8]}-{sub3}"
+        )
+        # Always also try the literal stripped input, in case the layer
+        # stores some non-canonical form we did not anticipate.
+        literal = str(raw).strip()
+        if literal:
+            variants.add(literal)
+        return sorted(variants)
+
+    @staticmethod
     def _not_queryable_message(
         item_id: str, item_type: str = ""
     ) -> str:
@@ -2683,6 +2745,195 @@ class AnchorageGISPlugin(DataPlugin):
         ]
         return "\n".join(lines)
 
+    async def _find_parcel(self, args: Dict[str, Any]) -> str:
+        """Look up a parcel across MOA format variants in one call.
+
+        The same parcel can appear in different layers as
+        ``001-213-29``, ``00121329``, ``003-184-87-000``, etc. The
+        model rarely knows which form a given layer uses; this tool
+        generates the four canonical forms from the input and tries
+        them all in a single ``WHERE field IN (...)``. If none match,
+        it falls back to a ``LIKE`` query on a distinctive substring
+        and returns up to 5 candidates the model can inspect.
+        """
+        item_id = self._validate_item_id(
+            (args.get("item_id") or "").strip()
+        )
+        parcel_field = (args.get("parcel_field") or "").strip()
+        if not parcel_field:
+            raise ValueError("parcel_field is required")
+        parcel_id = (args.get("parcel_id") or "").strip()
+        if not parcel_id:
+            raise ValueError("parcel_id is required")
+        out_fields = OutFieldsValidator.validate(
+            args.get("out_fields") or "*"
+        )
+        limit = min(int(args.get("limit", 10)), 100)
+
+        layer_url = await self._resolve_layer_url(item_id)
+        meta = await self._fetch_layer_meta(layer_url)
+        field_names = {f.get("name") for f in meta.get("fields", [])}
+        if parcel_field not in field_names:
+            raise ValueError(
+                f"parcel_field {parcel_field!r} is not a field on "
+                f"this layer. Call `get_layer_schema(item_id="
+                f"'{item_id}', keyword='parcel')` to find the right "
+                f"field name. Common MOA parcel field names: "
+                f"`Parcel_Num`, `Name`, `Parcel_ID`, `GIS_ParcelNum8`, "
+                f"`GIS_ParcelNum11`, `GIS_ParcelNum8Formatted`, "
+                f"`GIS_ParcelNum11Formatted`."
+            )
+
+        variants = self._normalize_parcel_variants(parcel_id)
+        if not variants:
+            raise ValueError(
+                f"Could not extract any digits from parcel_id "
+                f"{parcel_id!r}. Provide a parcel ID like "
+                f"'001-213-29', '00121329', or '00121329000'."
+            )
+
+        # Build IN clause; SQL-quote each variant with '' escape.
+        quoted = ",".join(
+            "'" + v.replace("'", "''") + "'" for v in variants
+        )
+        where_in = WhereValidator.validate(
+            f"{parcel_field} IN ({quoted})"
+        )
+
+        params = {
+            "f": "json",
+            "where": where_in,
+            "outFields": out_fields,
+            "returnGeometry": "false",
+            "resultRecordCount": str(limit),
+        }
+        resp = await self.client.get(
+            f"{layer_url}/query", params=params
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            err = data["error"]
+            raise RuntimeError(
+                "Parcel lookup query failed: "
+                + self._rewrite_arcgis_error(
+                    err.get("message", "Unknown error"),
+                    err.get("details", []),
+                    resource_id=item_id,
+                    has_where=True,
+                )
+            )
+
+        features = data.get("features", [])
+
+        if features:
+            matched_values: set = set()
+            for f in features:
+                v = (f.get("attributes") or {}).get(parcel_field)
+                if v is not None:
+                    matched_values.add(v)
+            lines = [
+                f"## Parcel lookup: `{parcel_id}` → "
+                f"{len(features)} record(s) found",
+                f"**Layer:** `{item_id}`",
+                f"**Field:** `{parcel_field}`",
+                f"**Variants tried ({len(variants)}):** "
+                + ", ".join(f"`{v}`" for v in variants),
+            ]
+            if matched_values:
+                canonical = sorted(matched_values)[0]
+                lines.append(
+                    "**Matched stored format(s):** "
+                    + ", ".join(
+                        f"`{v}`" for v in sorted(matched_values)
+                    )
+                )
+                lines.append(
+                    f"**Canonical form for this layer:** "
+                    f"`{canonical}` — use this verbatim for "
+                    f"follow-up queries here."
+                )
+            lines.append("")
+            for i, f in enumerate(features, 1):
+                attrs = f.get("attributes") or {}
+                lines.append(f"### Record {i}")
+                for k, v in attrs.items():
+                    lines.append(f"  {k}: {v}")
+                lines.append("")
+            return "\n".join(lines)
+
+        # Not found via exact match. Fall back to LIKE on a distinctive
+        # digit substring. Skip the first 3 chars (often leading
+        # zeros + low-info prefix) to maximise selectivity.
+        digits = "".join(c for c in parcel_id if c.isdigit())
+        candidates: List[Dict[str, Any]] = []
+        substring_used = ""
+        if len(digits) >= 5:
+            # Pick a 6-char window starting after any leading zeros for
+            # distinctiveness; fall back to the longest available.
+            stripped = digits.lstrip("0")
+            substring_used = (
+                stripped[:6] if len(stripped) >= 6 else stripped
+            )
+            if substring_used:
+                safe_sub = substring_used.replace("'", "''")
+                like_where = WhereValidator.validate(
+                    f"{parcel_field} LIKE '%{safe_sub}%'"
+                )
+                try:
+                    like_resp = await self.client.get(
+                        f"{layer_url}/query",
+                        params={
+                            "f": "json",
+                            "where": like_where,
+                            "outFields": parcel_field,
+                            "returnGeometry": "false",
+                            "resultRecordCount": "5",
+                        },
+                    )
+                    like_resp.raise_for_status()
+                    like_data = like_resp.json()
+                    if "error" not in like_data:
+                        candidates = like_data.get("features") or []
+                except Exception:
+                    candidates = []
+
+        lines = [
+            f"## Parcel lookup: no exact match for `{parcel_id}`",
+            f"**Layer:** `{item_id}`",
+            f"**Field:** `{parcel_field}`",
+            f"**Tried variants ({len(variants)}):** "
+            + ", ".join(f"`{v}`" for v in variants),
+            "",
+        ]
+        if candidates:
+            lines.append(
+                f"**LIKE fallback** with substring "
+                f"`%{substring_used}%` returned "
+                f"{len(candidates)} candidate(s):"
+            )
+            lines.append("")
+            for c in candidates:
+                attrs = c.get("attributes") or {}
+                v = attrs.get(parcel_field)
+                lines.append(f"- `{v}`")
+            lines += [
+                "",
+                "_Pick the right candidate above and use its EXACT "
+                "value for follow-up queries on this layer._",
+            ]
+        else:
+            lines += [
+                "_No candidates via LIKE fallback either. The parcel "
+                "may not exist in this layer, or the field stores the "
+                "ID in an unrecognised format. Try "
+                f"`get_distinct_values(item_id='{item_id}', "
+                f"field='{parcel_field}', "
+                f"like='{substring_used or digits[:6]}')` to discover "
+                f"the storage format._",
+            ]
+        return "\n".join(lines)
+
     async def _find_features_spanning_classifications(
         self, args: Dict[str, Any]
     ) -> str:
@@ -3254,6 +3505,97 @@ class AnchorageGISPlugin(DataPlugin):
                         },
                     },
                     "required": ["item_id", "field"],
+                },
+            ),
+            ToolDefinition(
+                name="find_parcel",
+                description=(
+                    f"Look up a {city} parcel across format variants "
+                    f"in one call. The same parcel can be stored as "
+                    f"`001-213-29`, `00121329`, `00121329000`, or "
+                    f"`003-184-87-000` across different MOA layers — "
+                    f"this tool generates all four canonical forms "
+                    f"from the input and tries them in a single "
+                    f"`WHERE field IN (...)` query.\n\n"
+                    f"WHEN TO USE: any time the user asks for a "
+                    f"specific parcel by ID and you don't already "
+                    f"know how the target layer stores parcel "
+                    f"numbers. Cheaper and more reliable than "
+                    f"calling `get_distinct_values` first.\n\n"
+                    f"INPUT FLEXIBILITY: hyphens, leading zeros, and "
+                    f"prefixes (like 'Parcel ') are stripped — pass "
+                    f"any one common form. The 8-digit base + "
+                    f"3-digit sub-parcel structure is recovered from "
+                    f"the digits.\n\n"
+                    f"FALLBACK: if no exact-format match, the tool "
+                    f"falls back to a `LIKE '%<digits>%'` query and "
+                    f"returns up to 5 candidates the model can "
+                    f"inspect — so a near-match still surfaces "
+                    f"something useful instead of a flat 'not "
+                    f"found'.\n\n"
+                    f"PRE-FLIGHT (recommended): call "
+                    f"`get_layer_schema(item_id=<id>, "
+                    f"keyword='parcel')` to find the right "
+                    f"`parcel_field` name. Common ones: "
+                    f"`Parcel_Num`, `Name`, `Parcel_ID`, "
+                    f"`GIS_ParcelNum8`, `GIS_ParcelNum11`, "
+                    f"`GIS_ParcelNum8Formatted`, "
+                    f"`GIS_ParcelNum11Formatted`."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "item_id": {
+                            "type": "string",
+                            "description": (
+                                "ArcGIS item ID of a queryable "
+                                "Feature/Map Service that has a "
+                                "parcel-ID field."
+                            ),
+                        },
+                        "parcel_field": {
+                            "type": "string",
+                            "description": (
+                                "Name of the parcel-ID field on the "
+                                "layer. CASE-SENSITIVE. Use "
+                                "`get_layer_schema(item_id=<id>, "
+                                "keyword='parcel')` to find it."
+                            ),
+                        },
+                        "parcel_id": {
+                            "type": "string",
+                            "description": (
+                                "The parcel ID in any common form: "
+                                "'001-213-29', '00121329', "
+                                "'00121329000', '003-184-87-000', "
+                                "or even '1-213-29' (leading zeros "
+                                "filled in). Hyphens and prefixes "
+                                "are flexible."
+                            ),
+                        },
+                        "out_fields": {
+                            "type": "string",
+                            "description": (
+                                "Comma-separated field names to "
+                                "return for matched records "
+                                "(default '*')."
+                            ),
+                            "default": "*",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                "Max records to return (default 10, "
+                                "max 100)."
+                            ),
+                            "default": 10,
+                        },
+                    },
+                    "required": [
+                        "item_id",
+                        "parcel_field",
+                        "parcel_id",
+                    ],
                 },
             ),
             ToolDefinition(
@@ -3994,6 +4336,9 @@ class AnchorageGISPlugin(DataPlugin):
 
             elif tool_name == "get_distinct_values":
                 text = await self._get_distinct_values(arguments)
+
+            elif tool_name == "find_parcel":
+                text = await self._find_parcel(arguments)
 
             elif tool_name == "search_layers_by_field":
                 text = await self._search_layers_by_field(arguments)

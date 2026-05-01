@@ -109,7 +109,7 @@ class TestGetTools:
         plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
         tools = plugin.get_tools()
 
-        assert len(tools) == 13
+        assert len(tools) == 14
         tool_names = [t.name for t in tools]
         assert "find_gis_content" in tool_names
         assert "browse_gallery" in tool_names
@@ -117,6 +117,7 @@ class TestGetTools:
         assert "get_item_details" in tool_names
         assert "get_layer_schema" in tool_names
         assert "get_distinct_values" in tool_names
+        assert "find_parcel" in tool_names
         assert "search_layers_by_field" in tool_names
         assert "query_data" in tool_names
         assert "spatial_query_point" in tool_names
@@ -2429,6 +2430,67 @@ class TestGetDistinctValues:
                 })
 
 
+class TestNormalizeParcelVariants:
+    """Pure normaliser for MOA parcel IDs. Generates the four
+    canonical formats (8-digit compact + hyphenated, 11-digit
+    compact + hyphenated) from any common input form."""
+
+    def test_hyphenated_8digit_input(self):
+        # Input "001-213-29" — MOA-canonical short hyphenated form.
+        out = AnchorageGISPlugin._normalize_parcel_variants("001-213-29")
+        assert "00121329" in out
+        assert "001-213-29" in out
+        assert "00121329000" in out
+        assert "001-213-29-000" in out
+
+    def test_compact_8digit_input_pads_with_default_sub(self):
+        # Compact 8-digit input — sub-parcel defaults to "000".
+        out = AnchorageGISPlugin._normalize_parcel_variants("00121329")
+        assert "00121329" in out
+        assert "001-213-29" in out
+        assert "00121329000" in out
+        assert "001-213-29-000" in out
+
+    def test_compact_11digit_input_preserves_sub(self):
+        # Real sub-parcel "001" should round-trip in the variants.
+        out = AnchorageGISPlugin._normalize_parcel_variants("00121329001")
+        assert "00121329001" in out
+        assert "001-213-29-001" in out
+        # Both 8-digit forms should also be present (so model can find
+        # the parent parcel across layers that drop the sub).
+        assert "00121329" in out
+        assert "001-213-29" in out
+
+    def test_input_with_leading_zero_dropped(self):
+        # User typed "1-213-29" — 6 digits, missing leading zeros.
+        # Must still recover the canonical "001-213-29" form.
+        out = AnchorageGISPlugin._normalize_parcel_variants("1-213-29")
+        assert "001-213-29" in out
+        assert "00121329" in out
+
+    def test_input_with_prefix_text(self):
+        # Real-world: "Parcel 003-184-87". Text prefix should not
+        # break extraction.
+        out = AnchorageGISPlugin._normalize_parcel_variants(
+            "Parcel 003-184-87"
+        )
+        assert "00318487" in out
+        assert "003-184-87" in out
+        assert "00318487000" in out
+
+    def test_too_short_returns_empty(self):
+        # < 5 digits is too ambiguous to normalise; refuse rather than
+        # generate misleading variants.
+        assert AnchorageGISPlugin._normalize_parcel_variants("12") == []
+        assert AnchorageGISPlugin._normalize_parcel_variants("") == []
+        assert AnchorageGISPlugin._normalize_parcel_variants(None) == []
+
+    def test_no_digits_returns_empty(self):
+        assert AnchorageGISPlugin._normalize_parcel_variants(
+            "no digits here"
+        ) == []
+
+
 class TestFindFeaturesSpanningClassifications:
     """The split-zoned-parcel pattern, generalised. A source feature
     (parcel, address, road) qualifies if its footprint touches >=
@@ -2653,6 +2715,166 @@ class TestFindFeaturesSpanningClassifications:
                     "source_item_id": "a" * 32,
                     "classification_item_id": "b" * 32,
                     "classification_field": "ZONE_CODE",
+                })
+
+
+class TestFindParcel:
+    """Integration of the parcel normaliser with a real WHERE IN
+    lookup. Validates that the variants are sent to the upstream
+    correctly and that the response surfaces the canonical stored
+    form for follow-up queries."""
+
+    @pytest.fixture
+    def plugin(self, anchorage_config):
+        p = AnchorageGISPlugin(anchorage_config)
+        p.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        return p
+
+    @pytest.mark.asyncio
+    async def test_in_clause_carries_all_variants(self, plugin):
+        # Verify the WHERE IN actually contains every generated form,
+        # so a layer storing any of them would match.
+        captured = {}
+
+        async def fake_get(url, params=None):
+            captured.update(params or {})
+            resp = Mock()
+            resp.status_code = 200
+            resp.raise_for_status = Mock()
+            resp.json.return_value = {
+                "features": [
+                    {"attributes": {"Parcel_Num": "00121329000"}}
+                ]
+            }
+            return resp
+
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            return_value="https://example.com/Layer/0",
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            return_value={"fields": [{"name": "Parcel_Num"}]},
+        ):
+            plugin.client = Mock()
+            plugin.client.get = fake_get
+
+            await plugin._find_parcel({
+                "item_id": "a" * 32,
+                "parcel_field": "Parcel_Num",
+                "parcel_id": "001-213-29",
+            })
+
+        where = captured["where"]
+        # All four canonical forms must be in the IN clause.
+        assert "'00121329'" in where
+        assert "'001-213-29'" in where
+        assert "'00121329000'" in where
+        assert "'001-213-29-000'" in where
+        assert "Parcel_Num IN" in where
+
+    @pytest.mark.asyncio
+    async def test_match_surfaces_canonical_stored_form(self, plugin):
+        # The layer happens to store 11-digit compact. Response should
+        # tell the model what stored format matched, so follow-up
+        # queries on this layer use the right form verbatim.
+        async def fake_get(url, params=None):
+            resp = Mock()
+            resp.status_code = 200
+            resp.raise_for_status = Mock()
+            resp.json.return_value = {
+                "features": [
+                    {
+                        "attributes": {
+                            "Parcel_Num": "00318487000",
+                            "Source": "P-464",
+                        }
+                    }
+                ]
+            }
+            return resp
+
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            return_value="https://example.com/Layer/0",
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            return_value={"fields": [{"name": "Parcel_Num"}]},
+        ):
+            plugin.client = Mock()
+            plugin.client.get = fake_get
+
+            text = await plugin._find_parcel({
+                "item_id": "a" * 32,
+                "parcel_field": "Parcel_Num",
+                "parcel_id": "003-184-87",
+            })
+
+        assert "00318487000" in text
+        assert "Canonical form for this layer" in text
+        assert "P-464" in text  # other fields surfaced too
+
+    @pytest.mark.asyncio
+    async def test_no_match_falls_back_to_like(self, plugin):
+        # First call (IN) returns no features; second call (LIKE)
+        # returns 2 candidates. The response should surface the
+        # candidates so the model has something to act on.
+        call_count = {"n": 0}
+
+        async def fake_get(url, params=None):
+            call_count["n"] += 1
+            resp = Mock()
+            resp.status_code = 200
+            resp.raise_for_status = Mock()
+            if call_count["n"] == 1:
+                # Exact-match IN returns nothing.
+                resp.json.return_value = {"features": []}
+            else:
+                # LIKE fallback finds candidates.
+                resp.json.return_value = {
+                    "features": [
+                        {"attributes": {"Parcel_Num": "00121329111"}},
+                        {"attributes": {"Parcel_Num": "00121329222"}},
+                    ]
+                }
+            return resp
+
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            return_value="https://example.com/Layer/0",
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            return_value={"fields": [{"name": "Parcel_Num"}]},
+        ):
+            plugin.client = Mock()
+            plugin.client.get = fake_get
+
+            text = await plugin._find_parcel({
+                "item_id": "a" * 32,
+                "parcel_field": "Parcel_Num",
+                "parcel_id": "001-213-29",
+            })
+
+        assert "no exact match" in text
+        assert "LIKE fallback" in text
+        assert "00121329111" in text
+        assert "00121329222" in text
+
+    @pytest.mark.asyncio
+    async def test_unknown_parcel_field_names_recovery(self, plugin):
+        # Bad field name should give the model a clear path to recover
+        # — same UX pattern as the rest of the plugin's errors.
+        with patch.object(
+            plugin, "_resolve_layer_url", new_callable=AsyncMock,
+            return_value="https://example.com/Layer/0",
+        ), patch.object(
+            plugin, "_fetch_layer_meta", new_callable=AsyncMock,
+            return_value={"fields": [{"name": "Parcel_Num"}]},
+        ):
+            with pytest.raises(ValueError, match="get_layer_schema"):
+                await plugin._find_parcel({
+                    "item_id": "a" * 32,
+                    "parcel_field": "made_up_field",
+                    "parcel_id": "001-213-29",
                 })
 
 
