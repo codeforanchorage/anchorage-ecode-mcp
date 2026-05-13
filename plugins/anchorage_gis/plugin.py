@@ -551,9 +551,9 @@ class AnchorageGISPlugin(DataPlugin):
             if geometry is not None:
                 geom_str = json.dumps(geometry, separators=(",", ":"))
                 if len(geom_str) > self.GEOMETRY_STR_MAX:
-                    truncated = geom_str[: self.GEOMETRY_STR_MAX]
+                    geom_clip = geom_str[: self.GEOMETRY_STR_MAX]
                     geom_str = (
-                        f"{truncated}... "
+                        f"{geom_clip}... "
                         f"(truncated, {len(geom_str)} chars total; "
                         f"server-side simplified to "
                         f"~{self.GEOMETRY_SIMPLIFY_OFFSET_DEG} deg "
@@ -561,6 +561,19 @@ class AnchorageGISPlugin(DataPlugin):
                     )
                 lines.append(f"  geometry (GeoJSON, WGS84): {geom_str}")
             lines.append("")
+        # A3 (Copilot): re-state the TRUNCATED warning as prose at the
+        # bottom so GPT-4o-style summarization picks it up even if the
+        # structured marker at the top gets dropped during rendering.
+        # Redundant for Claude (which reads top-down faithfully); cheap
+        # insurance for everyone else.
+        if truncated:
+            lines.append(
+                f"(Reminder: results above are a sample of "
+                f"{len(records)} from {total_count:,} matching "
+                f"records. Do not generalize counts or percentages "
+                f"from them; use the TOTAL COUNT for 'how many' "
+                f"answers.)"
+            )
         return "\n".join(lines)
 
     # ── DataPlugin interface methods ──────────────────────────────────────
@@ -4027,24 +4040,14 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="find_gis_content",
                 description=(
-                    f"START HERE for any {city} GIS question. Searches the "
-                    f"GIS portal for maps, apps, and datasets on a topic. "
-                    f"Use whenever the user asks 'do you have data about "
-                    f"X?', 'how many X are there?', 'where is X?', 'show "
-                    f"me X' -- e.g. 'flood zones', 'trails', 'zoning', "
-                    f"'schools', 'parks'. Searches both the curated public "
-                    f"gallery AND raw spatial layers in one call.\n\n"
-                    f"TYPICAL CHAIN: this tool returns a list of items, "
-                    f"each with an `id`. Then call:\n"
-                    f"  * `query_data(item_id, limit=1)` to COUNT records "
-                    f"(read the 'TOTAL COUNT' line in the response -- that "
-                    f"answers 'how many?').\n"
-                    f"  * `query_data(item_id, where=..., limit=N)` to "
-                    f"LIST records.\n"
-                    f"  * `get_item_details(item_id)` for a full "
-                    f"description.\n"
-                    f"  * `get_layer_schema(item_id)` to see field names "
-                    f"before writing a WHERE clause."
+                    f"START HERE for any {city} GIS question. Searches "
+                    f"the GIS portal for maps, apps, and datasets on a "
+                    f"topic (e.g. 'flood zones', 'trails', 'parks'). "
+                    f"Returns items each with an `id`; follow up with "
+                    f"`query_data(item_id, limit=1)` for counts, "
+                    f"`query_data(item_id, where=..., limit=N)` for "
+                    f"listings, or `get_layer_schema(item_id)` to see "
+                    f"real field names before writing a WHERE clause."
                 ),
                 input_schema={
                     "type": "object",
@@ -4207,22 +4210,14 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="get_distinct_values",
                 description=(
-                    f"List the distinct values that appear in a "
-                    f"{city} Feature Service field -- for confirming "
-                    f"the EXACT format of identifiers, codes, or "
-                    f"categories before writing a WHERE clause. "
-                    f"Use whenever the user mentions a value (e.g. "
-                    f"'zone R2M', 'parcel 1-213-29', 'community "
-                    f"council Fairview') and you need to verify how "
-                    f"the layer actually stores it. Common variants: "
-                    f"'R2M' vs 'R-2M', '1-213-29' vs '0012132900', "
-                    f"'Fairview' vs 'FAIRVIEW'.\n\n"
-                    f"Optional `like` parameter narrows results to "
-                    f"values containing a substring (case-sensitive "
-                    f"on the layer side).\n\n"
-                    f"TYPICAL CHAIN: `find_gis_content` -> "
-                    f"`get_layer_schema` -> `get_distinct_values` -> "
-                    f"`query_data` (with the verified value)."
+                    f"List the distinct values in a {city} Feature "
+                    f"Service field -- to confirm EXACT format of "
+                    f"identifiers/codes before writing a WHERE clause. "
+                    f"Catches variants like 'R2M' vs 'R-2M', "
+                    f"'1-213-29' vs '0012132900', 'Fairview' vs "
+                    f"'FAIRVIEW'. Optional `like` substring-narrows. "
+                    f"Chain: get_layer_schema -> get_distinct_values "
+                    f"-> query_data with the verified value."
                 ),
                 input_schema={
                     "type": "object",
@@ -4274,37 +4269,17 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="find_parcel",
                 description=(
-                    f"Look up a {city} parcel across format variants "
-                    f"in one call. The same parcel can be stored as "
-                    f"`001-213-29`, `00121329`, `00121329000`, or "
-                    f"`003-184-87-000` across different MOA layers -- "
-                    f"this tool generates all four canonical forms "
-                    f"from the input and tries them in a single "
-                    f"`WHERE field IN (...)` query.\n\n"
-                    f"WHEN TO USE: any time the user asks for a "
-                    f"specific parcel by ID and you don't already "
-                    f"know how the target layer stores parcel "
-                    f"numbers. Cheaper and more reliable than "
-                    f"calling `get_distinct_values` first.\n\n"
-                    f"INPUT FLEXIBILITY: hyphens, leading zeros, and "
-                    f"prefixes (like 'Parcel ') are stripped -- pass "
-                    f"any one common form. The 8-digit base + "
-                    f"3-digit sub-parcel structure is recovered from "
-                    f"the digits.\n\n"
-                    f"FALLBACK: if no exact-format match, the tool "
-                    f"falls back to a `LIKE '%<digits>%'` query and "
-                    f"returns up to 5 candidates the model can "
-                    f"inspect -- so a near-match still surfaces "
-                    f"something useful instead of a flat 'not "
-                    f"found'.\n\n"
-                    f"PRE-FLIGHT (recommended): call "
-                    f"`get_layer_schema(item_id=<id>, "
-                    f"keyword='parcel')` to find the right "
-                    f"`parcel_field` name. Common ones: "
-                    f"`Parcel_Num`, `Name`, `Parcel_ID`, "
-                    f"`GIS_ParcelNum8`, `GIS_ParcelNum11`, "
-                    f"`GIS_ParcelNum8Formatted`, "
-                    f"`GIS_ParcelNum11Formatted`."
+                    f"Look up a {city} parcel across the 4 MOA format "
+                    f"variants (`001-213-29`, `00121329`, "
+                    f"`00121329000`, `003-184-87-000`) in one query. "
+                    f"Pass any one form -- hyphens, leading zeros, "
+                    f"and 'Parcel ' prefixes are normalized. Falls "
+                    f"back to a LIKE search returning up to 5 "
+                    f"candidates on no exact match. Pre-flight "
+                    f"`get_layer_schema(item_id, keyword='parcel')` "
+                    f"to pick the right `parcel_field` -- usually "
+                    f"one of: Parcel_Num, Parcel_ID, GIS_ParcelNum8, "
+                    f"GIS_ParcelNum11."
                 ),
                 input_schema={
                     "type": "object",
@@ -4406,25 +4381,16 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="query_data",
                 description=(
-                    f"Query records from a {city} ArcGIS Feature Service. "
-                    f"Provide the item ID -- the plugin resolves the service "
-                    f"URL automatically.\n\n"
-                    f"DISCOVERY-FIRST WORKFLOW: `find_gis_content` / "
-                    f"`search_spatial_layers` (find items) -> "
-                    f"`get_item_details` (confirm the item is queryable) -> "
-                    f"`get_layer_schema` (see the REAL field names) -> "
-                    f"`query_data`. Never guess field names -- they are "
-                    f"case-sensitive, and typos are rejected up front with "
-                    f"a 'did you mean' suggestion before the query runs.\n"
-                    f"COUNTING ('how many X?'): set `limit=1` and read the "
-                    f"'TOTAL COUNT' line at the top of the response. The "
-                    f"total reflects the WHERE clause (default `1=1` = "
-                    f"all records).\n"
-                    f"LISTING: set `limit` to how many records you want "
-                    f"and (optionally) `where` to filter.\n"
-                    f"PRECONDITION: the item must be a Feature Service or "
-                    f"Map Service (not a Web Map or app). If unsure, "
-                    f"`get_item_details` shows the type and service URL."
+                    f"Query records from a {city} ArcGIS Feature "
+                    f"Service. Field names are CASE-SENSITIVE -- use "
+                    f"`get_layer_schema(item_id)` first; typos are "
+                    f"caught with a 'did you mean' suggestion. "
+                    f"COUNTING ('how many X?'): set `limit=1` and "
+                    f"read the 'TOTAL COUNT' line. LISTING: set "
+                    f"`limit` to how many records you want and "
+                    f"optional `where` to filter (default 1=1 = all). "
+                    f"Item must be a Feature/Map Service (not a Web "
+                    f"Map or app)."
                 ),
                 input_schema={
                     "type": "object",
@@ -4448,9 +4414,10 @@ class AnchorageGISPlugin(DataPlugin):
                         "limit": {
                             "type": "integer",
                             "description": (
-                                "Maximum number of records (default 100)."
+                                "Maximum number of records (default 25). "
+                                "Raise to 100+ for full listings."
                             ),
-                            "default": 100,
+                            "default": 25,
                             "minimum": 1,
                             "maximum": 1000,
                         },
@@ -4493,20 +4460,16 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="spatial_query_point",
                 description=(
-                    f"Point-in-polygon lookup on a {city} polygon Feature "
-                    f"Service. Given a lon/lat (WGS84), returns the "
-                    f"attributes of every polygon feature that contains "
-                    f"the point -- e.g. 'which park is at this location?', "
-                    f"'which zoning district?', 'which flood zone?'.\n\n"
-                    f"DISCOVERY-FIRST: call `get_layer_schema` before "
-                    f"using this tool to (a) confirm the layer's "
-                    f"geometryType is esriGeometryPolygon and (b) see the "
-                    f"real field names if you plan to narrow with `where` "
-                    f"or `out_fields`. Field names are case-sensitive; "
-                    f"guessed names will be rejected before the query "
-                    f"runs.\n"
-                    f"Returns attributes only; polygon geometry is not "
-                    f"included in the response."
+                    f"Point-in-polygon lookup on a {city} polygon "
+                    f"Feature Service. Given a lon/lat (WGS84), "
+                    f"returns the attributes of every polygon "
+                    f"containing the point ('which park / zone / "
+                    f"flood zone is here?'). Call `get_layer_schema` "
+                    f"first to confirm geometryType is "
+                    f"esriGeometryPolygon and to see field names for "
+                    f"the optional `where` / `out_fields`. Field "
+                    f"names are CASE-SENSITIVE. Returns attributes "
+                    f"only; no geometry."
                 ),
                 input_schema={
                     "type": "object",
@@ -4565,30 +4528,20 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="spatial_query_polygon",
                 description=(
-                    f"Server-side spatial intersection query on a {city} "
-                    f"Feature Service. Given a polygon filter -- either "
-                    f"inline GeoJSON via filter_geometry, or a reference "
-                    f"to polygon feature(s) in another layer via "
-                    f"filter_item_id + filter_where -- returns every "
-                    f"target feature whose geometry intersects (or other "
-                    f"spatial relation) the filter. Target layer may be "
-                    f"polygon, polyline, or point. Use this instead of "
-                    f"centroid-based assignments when features can "
-                    f"straddle a boundary -- e.g. 'which LRSA road "
-                    f"segments fall within Assembly District 5?', "
-                    f"'which trails cross this park?', 'which parcels "
-                    f"touch this flood zone?'.\n\n"
-                    f"DISCOVERY-FIRST: call `get_layer_schema` on BOTH "
-                    f"the target layer (`item_id`) and any filter layer "
-                    f"(`filter_item_id`) before writing `where` / "
-                    f"`filter_where` -- they live in different schemas "
-                    f"with different field names. Field names are "
-                    f"case-sensitive; guessed names are rejected before "
-                    f"the query runs.\n"
-                    f"Note: the ArcGIS REST 'intersects' relation "
-                    f"returns whole features -- set return_geometry=true "
-                    f"to retrieve GeoJSON geometries for precise "
-                    f"client-side clipping at the filter boundary."
+                    f"Server-side spatial intersection on a {city} "
+                    f"Feature Service. Polygon filter is either inline "
+                    f"GeoJSON (`filter_geometry`) or polygon feature(s) "
+                    f"in another layer (`filter_item_id` + "
+                    f"`filter_where`). Returns target features whose "
+                    f"geometry intersects (or other `spatial_rel`) the "
+                    f"filter. Target layer can be polygon, polyline, "
+                    f"or point -- use this over centroid-based "
+                    f"assignments when features can straddle "
+                    f"boundaries. Call `get_layer_schema` on BOTH "
+                    f"layers (target and filter) before writing "
+                    f"`where`/`filter_where` -- they have different "
+                    f"schemas. Set `return_geometry=true` for GeoJSON "
+                    f"output if you need to clip client-side."
                 ),
                 input_schema={
                     "type": "object",
@@ -4673,11 +4626,11 @@ class AnchorageGISPlugin(DataPlugin):
                         "limit": {
                             "type": "integer",
                             "description": (
-                                "Max features to return (default 50, "
+                                "Max features to return (default 25, "
                                 "capped at 1000; capped at 50 when "
                                 "return_geometry=true)."
                             ),
-                            "default": 50,
+                            "default": 25,
                             "minimum": 1,
                             "maximum": 1000,
                         },
@@ -4699,19 +4652,15 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="aggregate_by_polygon",
                 description=(
-                    f"Bucket records from one {city} layer into polygons "
-                    f"from another and return counts and sums per bucket. "
-                    f"Use this instead of calling spatial_query_point in a "
-                    f"loop. Answers questions like 'how many X per "
-                    f"community council', 'total Y by assembly district', "
-                    f"'total road miles per district', 'cleanup tonnage "
-                    f"by neighborhood'. Source layer can be points, "
-                    f"polylines (road centerlines, trails, transit), or "
-                    f"polygons. If you find yourself calling "
-                    f"spatial_query_point more than 5 times, switch to "
-                    f"this. Returns a table of count + summed numeric "
-                    f"fields per bucket, plus an unmatched count for "
-                    f"data-quality signal."
+                    f"Bucket records from one {city} layer into "
+                    f"polygons from another and return counts + sums "
+                    f"per bucket. Answers 'how many X per community "
+                    f"council', 'total tons by district', etc. "
+                    f"Source can be points/polylines/polygons; "
+                    f"aggregation must be polygons. Returns count + "
+                    f"summed numeric fields per bucket, plus an "
+                    f"unmatched count. Prefer this over a loop of "
+                    f"spatial_query_point calls."
                 ),
                 input_schema={
                     "type": "object",
@@ -4926,66 +4875,20 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="find_features_spanning_classifications",
                 description=(
-                    f"Find {city} source features whose footprint "
-                    f"touches >= `min_distinct` distinct values of a "
-                    f"classification field in another polygon layer. "
-                    f"This is the 'split-zoned parcel' / 'parcel "
-                    f"crosses a flood zone boundary' / 'address spans "
-                    f"two community councils' pattern, generalised.\n\n"
-                    f"WHEN TO USE: any question of the form 'which X "
-                    f"span / cross / are split by / fall in multiple "
-                    f"Y?'. Examples: 'split-zoned parcels', 'parcels "
-                    f"on a flood zone boundary', 'roads crossing "
-                    f"district lines', 'addresses on a council "
-                    f"boundary'.\n\n"
-                    f"**SOURCE vs CLASSIFICATION -- the most common "
-                    f"mistake to avoid:**\n"
-                    f"- `source_item_id` = the layer of THINGS YOU "
-                    f"WANT BACK (parcels, roads, addresses). Must "
-                    f"have a user-facing identifier field "
-                    f"(Parcel_ID, Name, Address) -- typically "
-                    f"thousands+ of features.\n"
-                    f"- `classification_item_id` = the layer of "
-                    f"REGIONS that partition space (zoning, flood, "
-                    f"districts). MUST be polygon-typed -- typically "
-                    f"dozens to hundreds of features.\n"
-                    f"- For 'parcels spanning multiple zones': "
-                    f"source = a parcels layer (e.g. "
-                    f"MOA_Parcels_Hosted), classification = a "
-                    f"zoning layer (e.g. Zoning_Hosted). Do NOT use "
-                    f"the same layer for both -- self-intersection "
-                    f"is meaningless.\n"
-                    f"- If unsure, run "
-                    f"`find_gis_content(topic='parcels')` and pick "
-                    f"a Feature Service that has a `Parcel_ID` "
-                    f"field for source.\n\n"
-                    f"WHY NOT `aggregate_by_polygon`: that tool "
-                    f"reduces each source feature to a single point "
-                    f"and assigns it to one polygon -- a parcel "
-                    f"straddling two zones is silently put in one "
-                    f"of them. This tool uses true spatial "
-                    f"intersection so split features are caught.\n\n"
-                    f"PRE-FLIGHT (recommended): "
-                    f"`get_layer_schema(item_id="
-                    f"<classification_item_id>)` to confirm the "
-                    f"field name, then `get_distinct_values(item_id="
-                    f"<classification_item_id>, field="
-                    f"<classification_field>)` to see what values "
-                    f"exist. Field names and values are "
-                    f"CASE-SENSITIVE.\n\n"
-                    f"CAPS: source layer must have <= 5,000 features "
-                    f"matching `source_where` (use `source_where` to "
-                    f"narrow if exceeded -- e.g. by "
-                    f"neighborhood/zone/region). Classification layer "
-                    f"capped at 1,000 polygons.\n\n"
-                    f"OUTPUT: a histogram of distinct-value "
-                    f"touch-counts across ALL source features (so the "
-                    f"model sees the distribution), plus the "
-                    f"qualifying features (>= min_distinct) listed "
-                    f"with the actual values they span. Both are "
-                    f"returned in one call -- this IS the final "
-                    f"answer for split-feature questions, no further "
-                    f"chaining needed."
+                    f"Find {city} features that cross multiple values "
+                    f"of a classification field -- the 'split-zoned "
+                    f"parcels', 'parcels on a flood-zone boundary', "
+                    f"'roads crossing district lines' pattern. "
+                    f"`source_item_id` is the layer of THINGS to "
+                    f"return (parcels, roads); "
+                    f"`classification_item_id` is a polygon layer of "
+                    f"REGIONS (zoning, flood). Use DIFFERENT layers "
+                    f"for each. Returns a touch-count histogram + the "
+                    f"qualifying features in one call -- no chaining "
+                    f"needed. Pre-flight with `get_layer_schema` and "
+                    f"`get_distinct_values` on the classification "
+                    f"layer to confirm the field. Caps: source <= "
+                    f"5000 matches, classification <= 1000 polygons."
                 ),
                 input_schema={
                     "type": "object",
@@ -5159,7 +5062,7 @@ class AnchorageGISPlugin(DataPlugin):
                 return_geometry = bool(
                     arguments.get("return_geometry", False)
                 )
-                requested_limit = int(arguments.get("limit", 100))
+                requested_limit = int(arguments.get("limit", 25))
                 effective_limit = (
                     min(requested_limit, self.GEOMETRY_LIMIT_CAP)
                     if return_geometry
@@ -5316,7 +5219,7 @@ class AnchorageGISPlugin(DataPlugin):
                 return_geometry = bool(
                     arguments.get("return_geometry", False)
                 )
-                requested_limit = int(arguments.get("limit", 50))
+                requested_limit = int(arguments.get("limit", 25))
                 effective_limit = (
                     min(requested_limit, self.GEOMETRY_LIMIT_CAP)
                     if return_geometry
