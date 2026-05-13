@@ -347,6 +347,7 @@ class AnchorageGISPlugin(DataPlugin):
         service_url: Optional[str] = None,
         where: Optional[str] = None,
         out_fields: Optional[str] = None,
+        coded_domains: Optional[Dict[str, Dict[Any, str]]] = None,
     ) -> str:
         provenance: List[str] = []
         if service_url:
@@ -452,6 +453,16 @@ class AnchorageGISPlugin(DataPlugin):
                     continue
                 if date_fields and key in date_fields and value is not None:
                     value = self._ms_to_iso_smart(value)
+                elif (
+                    coded_domains
+                    and key in coded_domains
+                    and value is not None
+                    and value in coded_domains[key]
+                ):
+                    # Render coded values as "<code> (<label>)" so the
+                    # model doesn't have to guess what e.g. R1A means.
+                    label = coded_domains[key][value]
+                    value = f"{value} ({label})"
                 lines.append(f"  {key}: {value}")
             if geometry is not None:
                 geom_str = json.dumps(geometry, separators=(",", ":"))
@@ -1873,33 +1884,39 @@ class AnchorageGISPlugin(DataPlugin):
         except Exception:
             return None
 
-    async def _safe_date_fields(self, item_id: str) -> Optional[set]:
-        # Best-effort lookup of date field names for an item's layer.
+    async def _safe_layer_meta(self, item_id: str) -> Dict[str, Any]:
+        # Best-effort lookup of the layer quick-meta (date fields,
+        # coded domains, geometry type, name field) for an item.
         # Used by paths (spatial_*) that don't otherwise need the layer
         # URL upstream — resolve via get_dataset, then quick_meta. Any
-        # failure returns None so callers fall back to raw epoch
-        # rendering rather than blocking the user's spatial result.
+        # failure returns {} so callers fall back to raw rendering
+        # rather than blocking the user's spatial result.
         try:
             item = await self.get_dataset(item_id)
             service_url = self._ensure_layer_url(item.get("url", ""))
             if not service_url:
-                return None
-            quick_meta = await self._get_layer_quick_meta(service_url)
-            return (quick_meta or {}).get("date_fields")
+                return {}
+            return await self._get_layer_quick_meta(service_url) or {}
         except Exception:
-            return None
+            return {}
 
     async def _get_layer_quick_meta(
         self, service_url: str
     ) -> Dict[str, Any]:
         """Fetch a small bundle of layer metadata used by the query
-        formatter: date field names (for epoch→ISO conversion) and
-        geometry type (for the polyline-grain warning on counts).
+        formatter: date field names (for epoch→ISO conversion),
+        coded-value domains (for decoding raw codes in output),
+        and geometry type (for the polyline-grain warning on counts).
         Best-effort — returns an empty dict on any error so callers
         can degrade gracefully.
 
-        Returns ``{date_fields: set|None, geometry_type: str|None,
-        name_field: str|None}``. ``name_field`` is the first
+        Returns ``{date_fields: set|None, coded_domains: dict|None,
+        geometry_type: str|None, name_field: str|None}``.
+        ``coded_domains`` maps field name → {code: label} for fields
+        whose schema declares an ``esriFieldTypeCodedValue`` domain,
+        letting the formatter render ``ZONE: R1A
+        (Single-Family Residential)`` instead of forcing the model to
+        guess what ``R1A`` means. ``name_field`` is the first
         natural-ID-style field present, used to suggest a follow-up
         get_distinct_values call when warning about polyline grain.
         """
@@ -1921,6 +1938,20 @@ class AnchorageGISPlugin(DataPlugin):
             for f in fields
             if f.get("type") == "esriFieldTypeDate"
         } or None
+        coded_domains: Dict[str, Dict[Any, str]] = {}
+        for f in fields:
+            domain = f.get("domain") or {}
+            if domain.get("type") != "codedValue":
+                continue
+            fname = f.get("name")
+            coded_values = domain.get("codedValues") or []
+            mapping = {
+                cv.get("code"): cv.get("name")
+                for cv in coded_values
+                if cv.get("code") is not None and cv.get("name")
+            }
+            if fname and mapping:
+                coded_domains[fname] = mapping
         field_names = {f.get("name") for f in fields}
         name_field = next(
             (
@@ -1932,6 +1963,7 @@ class AnchorageGISPlugin(DataPlugin):
         )
         return {
             "date_fields": date_fields,
+            "coded_domains": coded_domains or None,
             "geometry_type": data.get("geometryType"),
             "name_field": name_field,
         }
@@ -4997,6 +5029,11 @@ class AnchorageGISPlugin(DataPlugin):
                     service_url=service_url,
                     where=validated_where,
                     out_fields=out_fields,
+                    coded_domains=(
+                        quick_meta.get("coded_domains")
+                        if not return_geometry
+                        else None
+                    ),
                 )
                 if not records:
                     text += self._no_data_hint(where)
@@ -5016,7 +5053,7 @@ class AnchorageGISPlugin(DataPlugin):
                         error_message="lon and lat are required",
                     )
                 limit = min(int(arguments.get("limit", 10)), 50)
-                records, date_fields = await asyncio.gather(
+                records, layer_meta = await asyncio.gather(
                     self.spatial_query_point(
                         item_id,
                         lon=arguments["lon"],
@@ -5027,7 +5064,7 @@ class AnchorageGISPlugin(DataPlugin):
                         },
                         limit=limit,
                     ),
-                    self._safe_date_fields(item_id),
+                    self._safe_layer_meta(item_id),
                 )
                 if not records:
                     text = (
@@ -5037,14 +5074,14 @@ class AnchorageGISPlugin(DataPlugin):
                 else:
                     # total_count=None avoids a misleading "of N total"
                     # line: every match is already in `records`, there
-                    # is no paging going on. date_fields comes from a
-                    # best-effort meta lookup; raw epoch falls through
-                    # on any failure.
+                    # is no paging going on. layer_meta is best-effort;
+                    # raw rendering falls through on any failure.
                     text = self._format_query_results(
                         records,
                         limit,
                         total_count=None,
-                        date_fields=date_fields,
+                        date_fields=layer_meta.get("date_fields"),
+                        coded_domains=layer_meta.get("coded_domains"),
                     )
 
             elif tool_name == "spatial_query_polygon":
@@ -5078,7 +5115,7 @@ class AnchorageGISPlugin(DataPlugin):
                     if return_geometry
                     else min(requested_limit, 1000)
                 )
-                records, date_fields = await asyncio.gather(
+                records, layer_meta = await asyncio.gather(
                     self.spatial_query_polygon(
                         item_id,
                         filter_geometry=filter_geometry,
@@ -5092,13 +5129,19 @@ class AnchorageGISPlugin(DataPlugin):
                         limit=effective_limit,
                         return_geometry=return_geometry,
                     ),
-                    self._safe_date_fields(item_id),
+                    self._safe_layer_meta(item_id),
                 )
                 # return_geometry=True uses f=geojson which renders
                 # dates as ISO strings server-side, so skip our
-                # epoch→ISO path to avoid double conversion.
+                # epoch→ISO path. Also skip coded-domain decoding in
+                # the GeoJSON branch since downstream tooling expects
+                # the original codes.
                 if return_geometry:
                     date_fields = None
+                    coded_domains = None
+                else:
+                    date_fields = layer_meta.get("date_fields")
+                    coded_domains = layer_meta.get("coded_domains")
                 if not records:
                     text = (
                         f"No features in item `{item_id}` match the "
@@ -5110,6 +5153,7 @@ class AnchorageGISPlugin(DataPlugin):
                         effective_limit,
                         total_count=None,
                         date_fields=date_fields,
+                        coded_domains=coded_domains,
                     )
 
             elif tool_name == "aggregate_by_polygon":
