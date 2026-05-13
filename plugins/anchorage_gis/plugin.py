@@ -174,7 +174,7 @@ class AnchorageGISPlugin(DataPlugin):
         results that don't honor that filter (e.g. shared items, cross-
         org content, indexing quirks).
 
-        Items with ``orgId`` unset (None / empty) are kept — many
+        Items with ``orgId`` unset (None / empty) are kept -- many
         legitimate items in this tenant (FEMA-imported feeds, older
         items predating the field) have a null ``orgId`` in the
         response, even though the upstream ``orgid:`` query confirmed
@@ -218,7 +218,7 @@ class AnchorageGISPlugin(DataPlugin):
         item_id = item.get("id", "")
         url = self._item_portal_url(item)
 
-        lines = [f"**{title}**  _{item_type}_ — ID: `{item_id}`"]
+        lines = [f"**{title}**  _{item_type}_ -- ID: `{item_id}`"]
         if snippet:
             lines.append(snippet)
         if tags:
@@ -253,10 +253,10 @@ class AnchorageGISPlugin(DataPlugin):
 
     @staticmethod
     def _ms_to_iso_smart(ms: Any) -> Any:
-        # Midnight UTC → date-only (preserves output for true date fields
-        # like effective/inspection dates). Non-midnight → full ISO so we
+        # Midnight UTC -> date-only (preserves output for true date fields
+        # like effective/inspection dates). Non-midnight -> full ISO so we
         # don't silently drop the time-of-day on real datetime fields.
-        # On failure, return the raw value rather than a placeholder —
+        # On failure, return the raw value rather than a placeholder --
         # losing the data is worse than showing the epoch ms.
         if ms is None or ms == "":
             return ms
@@ -337,7 +337,7 @@ class AnchorageGISPlugin(DataPlugin):
         else:
             lines += [
                 f"**NOTE:** type '{item_type}' is not directly queryable. "
-                "It may bundle queryable layers — open the Portal Page "
+                "It may bundle queryable layers -- open the Portal Page "
                 "above to inspect, or use `find_gis_content` to find a "
                 "related Feature Service."
             ]
@@ -349,9 +349,9 @@ class AnchorageGISPlugin(DataPlugin):
     GEOMETRY_STR_MAX = 600
 
     # Devil's-advocate thresholds.
-    STALENESS_THRESHOLD_DAYS = 365  # layer unchanged > 1 yr → freshness note
-    COVERAGE_THRESHOLD = 0.5  # < 50% muni overlap → coverage note
-    SMALL_SAMPLE_THRESHOLD = 10  # total_count < 10 (and > 1) → small-N note
+    STALENESS_THRESHOLD_DAYS = 365  # layer unchanged > 1 yr -> freshness note
+    COVERAGE_THRESHOLD = 0.5  # < 50% muni overlap -> coverage note
+    SMALL_SAMPLE_THRESHOLD = 10  # total_count < 10 (and > 1) -> small-N note
 
     def _format_query_results(
         self,
@@ -399,7 +399,7 @@ class AnchorageGISPlugin(DataPlugin):
             provenance.append(
                 f"**TRUNCATED:** returned {len(records)} of "
                 f"{total_count:,} matching records (limit={limit}). "
-                f"The records below are a SAMPLE — do not generalize "
+                f"The records below are a SAMPLE -- do not generalize "
                 f"counts or percentages from them. Use the TOTAL COUNT "
                 f"line below for 'how many?' questions, or narrow the "
                 f"WHERE clause to get a complete listing."
@@ -412,7 +412,7 @@ class AnchorageGISPlugin(DataPlugin):
             provenance.append(
                 "**SINGLE-RECORD CLAIM:** only 1 matching record. Do "
                 "not report this as a trend, pattern, or "
-                "distribution — it is an N=1 anecdote."
+                "distribution -- it is an N=1 anecdote."
             )
         elif (
             total_count is not None
@@ -421,12 +421,12 @@ class AnchorageGISPlugin(DataPlugin):
             provenance.append(
                 f"**SMALL SAMPLE:** only {total_count} matching "
                 f"records. Percentages, distributions, and trend "
-                f"claims drawn from this set are weak — name the "
+                f"claims drawn from this set are weak -- name the "
                 f"sample size in any summary."
             )
 
         # Staleness caveat: layer hasn't been edited in a long time.
-        # The threshold is intentionally a year (not days) — false
+        # The threshold is intentionally a year (not days) -- false
         # positives here are cheap (informational), false negatives
         # (calling old data "current") are expensive.
         if last_edit_date:
@@ -481,13 +481,13 @@ class AnchorageGISPlugin(DataPlugin):
             lines.append(
                 f"TOTAL COUNT (records matching the WHERE clause): "
                 f"{total_count:,}. "
-                f"This is the answer to 'how many?' — use it directly "
+                f"This is the answer to 'how many?' -- use it directly "
                 f"instead of counting the records below."
             )
         # Polyline-grain warning: a single named entity (a trail, a
         # road, a transit route) is typically stored as MULTIPLE line
         # segments. Reporting "1,123 trails" when the layer holds
-        # 1,123 segments is wrong — there might be 200 unique named
+        # 1,123 segments is wrong -- there might be 200 unique named
         # trails. Surface this whenever the layer is polyline-typed
         # AND a count was requested, so the model frames its answer
         # honestly. If we know a likely name field, suggest the
@@ -517,7 +517,7 @@ class AnchorageGISPlugin(DataPlugin):
                 f"is the number of LINE SEGMENTS (geometry features), "
                 f"NOT the number of unique named entities. A single "
                 f"named trail, road, or route is typically stored as "
-                f"multiple connected segments — so '{total_count:,} "
+                f"multiple connected segments -- so '{total_count:,} "
                 f"records' usually means fewer than {total_count:,} "
                 f"distinct named features. When answering the user, "
                 f"say e.g. '{total_count:,} trail segments' rather "
@@ -556,8 +556,8 @@ class AnchorageGISPlugin(DataPlugin):
                         f"{truncated}... "
                         f"(truncated, {len(geom_str)} chars total; "
                         f"server-side simplified to "
-                        f"~{self.GEOMETRY_SIMPLIFY_OFFSET_DEG}° "
-                        f"≈ 5.5m)"
+                        f"~{self.GEOMETRY_SIMPLIFY_OFFSET_DEG} deg "
+                        f"~ 5.5m)"
                     )
                 lines.append(f"  geometry (GeoJSON, WGS84): {geom_str}")
             lines.append("")
@@ -630,7 +630,7 @@ class AnchorageGISPlugin(DataPlugin):
         """
         msg = msg or "Unknown error"
         detail_str = "; ".join(details) if details else ""
-        full = f"{msg}" + (f" — {detail_str}" if detail_str else "")
+        full = f"{msg}" + (f" -- {detail_str}" if detail_str else "")
         item_arg = (
             f"item_id='{resource_id}'" if resource_id else "item_id=<id>"
         )
@@ -647,7 +647,7 @@ class AnchorageGISPlugin(DataPlugin):
                 f"names, then retry with the exact name shown there. "
                 f"(Underlying error: {full})"
             )
-        # Case B: generic "Invalid query parameters" — usually
+        # Case B: generic "Invalid query parameters" -- usually
         # out_fields contains a name that doesn't exist. ArcGIS does
         # NOT echo the bad name back, so the model has to discover it.
         if "Invalid query parameters" in full:
@@ -666,7 +666,7 @@ class AnchorageGISPlugin(DataPlugin):
                 )
             hint_parts.append(
                 f"Call `get_layer_schema({item_arg})` to see valid "
-                f"field names — they are CASE-SENSITIVE."
+                f"field names -- they are CASE-SENSITIVE."
             )
             return f"{full}\n\nLikely cause: " + " ".join(hint_parts)
         return full
@@ -690,7 +690,7 @@ class AnchorageGISPlugin(DataPlugin):
             "(% is the wildcard).\n"
             "- For NUMERIC/DATE fields, verify the value type "
             "matches the schema.\n"
-            "- Field names are CASE-SENSITIVE — call "
+            "- Field names are CASE-SENSITIVE -- call "
             "`get_layer_schema(item_id=<id>)` to confirm.\n"
             "- To verify the layer has data, retry with "
             "`where='1=1'`."
@@ -699,7 +699,7 @@ class AnchorageGISPlugin(DataPlugin):
     # Field-name priority for picking the user-facing identifier from
     # a feature's attributes. A 4o-class model latches onto the first
     # identifier-shaped value it sees in the response and reports it
-    # back as canonical — if the lead line says "OBJECTID 778" the
+    # back as canonical -- if the lead line says "OBJECTID 778" the
     # model will say "parcel 778" even when Parcel_ID is right below.
     # We promote one of these field names into the lead position so
     # the wrong identifier never even appears first.
@@ -710,7 +710,7 @@ class AnchorageGISPlugin(DataPlugin):
         "Parcel_Number", "ParcelNumber",
         "GIS_ParcelNum8Formatted", "GIS_ParcelNum11Formatted",
         "GIS_ParcelNum8", "GIS_ParcelNum11",
-        # Polyline-entity name fields — listed BEFORE generic `Name`
+        # Polyline-entity name fields -- listed BEFORE generic `Name`
         # so a trails/roads layer with both `Trail_Name` and `Name`
         # picks the more specific one. These also drive the grain
         # warning's follow-up suggestion when query_data hits a
@@ -732,7 +732,7 @@ class AnchorageGISPlugin(DataPlugin):
 
     # Subset of NATURAL_ID_FIELD_PRIORITY that strongly indicates a
     # layer is at parcel grain (one row per legal parcel). Used to
-    # detect when a classification arg is the wrong shape — e.g., a
+    # detect when a classification arg is the wrong shape -- e.g., a
     # parcels-with-Zoning_District-attribute layer being used as the
     # classification for "parcels spanning multiple zones". The right
     # classification is a zoning-polygon layer where many polygons
@@ -771,9 +771,9 @@ class AnchorageGISPlugin(DataPlugin):
         MOA parcel IDs are stored in two related canonical forms across
         layers:
           - 8-digit base: ``XXXXXXXX`` (compact) or ``XXX-XXX-XX``
-            (hyphenated) — e.g. ``00318487`` / ``003-184-87``.
+            (hyphenated) -- e.g. ``00318487`` / ``003-184-87``.
           - 11-digit extended: 8-digit base + 3-digit sub-parcel
-            suffix (``000`` means no sub) — e.g. ``00318487000`` /
+            suffix (``000`` means no sub) -- e.g. ``00318487000`` /
             ``003-184-87-000``.
 
         TaxParcels stores 11-digit compact in ``Parcel_Num``/``Name``;
@@ -794,19 +794,19 @@ class AnchorageGISPlugin(DataPlugin):
             return []
 
         if len(digits) >= 11:
-            # Take the LAST 11 digits — accommodates inputs like
+            # Take the LAST 11 digits -- accommodates inputs like
             # "Parcel 00318487000" if any non-digit prefixes slipped
             # through.
             tail = digits[-11:]
             base8 = tail[:8]
             sub3 = tail[8:11]
         elif len(digits) >= 9:
-            # 9 or 10 digits — pad on the left to 11, then split.
+            # 9 or 10 digits -- pad on the left to 11, then split.
             padded = digits.rjust(11, "0")
             base8 = padded[:8]
             sub3 = padded[8:11]
         else:
-            # 5-8 digits — pad on the left to 8, default to no
+            # 5-8 digits -- pad on the left to 8, default to no
             # sub-parcel.
             base8 = digits.rjust(8, "0")
             sub3 = "000"
@@ -835,7 +835,7 @@ class AnchorageGISPlugin(DataPlugin):
         return (
             f"Item '{item_id}' is not a queryable Feature/Map "
             f"Service{type_note}. Web Maps, Apps, Dashboards, and "
-            f"Story Maps are VIEWERS, not data — they cannot be "
+            f"Story Maps are VIEWERS, not data -- they cannot be "
             f"queried for records. To recover: call "
             f"`find_gis_content(topic=<your topic>)` and pick from "
             f"the **QUERYABLE** section (Feature/Map Services), or "
@@ -843,14 +843,14 @@ class AnchorageGISPlugin(DataPlugin):
             f"this item's relationships."
         )
 
-    # Cap on records when geometry is requested — polygons can be
+    # Cap on records when geometry is requested -- polygons can be
     # orders of magnitude larger than attribute rows, so we keep this
     # much tighter than the no-geometry cap of 1000.
     GEOMETRY_LIMIT_CAP = 50
 
     # Server-side simplification tolerance in the output SR's units.
     # We pin outSR=4326 when returnGeometry=true, so this is in decimal
-    # degrees: 0.00005° ≈ 5.5m at the equator. Fine for MCP-scale
+    # degrees: 0.00005 deg ~ 5.5m at the equator. Fine for MCP-scale
     # reasoning about shape, keeps payloads manageable.
     GEOMETRY_SIMPLIFY_OFFSET_DEG = 0.00005
 
@@ -1186,7 +1186,7 @@ class AnchorageGISPlugin(DataPlugin):
         query_url = f"{target_url}/query"
         try:
             # POST because filter polygons routinely exceed URL length
-            # limits — spatial_query_point can get away with GET, this
+            # limits -- spatial_query_point can get away with GET, this
             # one cannot.
             resp = await self.client.post(query_url, data=params)
             resp.raise_for_status()
@@ -1375,7 +1375,7 @@ class AnchorageGISPlugin(DataPlugin):
         topic = args.get("topic", "").strip()
         if not topic:
             raise ValueError(
-                "topic is required — pass the subject of the user's "
+                "topic is required -- pass the subject of the user's "
                 "question as a 1-2 word topic (e.g. 'parks', 'trails', "
                 "'flood', 'zoning'). Do not ask the user for clarification "
                 "if the topic is obvious from their message."
@@ -1397,9 +1397,9 @@ class AnchorageGISPlugin(DataPlugin):
                 f"No {city} GIS content found for topic '{topic}'.\n\n"
                 f"NEXT STEP: retry with a broader, simpler keyword. "
                 f"Strip qualifiers like 'parcels', 'data', 'boundaries', "
-                f"'zones', 'areas' — e.g. 'park parcels' → 'parks', "
-                f"'flood zone boundaries' → 'flood', 'school district "
-                f"areas' → 'schools'. Use the most distinctive single "
+                f"'zones', 'areas' -- e.g. 'park parcels' -> 'parks', "
+                f"'flood zone boundaries' -> 'flood', 'school district "
+                f"areas' -> 'schools'. Use the most distinctive single "
                 f"word first.\n\n"
                 f"If still no results after retry, browse the full "
                 f"gallery: {gallery_url}"
@@ -1419,14 +1419,14 @@ class AnchorageGISPlugin(DataPlugin):
             "\n---\n"
             "**NEXT STEPS** (pick based on the user's question):\n"
             "- COUNT records ('how many?'): "
-            "`query_data(item_id, limit=1)` — read the TOTAL COUNT "
+            "`query_data(item_id, limit=1)` -- read the TOTAL COUNT "
             "line in the response.\n"
             "- LIST records: "
             "`query_data(item_id, where=..., limit=N)`.\n"
             "- DESCRIBE an item: `get_item_details(item_id)`.\n"
             "- DISCOVER fields before filtering: "
             "`get_layer_schema(item_id)`.\n"
-            "**Pick from the QUERYABLE section above** — those are "
+            "**Pick from the QUERYABLE section above** -- those are "
             "Feature/Map Services that work with `query_data`. Items "
             "in the OTHER section are viewers, web maps, and "
             "downloadable files (not directly queryable).\n"
@@ -1458,7 +1458,7 @@ class AnchorageGISPlugin(DataPlugin):
         )
         if queryable:
             text += (
-                f"#### QUERYABLE — Feature/Map Services "
+                f"#### QUERYABLE -- Feature/Map Services "
                 f"({len(queryable)})\n"
                 f"_Use these directly with `query_data`, "
                 f"`get_layer_schema`, `spatial_query_*`._\n"
@@ -1471,7 +1471,7 @@ class AnchorageGISPlugin(DataPlugin):
                     "vs federal) or cover different subsets (e.g. "
                     "all trails vs nordic trails only). For 'how "
                     "many?' / 'list all' questions, do NOT silently "
-                    "pick the first one — either (a) query each "
+                    "pick the first one -- either (a) query each "
                     "layer with `limit=1` and report a breakdown of "
                     "totals, or (b) ask the user which subset they "
                     "mean (e.g. 'municipal Parks & Rec', 'state-"
@@ -1485,7 +1485,7 @@ class AnchorageGISPlugin(DataPlugin):
                 text += self._format_summary(item)
         if other:
             text += (
-                f"#### OTHER — Web Maps & Downloadable Data "
+                f"#### OTHER -- Web Maps & Downloadable Data "
                 f"({len(other)})\n"
                 f"_Viewers and reference items. Not directly "
                 f"queryable; use for context or to find the underlying "
@@ -1506,7 +1506,7 @@ class AnchorageGISPlugin(DataPlugin):
             return f"No gallery items found{suffix}."
 
         header = (
-            f"## {city} GIS Gallery — '{keyword}' "
+            f"## {city} GIS Gallery -- '{keyword}' "
             f"({len(results)} items)\n\n"
             if keyword
             else f"## {city} GIS Gallery ({len(results)} items)\n\n"
@@ -1516,7 +1516,7 @@ class AnchorageGISPlugin(DataPlugin):
             text += self._format_summary(item)
         text += (
             "\n---\n"
-            "**These are VIEWERS — not directly queryable.** Web "
+            "**These are VIEWERS -- not directly queryable.** Web "
             "Maps, Dashboards, and Apps cannot be passed to "
             "`query_data` for record counts or filtered lists. If "
             "the user asked 'how many?' or 'list X', call "
@@ -1544,8 +1544,8 @@ class AnchorageGISPlugin(DataPlugin):
                 f"No {city} spatial layers/data found matching "
                 f"'{query}'.\n\n"
                 f"NEXT STEP: retry with a broader keyword (strip "
-                f"'parcels', 'data', 'boundaries' — e.g. 'park "
-                f"parcels' → 'parks'), or call `find_gis_content` "
+                f"'parcels', 'data', 'boundaries' -- e.g. 'park "
+                f"parcels' -> 'parks'), or call `find_gis_content` "
                 f"to also search the curated public gallery."
             )
 
@@ -1658,7 +1658,7 @@ class AnchorageGISPlugin(DataPlugin):
         # example, so the model sees a concrete, copy-pasteable call
         # instead of a generic placeholder. Falls back to "<field>"
         # if no string fields exist (rare for a public Feature
-        # Service — most have at least a name/title column).
+        # Service -- most have at least a name/title column).
         sample_text_field = next(
             (
                 f.get("name")
@@ -1687,7 +1687,7 @@ class AnchorageGISPlugin(DataPlugin):
         text += (
             "\n\n---\n"
             "**NEXT STEPS:** use the field names above in `query_data` "
-            "— field names are CASE-SENSITIVE (use the exact `Field "
+            "-- field names are CASE-SENSITIVE (use the exact `Field "
             "Name` column, not the alias). Quote string literals "
             "with single quotes. For text searches prefer `LIKE "
             "'%substring%'` over `=` (which requires the full exact "
@@ -1726,7 +1726,7 @@ class AnchorageGISPlugin(DataPlugin):
 
         # Bound concurrent ArcGIS calls. Without this, a 20-candidate search
         # can fire 20 service-root fetches plus 20*N layer-schema fetches in
-        # parallel against the upstream portal — a polite-burst that still
+        # parallel against the upstream portal -- a polite-burst that still
         # looks like a small DDoS to muniorg.maps.arcgis.com.
         inspect_sem = asyncio.Semaphore(5)
 
@@ -1836,7 +1836,7 @@ class AnchorageGISPlugin(DataPlugin):
                 label = f"`{name}`" + (
                     f" ({alias})" if alias != name else ""
                 )
-                text += f"- {label} — {ftype}\n"
+                text += f"- {label} -- {ftype}\n"
             text += (
                 f"**Portal:** "
                 f"{self._portal_home}/home/item.html?id={item_id}\n\n"
@@ -1924,7 +1924,7 @@ class AnchorageGISPlugin(DataPlugin):
         return stripped
 
     # Anchorage muni bbox in WGS84 (xmin, ymin, xmax, ymax). Generous
-    # envelope around Cook Inlet to Eklutna — used for the
+    # envelope around Cook Inlet to Eklutna -- used for the
     # coverage-gap devil's-advocate check, not for filtering. Exact
     # boundary fidelity isn't needed; the goal is to flag clearly
     # partial-coverage layers (e.g. a single neighborhood layer).
@@ -1932,7 +1932,7 @@ class AnchorageGISPlugin(DataPlugin):
 
     @staticmethod
     def _webmerc_to_wgs84(x: float, y: float) -> Tuple[float, float]:
-        # Inline Web Mercator → WGS84 to avoid a pyproj dependency for
+        # Inline Web Mercator -> WGS84 to avoid a pyproj dependency for
         # one coordinate conversion. Earth radius per EPSG:3857 spec.
         import math
         lon = x / 6378137.0 * 180.0 / math.pi
@@ -1943,7 +1943,7 @@ class AnchorageGISPlugin(DataPlugin):
 
     @classmethod
     def _anchorage_coverage_pct(cls, extent: Any) -> Optional[float]:
-        # Returns (layer ∩ muni) / muni-area, in [0, ~1+]. >1 if the
+        # Returns (layer intersect muni) / muni-area, in [0, ~1+]. >1 if the
         # layer is larger than the muni (statewide data). Used to fire
         # the LIMITED COVERAGE caveat for layers covering <50% of the
         # muni. Returns None when we can't honestly compute coverage
@@ -1956,7 +1956,7 @@ class AnchorageGISPlugin(DataPlugin):
             return None
         xmin, ymin, xmax, ymax = coords
         # Degenerate bbox (single point or zero-width/height) carries no
-        # useful coverage signal — a hospital layer with one point in
+        # useful coverage signal -- a hospital layer with one point in
         # downtown isn't "non-overlapping Anchorage", it just has no
         # area. Return None so the caveat stays silent.
         if xmin == xmax or ymin == ymax:
@@ -2030,7 +2030,7 @@ class AnchorageGISPlugin(DataPlugin):
         # Best-effort lookup of the layer quick-meta (date fields,
         # coded domains, geometry type, name field) for an item.
         # Used by paths (spatial_*) that don't otherwise need the layer
-        # URL upstream — resolve via get_dataset, then quick_meta. Any
+        # URL upstream -- resolve via get_dataset, then quick_meta. Any
         # failure returns {} so callers fall back to raw rendering
         # rather than blocking the user's spatial result.
         try:
@@ -2046,15 +2046,15 @@ class AnchorageGISPlugin(DataPlugin):
         self, service_url: str
     ) -> Dict[str, Any]:
         """Fetch a small bundle of layer metadata used by the query
-        formatter: date field names (for epoch→ISO conversion),
+        formatter: date field names (for epoch->ISO conversion),
         coded-value domains (for decoding raw codes in output),
         and geometry type (for the polyline-grain warning on counts).
-        Best-effort — returns an empty dict on any error so callers
+        Best-effort -- returns an empty dict on any error so callers
         can degrade gracefully.
 
         Returns ``{date_fields: set|None, coded_domains: dict|None,
         geometry_type: str|None, name_field: str|None}``.
-        ``coded_domains`` maps field name → {code: label} for fields
+        ``coded_domains`` maps field name -> {code: label} for fields
         whose schema declares an ``esriFieldTypeCodedValue`` domain,
         letting the formatter render ``ZONE: R1A
         (Single-Family Residential)`` instead of forcing the model to
@@ -2103,7 +2103,7 @@ class AnchorageGISPlugin(DataPlugin):
             ),
             None,
         )
-        # Devil's-advocate signals — pre-compute and stash so the
+        # Devil's-advocate signals -- pre-compute and stash so the
         # formatter can fire the staleness and coverage caveats without
         # a second round-trip. Both are best-effort: missing/malformed
         # values just suppress the corresponding caveat.
@@ -2143,7 +2143,7 @@ class AnchorageGISPlugin(DataPlugin):
     # hundred to a few thousand features; beyond this the analysis is
     # probably better served by a server-side stats endpoint. 2000 is the
     # tightest value that still covers all real Anchorage rollups observed
-    # in CloudWatch — raise only with evidence of legitimate truncation.
+    # in CloudWatch -- raise only with evidence of legitimate truncation.
     AGG_SOURCE_LIMIT = 2000
 
     # ArcGIS maxRecordCount is usually 1000 or 2000. We page through with
@@ -2173,7 +2173,7 @@ class AnchorageGISPlugin(DataPlugin):
         Expects ring as a list of [lon, lat] pairs (GeoJSON style, first
         and last point equal). Returns True if the point is strictly
         inside the ring; boundary behavior is not guaranteed (doesn't
-        matter for aggregation — a point exactly on a council boundary
+        matter for aggregation -- a point exactly on a council boundary
         falls into exactly one bucket under first_match).
         """
         x, y = point
@@ -2418,10 +2418,10 @@ class AnchorageGISPlugin(DataPlugin):
 
     # ── Polyline reduction helpers ────────────────────────────────────────
     # Coordinates arrive in WGS84 (outSR=4326) so segment lengths are in
-    # degrees. That's fine for finding a midpoint — the result is exact in
-    # Euclidean degree-space and still lies on the line. Anchorage spans ~3°
-    # at lat 61°N where 1° lon ≈ 0.5 × 111 km, so the along-line position is
-    # geodesically biased ~2× longward, but that bias is shared by the line
+    # degrees. That's fine for finding a midpoint -- the result is exact in
+    # Euclidean degree-space and still lies on the line. Anchorage spans ~3 deg
+    # at lat 61 degN where 1 deg lon ~ 0.5 x 111 km, so the along-line position is
+    # geodesically biased ~2x longward, but that bias is shared by the line
     # itself (same projection) so the chosen point lands on the right segment.
     @staticmethod
     def _segment_length(p1: List[float], p2: List[float]) -> float:
@@ -2561,7 +2561,7 @@ class AnchorageGISPlugin(DataPlugin):
         For lines, `centroid_mode` has line-specific meaning:
           - 'centroid' = length-weighted centroid (cheap; can fall off the line)
           - 'representative_point' / 'auto' = midpoint along arc length
-            (always lies on the line — the right default for "which polygon
+            (always lies on the line -- the right default for "which polygon
             does this road segment belong to" bucketing).
         """
         if not geometry:
@@ -2650,7 +2650,7 @@ class AnchorageGISPlugin(DataPlugin):
             self._agg_layer_cache.move_to_end(cache_key)
             return cached[1]
         if cached:
-            # Expired — drop and refetch.
+            # Expired -- drop and refetch.
             del self._agg_layer_cache[cache_key]
 
         layer_url = await self._resolve_layer_url(aggregation_item_id)
@@ -2878,7 +2878,7 @@ class AnchorageGISPlugin(DataPlugin):
 
         city = self.plugin_config.city_name
         lines = [
-            f"## Aggregation: {source_item_id} → {aggregation_item_id}",
+            f"## Aggregation: {source_item_id} -> {aggregation_item_id}",
             f"**City:** {city}  |  **Group field:** `{group_by_field}`",
             f"**Source geometry:** {source_geom_type}  |  "
             f"**Centroid mode:** {centroid_mode}  |  "
@@ -2923,7 +2923,7 @@ class AnchorageGISPlugin(DataPlugin):
                 f"_Buckets tagged_ **(small sample)** _hold fewer than "
                 f"{self.SMALL_SAMPLE_THRESHOLD} source features. "
                 f"Percentages and shares computed on these buckets are "
-                f"weak — name the count, not the percent, when "
+                f"weak -- name the count, not the percent, when "
                 f"summarizing._",
             ]
 
@@ -2953,11 +2953,11 @@ class AnchorageGISPlugin(DataPlugin):
         container_where = (args.get("container_where") or "").strip()
         if not container_where:
             raise ValueError(
-                "container_where is required — it identifies which "
+                "container_where is required -- it identifies which "
                 "polygon(s) in the container layer to filter against"
             )
         validated_container_where = WhereValidator.validate(container_where)
-        # Validate source_where up front too — rejection shouldn't wait
+        # Validate source_where up front too -- rejection shouldn't wait
         # for the container-layer lookup to complete.
         source_where = WhereValidator.validate(
             args.get("source_where") or "1=1"
@@ -3047,7 +3047,7 @@ class AnchorageGISPlugin(DataPlugin):
         return header + body
 
     async def _get_distinct_values(self, args: Dict[str, Any]) -> str:
-        """Return distinct values of a field — for confirming exact
+        """Return distinct values of a field -- for confirming exact
         identifier/code formats before constructing a WHERE clause."""
         item_id = self._validate_item_id(
             (args.get("item_id") or "").strip()
@@ -3066,7 +3066,7 @@ class AnchorageGISPlugin(DataPlugin):
             raise ValueError(
                 f"field {field!r} is not a field on this layer. "
                 f"Call `get_layer_schema(item_id='{item_id}')` to "
-                f"see valid names — they are CASE-SENSITIVE. "
+                f"see valid names -- they are CASE-SENSITIVE. "
                 f"Available: {sorted(field_names)[:12]}..."
             )
 
@@ -3085,7 +3085,7 @@ class AnchorageGISPlugin(DataPlugin):
         where = WhereValidator.validate(where)
 
         # returnDistinctValues only works when returnGeometry=false on
-        # most hosted Feature Services — geometry coords break the
+        # most hosted Feature Services -- geometry coords break the
         # de-dup hash. We also dedupe client-side as a backstop in case
         # the upstream returns duplicates anyway (older portals do).
         params = {
@@ -3156,7 +3156,7 @@ class AnchorageGISPlugin(DataPlugin):
             "",
             "---",
             "**NEXT STEP:** these are the EXACT values the layer "
-            "stores — copy them verbatim into a WHERE clause. Field "
+            "stores -- copy them verbatim into a WHERE clause. Field "
             "and value matching is CASE-SENSITIVE.",
             f"Example: `query_data(item_id='{item_id}', "
             f"where=\"{field}='<paste a value above>'\", limit=1)` "
@@ -3252,7 +3252,7 @@ class AnchorageGISPlugin(DataPlugin):
                 if v is not None:
                     matched_values.add(v)
             lines = [
-                f"## Parcel lookup: `{parcel_id}` → "
+                f"## Parcel lookup: `{parcel_id}` -> "
                 f"{len(features)} record(s) found",
                 f"**Layer:** `{item_id}`",
                 f"**Field:** `{parcel_field}`",
@@ -3269,7 +3269,7 @@ class AnchorageGISPlugin(DataPlugin):
                 )
                 lines.append(
                     f"**Canonical form for this layer:** "
-                    f"`{canonical}` — use this verbatim for "
+                    f"`{canonical}` -- use this verbatim for "
                     f"follow-up queries here."
                 )
             lines.append("")
@@ -3371,7 +3371,7 @@ class AnchorageGISPlugin(DataPlugin):
         if not classification_field:
             raise ValueError("classification_field is required")
 
-        # Enforce min_distinct >= 2 — anything less is "any feature
+        # Enforce min_distinct >= 2 -- anything less is "any feature
         # touching a classification", which is just spatial_query_polygon.
         min_distinct = max(2, int(args.get("min_distinct", 2)))
         source_where = WhereValidator.validate(
@@ -3393,7 +3393,7 @@ class AnchorageGISPlugin(DataPlugin):
             self.SPANNING_SOURCE_LIMIT,
         )
 
-        # Self-intersection makes no sense — every feature touches
+        # Self-intersection makes no sense -- every feature touches
         # itself, every feature qualifies, the answer is trivially
         # "all of them". A weak model occasionally picks the same
         # layer for both args when reasoning is muddled; refuse fast
@@ -3401,7 +3401,7 @@ class AnchorageGISPlugin(DataPlugin):
         if source_item_id == classification_item_id:
             raise ValueError(
                 "source_item_id and classification_item_id are the "
-                "same layer. Self-intersection is meaningless — "
+                "same layer. Self-intersection is meaningless -- "
                 "every feature trivially touches itself. For a "
                 "'parcels spanning multiple zones' question, source "
                 "should be a parcels layer (e.g. MOA_Parcels_Hosted, "
@@ -3436,21 +3436,21 @@ class AnchorageGISPlugin(DataPlugin):
                 f"classification_field {classification_field!r} is "
                 f"not a field on the classification layer. Call "
                 f"`get_layer_schema(item_id="
-                f"'{classification_item_id}')` to see valid names — "
+                f"'{classification_item_id}')` to see valid names -- "
                 f"they are CASE-SENSITIVE. Available: "
                 f"{sorted(cls_field_names)[:12]}..."
             )
 
         # Wrong-grain classification detection. A classification layer
         # that has parcel-identifier fields is itself a per-parcel
-        # layer (one polygon per legal parcel) — its `Zoning_District`
+        # layer (one polygon per legal parcel) -- its `Zoning_District`
         # or similar field is an attribute on each parcel, NOT a
         # categorisation across few polygons. Spatial-intersecting
         # parcels against parcels mostly produces "0 qualifying"
         # because of the 1,000-polygon classification cap. The right
         # classification is a dedicated zoning-polygon layer. If the
         # caller deliberately wants to span on another parcel-grain
-        # field, they can pass that field explicitly — only refuse
+        # field, they can pass that field explicitly -- only refuse
         # when classification_field is NOT itself a parcel-id
         # (otherwise we'd block the legit "find parcels with multiple
         # parcel IDs" sanity-check use case).
@@ -3466,7 +3466,7 @@ class AnchorageGISPlugin(DataPlugin):
             )
             raise ValueError(
                 f"classification_item_id `{classification_item_id}` "
-                f"looks like a per-parcel layer — it has parcel "
+                f"looks like a per-parcel layer -- it has parcel "
                 f"identifier field(s) "
                 f"{parcel_fields_present}. That means each polygon is "
                 f"one parcel, and `{classification_field}` is an "
@@ -3481,7 +3481,7 @@ class AnchorageGISPlugin(DataPlugin):
                 f"forces a random sample and the spatial join misses "
                 f"most matches.\n\n"
                 f"For zoning specifically, use the dedicated zoning "
-                f"layer — call `find_gis_content(topic='zoning')` "
+                f"layer -- call `find_gis_content(topic='zoning')` "
                 f"and pick a Feature Service whose name is "
                 f"`Zoning_Hosted` or similar (NOT a parcels or "
                 f"property-information layer). Confirm with "
@@ -3495,7 +3495,7 @@ class AnchorageGISPlugin(DataPlugin):
         # signals "I know what fields this layer has").
         # Without this check, a model that picks an aggregate layer
         # (zoning districts, council areas) as source produces output
-        # that lists OBJECTIDs as "parcel numbers" — the exact bug
+        # that lists OBJECTIDs as "parcel numbers" -- the exact bug
         # the user keeps hitting.
         if out_fields == "*":
             src_meta = await self._fetch_layer_meta(source_url)
@@ -3517,12 +3517,12 @@ class AnchorageGISPlugin(DataPlugin):
                     f"source_item_id `{source_item_id}` has no "
                     f"user-facing identifier field (no Parcel_ID, "
                     f"Name, Address, Title, etc.). Without one, "
-                    f"results would only have internal OBJECTIDs — "
+                    f"results would only have internal OBJECTIDs -- "
                     f"unsafe to report as parcel numbers / "
                     f"addresses / names.\n\n"
                     f"This layer's non-shape fields: "
                     f"{visible_fields or '(none)'}.\n\n"
-                    f"This is most likely a wrong layer choice — "
+                    f"This is most likely a wrong layer choice -- "
                     f"aggregate / boundary layers (zoning districts, "
                     f"council areas, regions) typically have only "
                     f"OBJECTID + Shape fields and are meant to be "
@@ -3575,7 +3575,7 @@ class AnchorageGISPlugin(DataPlugin):
                 f"'{classification_item_id}', limit=1)`."
             )
         # Detect cap-hit. The fetch tops out at SPANNING_CLASSIFICATION
-        # _LIMIT — anything ≥ 95% of cap probably means there are more
+        # _LIMIT -- anything >= 95% of cap probably means there are more
         # polygons than we sampled, and the spatial join is operating
         # on a partial view. Surface this so the model knows results
         # are not exhaustive.
@@ -3583,7 +3583,7 @@ class AnchorageGISPlugin(DataPlugin):
             len(cls_polys) >= 0.95 * self.SPANNING_CLASSIFICATION_LIMIT
         )
 
-        # Drop polygons whose classification value is NULL — they would
+        # Drop polygons whose classification value is NULL -- they would
         # falsely contribute "no value" as a distinct classification.
         valid_cls: List[Tuple[Any, Dict[str, Any]]] = []
         for p in cls_polys:
@@ -3604,7 +3604,7 @@ class AnchorageGISPlugin(DataPlugin):
         # Group polygons by their classification value so we send ONE
         # spatial query per distinct value instead of one per polygon.
         # For a typical zoning layer with 1,000 polygons but ~50 zones,
-        # this collapses 1,000 upstream queries into 50 — the original
+        # this collapses 1,000 upstream queries into 50 -- the original
         # implementation hit the Esri 6,000-req/min quota easily and
         # the silent failure path then masked the rate-limit error as
         # "attributes unavailable". One query per value is also more
@@ -3685,7 +3685,7 @@ class AnchorageGISPlugin(DataPlugin):
                 len(all_rings) <= self.MAX_FILTER_RINGS
                 and coord_count <= self.MAX_FILTER_COORDS
             ):
-                # Combined fits — one query for the whole value.
+                # Combined fits -- one query for the whole value.
                 combined = {
                     "rings": all_rings,
                     "spatialReference": {"wkid": 4326},
@@ -3693,7 +3693,7 @@ class AnchorageGISPlugin(DataPlugin):
                 skipped_polys += skipped_in_value
                 await query_geometry(value, combined)
                 return
-            # Combined too big — fall back to per-polygon for this
+            # Combined too big -- fall back to per-polygon for this
             # value. Rare, but real for sprawling zone categories.
             skipped_polys += skipped_in_value
             for geom in geoms:
@@ -3718,7 +3718,7 @@ class AnchorageGISPlugin(DataPlugin):
         }
 
         # Histogram covers ALL source features that touched any
-        # classification, not just qualifiers — gives the model context
+        # classification, not just qualifiers -- gives the model context
         # about the distribution before highlighting the cutoff.
         histogram = Counter(
             len(vals) for vals in src_to_values.values()
@@ -3745,21 +3745,21 @@ class AnchorageGISPlugin(DataPlugin):
             )
             if rate_limited:
                 note = (
-                    "**Upstream rate-limited some queries** — "
+                    "**Upstream rate-limited some queries** -- "
                     "results below are partial. Wait 60s and retry, "
                     "or narrow `classification_where` to reduce the "
                     "per-call query count."
                 )
             lines.append(
                 f"**Skipped:** {skipped_polys} classification "
-                f"polygon(s) — too complex for spatial query payload "
+                f"polygon(s) -- too complex for spatial query payload "
                 f"or upstream error. {note}"
             )
         if cls_cap_hit:
             lines.append(
                 f"**Cap reached:** classification layer fetch "
                 f"hit the {self.SPANNING_CLASSIFICATION_LIMIT:,}-"
-                f"polygon cap — results are based on a partial "
+                f"polygon cap -- results are based on a partial "
                 f"sample. If qualifying count looks unexpectedly "
                 f"low, the classification layer is probably at the "
                 f"wrong grain (e.g., per-parcel instead of per-zone) "
@@ -3777,7 +3777,7 @@ class AnchorageGISPlugin(DataPlugin):
             for count in sorted(histogram.keys()):
                 n = histogram[count]
                 marker = (
-                    "  ← qualifying"
+                    "  <- qualifying"
                     if count >= min_distinct
                     else ""
                 )
@@ -3799,13 +3799,13 @@ class AnchorageGISPlugin(DataPlugin):
 
         # Fetch attributes for the qualifying subset, capped at limit.
         # Sort by descending distinct-value count so the most-split
-        # features show first — they tend to be the most interesting.
+        # features show first -- they tend to be the most interesting.
         qualifying_oids = sorted(
             qualifying.keys(),
             key=lambda o: (-len(qualifying[o]), o),
         )[:limit]
 
-        # POST (not GET) for the attribute fetch — with limit=100, the
+        # POST (not GET) for the attribute fetch -- with limit=100, the
         # objectIds list pushes the URL past portal length limits when
         # combined with where + outFields, and the upstream silently
         # truncated to zero features. POST sends the same params in
@@ -3834,7 +3834,7 @@ class AnchorageGISPlugin(DataPlugin):
             )
 
         # Index by OID for join with the value sets. ArcGIS layers may
-        # name the OID field OBJECTID, OID, or FID — try all three.
+        # name the OID field OBJECTID, OID, or FID -- try all three.
         features_by_oid: Dict[Any, Dict[str, Any]] = {}
         if not attrs_error:
             for f in attrs_data.get("features", []):
@@ -3916,7 +3916,7 @@ class AnchorageGISPlugin(DataPlugin):
 
         # Detect the natural-ID field across the loaded attributes so
         # we can promote it to the lead position of each entry. Pick
-        # the first feature's natural ID — schemas are consistent
+        # the first feature's natural ID -- schemas are consistent
         # within a layer, so any one feature's pick applies to all.
         natural_id_field: Optional[str] = None
         for attrs in features_by_oid.values():
@@ -3928,7 +3928,7 @@ class AnchorageGISPlugin(DataPlugin):
             lines.append("")
             lines.append(
                 f"> **The user-facing identifier in this layer is "
-                f"`{natural_id_field}`** — that is the value to "
+                f"`{natural_id_field}`** -- that is the value to "
                 f"REPORT TO THE USER for each feature below. "
                 f"`OBJECTID` is an internal layer row ID; do NOT "
                 f"report it as a parcel number, address, or name."
@@ -3936,7 +3936,7 @@ class AnchorageGISPlugin(DataPlugin):
         lines.append("")
 
         # If even the per-OID fallback couldn't load attributes, we
-        # must NOT surface raw OBJECTIDs — GPT-4o-class models report
+        # must NOT surface raw OBJECTIDs -- GPT-4o-class models report
         # them as parcel numbers no matter how loud the warning sits
         # next to them. Return a clean refusal with concrete recovery
         # steps for the model to give the user, instead of dangerous
@@ -3959,7 +3959,7 @@ class AnchorageGISPlugin(DataPlugin):
                 f"> Reason: {reason}\n"
                 f">\n"
                 f"> **DO NOT report internal OBJECTIDs to the user "
-                f"as parcel numbers** — they are not parcel numbers, "
+                f"as parcel numbers** -- they are not parcel numbers, "
                 f"addresses, or any identifier the user would "
                 f"recognize. Tell the user the upstream is "
                 f"temporarily rate-limiting bulk lookups and "
@@ -3978,8 +3978,8 @@ class AnchorageGISPlugin(DataPlugin):
                 # Still surface it honestly rather than silently.
                 lines.append(
                     f"**OBJECTID {oid}** _(attributes not returned "
-                    f"by upstream — internal row ID only, NOT a "
-                    f"user-facing parcel number)_ — touches "
+                    f"by upstream -- internal row ID only, NOT a "
+                    f"user-facing parcel number)_ -- touches "
                     f"{len(vals)} value(s): "
                     + ", ".join(f"`{v}`" for v in vals)
                 )
@@ -3993,13 +3993,13 @@ class AnchorageGISPlugin(DataPlugin):
                 nat_field, nat_value = natural
                 lines.append(
                     f"**`{nat_value}`** ({nat_field}; internal "
-                    f"OBJECTID {oid}) — touches {len(vals)} "
+                    f"OBJECTID {oid}) -- touches {len(vals)} "
                     f"value(s): "
                     + ", ".join(f"`{v}`" for v in vals)
                 )
             else:
                 lines.append(
-                    f"**OBJECTID {oid}** — touches {len(vals)} "
+                    f"**OBJECTID {oid}** -- touches {len(vals)} "
                     f"value(s): "
                     + ", ".join(f"`{v}`" for v in vals)
                 )
@@ -4011,7 +4011,7 @@ class AnchorageGISPlugin(DataPlugin):
 
         lines += [
             "---",
-            "_Values shown use the layer's native format — "
+            "_Values shown use the layer's native format -- "
             "case-sensitive. Pass them verbatim if you filter on "
             "them next._",
         ]
@@ -4031,19 +4031,19 @@ class AnchorageGISPlugin(DataPlugin):
                     f"GIS portal for maps, apps, and datasets on a topic. "
                     f"Use whenever the user asks 'do you have data about "
                     f"X?', 'how many X are there?', 'where is X?', 'show "
-                    f"me X' — e.g. 'flood zones', 'trails', 'zoning', "
+                    f"me X' -- e.g. 'flood zones', 'trails', 'zoning', "
                     f"'schools', 'parks'. Searches both the curated public "
                     f"gallery AND raw spatial layers in one call.\n\n"
                     f"TYPICAL CHAIN: this tool returns a list of items, "
                     f"each with an `id`. Then call:\n"
-                    f"  • `query_data(item_id, limit=1)` to COUNT records "
-                    f"(read the 'TOTAL COUNT' line in the response — that "
+                    f"  * `query_data(item_id, limit=1)` to COUNT records "
+                    f"(read the 'TOTAL COUNT' line in the response -- that "
                     f"answers 'how many?').\n"
-                    f"  • `query_data(item_id, where=..., limit=N)` to "
+                    f"  * `query_data(item_id, where=..., limit=N)` to "
                     f"LIST records.\n"
-                    f"  • `get_item_details(item_id)` for a full "
+                    f"  * `get_item_details(item_id)` for a full "
                     f"description.\n"
-                    f"  • `get_layer_schema(item_id)` to see field names "
+                    f"  * `get_layer_schema(item_id)` to see field names "
                     f"before writing a WHERE clause."
                 ),
                 input_schema={
@@ -4052,7 +4052,7 @@ class AnchorageGISPlugin(DataPlugin):
                         "topic": {
                             "type": "string",
                             "description": (
-                                "Topic to search for. REQUIRED — extract "
+                                "Topic to search for. REQUIRED -- extract "
                                 "from the user's question. Use the "
                                 "simplest 1-2 word form: 'parks' (not "
                                 "'park parcels'), 'flood' (not 'flood "
@@ -4075,12 +4075,12 @@ class AnchorageGISPlugin(DataPlugin):
                 name="browse_gallery",
                 description=(
                     f"Browse or search {city}'s curated public GIS "
-                    f"gallery — interactive maps, dashboards, apps, "
+                    f"gallery -- interactive maps, dashboards, apps, "
                     f"and StoryMaps. Optionally filter by keyword.\n\n"
                     f"NOTE: gallery items are VIEWERS (Web Maps, "
                     f"Dashboards, Apps), NOT queryable data. Use this "
                     f"tool only when the user wants to *visit a "
-                    f"viewer* — e.g. 'show me the parks app', "
+                    f"viewer* -- e.g. 'show me the parks app', "
                     f"'where's the flood zone map?'. For 'how many?' "
                     f"or 'list X' questions you need queryable data: "
                     f"call `find_gis_content(topic=...)` instead and "
@@ -4105,12 +4105,12 @@ class AnchorageGISPlugin(DataPlugin):
             ToolDefinition(
                 name="search_spatial_layers",
                 description=(
-                    f"Search {city}'s ArcGIS Online for raw spatial layers — "
+                    f"Search {city}'s ArcGIS Online for raw spatial layers -- "
                     f"Feature Services, Map Services, tile layers, Web Maps, "
                     f"and downloadable data (GeoJSON, Shapefile, CSV). Use "
                     f"when the user wants underlying GIS data rather than a "
                     f"pre-built viewer. Prefer `find_gis_content` for "
-                    f"general questions — it also searches the public "
+                    f"general questions -- it also searches the public "
                     f"gallery. Use this tool when you specifically need a "
                     f"queryable layer to pass to `query_data`. Use simple "
                     f"1-2 word keywords (e.g. 'parks' not 'park parcels')."
@@ -4208,7 +4208,7 @@ class AnchorageGISPlugin(DataPlugin):
                 name="get_distinct_values",
                 description=(
                     f"List the distinct values that appear in a "
-                    f"{city} Feature Service field — for confirming "
+                    f"{city} Feature Service field -- for confirming "
                     f"the EXACT format of identifiers, codes, or "
                     f"categories before writing a WHERE clause. "
                     f"Use whenever the user mentions a value (e.g. "
@@ -4220,8 +4220,8 @@ class AnchorageGISPlugin(DataPlugin):
                     f"Optional `like` parameter narrows results to "
                     f"values containing a substring (case-sensitive "
                     f"on the layer side).\n\n"
-                    f"TYPICAL CHAIN: `find_gis_content` → "
-                    f"`get_layer_schema` → `get_distinct_values` → "
+                    f"TYPICAL CHAIN: `find_gis_content` -> "
+                    f"`get_layer_schema` -> `get_distinct_values` -> "
                     f"`query_data` (with the verified value)."
                 ),
                 input_schema={
@@ -4238,7 +4238,7 @@ class AnchorageGISPlugin(DataPlugin):
                             "type": "string",
                             "description": (
                                 "Field name to get distinct values "
-                                "for. CASE-SENSITIVE — use the exact "
+                                "for. CASE-SENSITIVE -- use the exact "
                                 "name from `get_layer_schema`."
                             ),
                         },
@@ -4277,7 +4277,7 @@ class AnchorageGISPlugin(DataPlugin):
                     f"Look up a {city} parcel across format variants "
                     f"in one call. The same parcel can be stored as "
                     f"`001-213-29`, `00121329`, `00121329000`, or "
-                    f"`003-184-87-000` across different MOA layers — "
+                    f"`003-184-87-000` across different MOA layers -- "
                     f"this tool generates all four canonical forms "
                     f"from the input and tries them in a single "
                     f"`WHERE field IN (...)` query.\n\n"
@@ -4287,14 +4287,14 @@ class AnchorageGISPlugin(DataPlugin):
                     f"numbers. Cheaper and more reliable than "
                     f"calling `get_distinct_values` first.\n\n"
                     f"INPUT FLEXIBILITY: hyphens, leading zeros, and "
-                    f"prefixes (like 'Parcel ') are stripped — pass "
+                    f"prefixes (like 'Parcel ') are stripped -- pass "
                     f"any one common form. The 8-digit base + "
                     f"3-digit sub-parcel structure is recovered from "
                     f"the digits.\n\n"
                     f"FALLBACK: if no exact-format match, the tool "
                     f"falls back to a `LIKE '%<digits>%'` query and "
                     f"returns up to 5 candidates the model can "
-                    f"inspect — so a near-match still surfaces "
+                    f"inspect -- so a near-match still surfaces "
                     f"something useful instead of a flat 'not "
                     f"found'.\n\n"
                     f"PRE-FLIGHT (recommended): call "
@@ -4367,7 +4367,7 @@ class AnchorageGISPlugin(DataPlugin):
                 description=(
                     f"Find {city} Feature Services that contain a specific "
                     f"field name or alias. Use to discover which datasets "
-                    f"have a particular attribute — e.g. 'flood', 'permit', "
+                    f"have a particular attribute -- e.g. 'flood', 'permit', "
                     f"'zone'."
                 ),
                 input_schema={
@@ -4407,13 +4407,13 @@ class AnchorageGISPlugin(DataPlugin):
                 name="query_data",
                 description=(
                     f"Query records from a {city} ArcGIS Feature Service. "
-                    f"Provide the item ID — the plugin resolves the service "
+                    f"Provide the item ID -- the plugin resolves the service "
                     f"URL automatically.\n\n"
                     f"DISCOVERY-FIRST WORKFLOW: `find_gis_content` / "
-                    f"`search_spatial_layers` (find items) → "
-                    f"`get_item_details` (confirm the item is queryable) → "
-                    f"`get_layer_schema` (see the REAL field names) → "
-                    f"`query_data`. Never guess field names — they are "
+                    f"`search_spatial_layers` (find items) -> "
+                    f"`get_item_details` (confirm the item is queryable) -> "
+                    f"`get_layer_schema` (see the REAL field names) -> "
+                    f"`query_data`. Never guess field names -- they are "
                     f"case-sensitive, and typos are rejected up front with "
                     f"a 'did you mean' suggestion before the query runs.\n"
                     f"COUNTING ('how many X?'): set `limit=1` and read the "
@@ -4496,7 +4496,7 @@ class AnchorageGISPlugin(DataPlugin):
                     f"Point-in-polygon lookup on a {city} polygon Feature "
                     f"Service. Given a lon/lat (WGS84), returns the "
                     f"attributes of every polygon feature that contains "
-                    f"the point — e.g. 'which park is at this location?', "
+                    f"the point -- e.g. 'which park is at this location?', "
                     f"'which zoning district?', 'which flood zone?'.\n\n"
                     f"DISCOVERY-FIRST: call `get_layer_schema` before "
                     f"using this tool to (a) confirm the layer's "
@@ -4552,7 +4552,7 @@ class AnchorageGISPlugin(DataPlugin):
                             "description": (
                                 "Max features to return (default 10, "
                                 "max 50). Point-in-polygon usually "
-                                "returns 0–3 features."
+                                "returns 0-3 features."
                             ),
                             "default": 10,
                             "minimum": 1,
@@ -4566,27 +4566,27 @@ class AnchorageGISPlugin(DataPlugin):
                 name="spatial_query_polygon",
                 description=(
                     f"Server-side spatial intersection query on a {city} "
-                    f"Feature Service. Given a polygon filter — either "
+                    f"Feature Service. Given a polygon filter -- either "
                     f"inline GeoJSON via filter_geometry, or a reference "
                     f"to polygon feature(s) in another layer via "
-                    f"filter_item_id + filter_where — returns every "
+                    f"filter_item_id + filter_where -- returns every "
                     f"target feature whose geometry intersects (or other "
                     f"spatial relation) the filter. Target layer may be "
                     f"polygon, polyline, or point. Use this instead of "
                     f"centroid-based assignments when features can "
-                    f"straddle a boundary — e.g. 'which LRSA road "
+                    f"straddle a boundary -- e.g. 'which LRSA road "
                     f"segments fall within Assembly District 5?', "
                     f"'which trails cross this park?', 'which parcels "
                     f"touch this flood zone?'.\n\n"
                     f"DISCOVERY-FIRST: call `get_layer_schema` on BOTH "
                     f"the target layer (`item_id`) and any filter layer "
                     f"(`filter_item_id`) before writing `where` / "
-                    f"`filter_where` — they live in different schemas "
+                    f"`filter_where` -- they live in different schemas "
                     f"with different field names. Field names are "
                     f"case-sensitive; guessed names are rejected before "
                     f"the query runs.\n"
                     f"Note: the ArcGIS REST 'intersects' relation "
-                    f"returns whole features — set return_geometry=true "
+                    f"returns whole features -- set return_geometry=true "
                     f"to retrieve GeoJSON geometries for precise "
                     f"client-side clipping at the filter boundary."
                 ),
@@ -4609,7 +4609,7 @@ class AnchorageGISPlugin(DataPlugin):
                                 "geometry. Combine with filter_where to "
                                 "pick specific features. Use this when "
                                 "the filter polygon already exists as a "
-                                "published layer — avoids passing large "
+                                "published layer -- avoids passing large "
                                 "geometries through the model."
                             ),
                         },
@@ -4792,7 +4792,7 @@ class AnchorageGISPlugin(DataPlugin):
                                 "trails, transit routes): 'auto' and "
                                 "'representative_point' use the line "
                                 "midpoint, interpolated at 50% along the "
-                                "line's arc length — always on the line "
+                                "line's arc length -- always on the line "
                                 "itself. 'centroid' uses the "
                                 "length-weighted centroid of the line "
                                 "(NOT a bounding-box centroid); on a "
@@ -4801,7 +4801,7 @@ class AnchorageGISPlugin(DataPlugin):
                                 "polyline sources. Note: a road segment "
                                 "straddling two districts is assigned to "
                                 "whichever district contains its "
-                                "midpoint, not both — use "
+                                "midpoint, not both -- use "
                                 "spatial_query_polygon if you need "
                                 "intersects-based assignment."
                             ),
@@ -4849,7 +4849,7 @@ class AnchorageGISPlugin(DataPlugin):
                     f"from another layer. Use this for questions like "
                     f"'what are the reports in Fairview', 'show me the "
                     f"cleanups in Midtown'. The polygon is identified by "
-                    f"SQL, not coordinates — never ask the user for "
+                    f"SQL, not coordinates -- never ask the user for "
                     f"lat/lon when a polygon name will do. If "
                     f"container_where matches 0 polygons, returns a "
                     f"clear error (not a silently empty result). "
@@ -4879,7 +4879,7 @@ class AnchorageGISPlugin(DataPlugin):
                                 "SQL to pick the container polygon(s), "
                                 "e.g. \"COUNCIL='Fairview'\" or "
                                 "\"COUNCIL IN ('Midtown','Fairview')\". "
-                                "Must match ≥1 polygon; 0 matches is "
+                                "Must match >=1 polygon; 0 matches is "
                                 "reported as an error."
                             ),
                         },
@@ -4938,22 +4938,22 @@ class AnchorageGISPlugin(DataPlugin):
                     f"on a flood zone boundary', 'roads crossing "
                     f"district lines', 'addresses on a council "
                     f"boundary'.\n\n"
-                    f"**SOURCE vs CLASSIFICATION — the most common "
+                    f"**SOURCE vs CLASSIFICATION -- the most common "
                     f"mistake to avoid:**\n"
                     f"- `source_item_id` = the layer of THINGS YOU "
                     f"WANT BACK (parcels, roads, addresses). Must "
                     f"have a user-facing identifier field "
-                    f"(Parcel_ID, Name, Address) — typically "
+                    f"(Parcel_ID, Name, Address) -- typically "
                     f"thousands+ of features.\n"
                     f"- `classification_item_id` = the layer of "
                     f"REGIONS that partition space (zoning, flood, "
-                    f"districts). MUST be polygon-typed — typically "
+                    f"districts). MUST be polygon-typed -- typically "
                     f"dozens to hundreds of features.\n"
                     f"- For 'parcels spanning multiple zones': "
                     f"source = a parcels layer (e.g. "
                     f"MOA_Parcels_Hosted), classification = a "
                     f"zoning layer (e.g. Zoning_Hosted). Do NOT use "
-                    f"the same layer for both — self-intersection "
+                    f"the same layer for both -- self-intersection "
                     f"is meaningless.\n"
                     f"- If unsure, run "
                     f"`find_gis_content(topic='parcels')` and pick "
@@ -4961,7 +4961,7 @@ class AnchorageGISPlugin(DataPlugin):
                     f"field for source.\n\n"
                     f"WHY NOT `aggregate_by_polygon`: that tool "
                     f"reduces each source feature to a single point "
-                    f"and assigns it to one polygon — a parcel "
+                    f"and assigns it to one polygon -- a parcel "
                     f"straddling two zones is silently put in one "
                     f"of them. This tool uses true spatial "
                     f"intersection so split features are caught.\n\n"
@@ -4975,7 +4975,7 @@ class AnchorageGISPlugin(DataPlugin):
                     f"CASE-SENSITIVE.\n\n"
                     f"CAPS: source layer must have <= 5,000 features "
                     f"matching `source_where` (use `source_where` to "
-                    f"narrow if exceeded — e.g. by "
+                    f"narrow if exceeded -- e.g. by "
                     f"neighborhood/zone/region). Classification layer "
                     f"capped at 1,000 polygons.\n\n"
                     f"OUTPUT: a histogram of distinct-value "
@@ -4983,7 +4983,7 @@ class AnchorageGISPlugin(DataPlugin):
                     f"model sees the distribution), plus the "
                     f"qualifying features (>= min_distinct) listed "
                     f"with the actual values they span. Both are "
-                    f"returned in one call — this IS the final "
+                    f"returned in one call -- this IS the final "
                     f"answer for split-feature questions, no further "
                     f"chaining needed."
                 ),
@@ -5180,7 +5180,7 @@ class AnchorageGISPlugin(DataPlugin):
 
                 # Fetch the layer quick-meta up front so we can
                 # validate the WHERE clause against real field names
-                # *before* incurring the query — a typo'd field name
+                # *before* incurring the query -- a typo'd field name
                 # otherwise produces a cryptic ArcGIS error and a
                 # round-trip wasted. Best-effort: if the meta fetch
                 # fails (returns {}) we skip schema validation and
@@ -5213,7 +5213,7 @@ class AnchorageGISPlugin(DataPlugin):
                 records = results[0]
                 total_count = results[1]
                 # When return_geometry=true the backend is f=geojson,
-                # which renders dates as ISO strings already — skip the
+                # which renders dates as ISO strings already -- skip the
                 # epoch-to-date conversion path.
                 date_fields = (
                     quick_meta.get("date_fields")
@@ -5340,7 +5340,7 @@ class AnchorageGISPlugin(DataPlugin):
                 )
                 # return_geometry=True uses f=geojson which renders
                 # dates as ISO strings server-side, so skip our
-                # epoch→ISO path. Also skip coded-domain decoding in
+                # epoch->ISO path. Also skip coded-domain decoding in
                 # the GeoJSON branch since downstream tooling expects
                 # the original codes.
                 if return_geometry:

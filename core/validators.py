@@ -44,24 +44,24 @@ def validate_plugin_count(config: Dict[str, Any]) -> Tuple[List[str], int]:
 
     if count == 0:
         raise ConfigurationError(
-            "❌ Configuration Error: No Plugins Enabled\n\n"
+            "ERROR: Configuration Error: No Plugins Enabled\n\n"
             "You must enable exactly ONE plugin in config.yaml.\n\n"
             "To enable a plugin, set 'enabled: true' for:\n"
-            "  • ckan\n"
-            "  • A custom plugin in custom_plugins/\n\n"
+            "  * ckan\n"
+            "  * A custom plugin in custom_plugins/\n\n"
             "See docs/GETTING_STARTED.md for setup instructions."
         )
 
     if count > 1:
-        plugin_list = "\n".join(f"  • {name}" for name in enabled_plugins)
+        plugin_list = "\n".join(f"  * {name}" for name in enabled_plugins)
         raise ConfigurationError(
-            f"❌ Configuration Error: Multiple Plugins Enabled\n\n"
+            f"ERROR: Configuration Error: Multiple Plugins Enabled\n\n"
             f"You have {count} plugins enabled in config.yaml:\n{plugin_list}\n\n"
             f"OpenContext enforces: One Fork = One MCP Server\n\n"
             f"This keeps deployments:\n"
-            f"  ✓ Simple and focused\n"
-            f"  ✓ Independently scalable\n"
-            f"  ✓ Easy to maintain\n\n"
+            f"  [+] Simple and focused\n"
+            f"  [+] Independently scalable\n"
+            f"  [+] Easy to maintain\n\n"
             f"To deploy multiple MCP servers:\n\n"
             f"  1. Fork this repository again\n"
             f"     Example: opencontext-opendata, opencontext-mbta\n\n"

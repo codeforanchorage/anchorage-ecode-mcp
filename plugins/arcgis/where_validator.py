@@ -126,7 +126,7 @@ class WhereValidator:
     ) -> None:
         """Verify every identifier in ``where`` is a real layer field.
 
-        Catches typo'd field names — a hallucination magnet for LLMs —
+        Catches typo'd field names -- a hallucination magnet for LLMs --
         before they hit ArcGIS, which would otherwise return a cryptic
         ``Unable to perform query`` error. On unknown identifiers we
         raise with a ``difflib`` suggestion so the caller (often a
@@ -138,7 +138,7 @@ class WhereValidator:
             allowed_fields: Field names from the layer schema. Field
                 names in ArcGIS are case-sensitive. Pass ``None`` /
                 empty to skip the check (e.g. when the schema fetch
-                failed — graceful degradation).
+                failed -- graceful degradation).
 
         Raises:
             ValueError: When the WHERE references an identifier that
@@ -177,7 +177,7 @@ class WhereValidator:
             )
             if suggestions:
                 parts.append(
-                    f"Field {u!r} not found in this layer — did you "
+                    f"Field {u!r} not found in this layer -- did you "
                     f"mean {suggestions[0]!r}? (Field names are "
                     f"case-sensitive.)"
                 )
