@@ -348,6 +348,11 @@ class AnchorageGISPlugin(DataPlugin):
     # under this; anything larger gets truncated with a clear marker.
     GEOMETRY_STR_MAX = 600
 
+    # Devil's-advocate thresholds.
+    STALENESS_THRESHOLD_DAYS = 365  # layer unchanged > 1 yr → freshness note
+    COVERAGE_THRESHOLD = 0.5  # < 50% muni overlap → coverage note
+    SMALL_SAMPLE_THRESHOLD = 10  # total_count < 10 (and > 1) → small-N note
+
     def _format_query_results(
         self,
         records: List[Dict[str, Any]],
@@ -361,6 +366,8 @@ class AnchorageGISPlugin(DataPlugin):
         where: Optional[str] = None,
         out_fields: Optional[str] = None,
         coded_domains: Optional[Dict[str, Dict[Any, str]]] = None,
+        last_edit_date: Optional[int] = None,
+        coverage_pct: Optional[float] = None,
     ) -> str:
         provenance: List[str] = []
         if service_url:
@@ -397,6 +404,66 @@ class AnchorageGISPlugin(DataPlugin):
                 f"line below for 'how many?' questions, or narrow the "
                 f"WHERE clause to get a complete listing."
             )
+
+        # Single-record / small-sample caveats: fire only when
+        # total_count was actually computed and the result is small
+        # enough that a model could mistakenly extrapolate a trend.
+        if total_count == 1:
+            provenance.append(
+                "**SINGLE-RECORD CLAIM:** only 1 matching record. Do "
+                "not report this as a trend, pattern, or "
+                "distribution — it is an N=1 anecdote."
+            )
+        elif (
+            total_count is not None
+            and 1 < total_count < self.SMALL_SAMPLE_THRESHOLD
+        ):
+            provenance.append(
+                f"**SMALL SAMPLE:** only {total_count} matching "
+                f"records. Percentages, distributions, and trend "
+                f"claims drawn from this set are weak — name the "
+                f"sample size in any summary."
+            )
+
+        # Staleness caveat: layer hasn't been edited in a long time.
+        # The threshold is intentionally a year (not days) — false
+        # positives here are cheap (informational), false negatives
+        # (calling old data "current") are expensive.
+        if last_edit_date:
+            try:
+                edit_dt = datetime.fromtimestamp(
+                    int(last_edit_date) / 1000, tz=timezone.utc
+                )
+                age_days = (datetime.now(timezone.utc) - edit_dt).days
+                if age_days > self.STALENESS_THRESHOLD_DAYS:
+                    age_years = age_days / 365.25
+                    provenance.append(
+                        f"**DATA FRESHNESS:** layer last edited "
+                        f"{edit_dt.strftime('%Y-%m-%d')} "
+                        f"({age_years:.1f} years ago). Confirm this "
+                        f"matches the recency the question needs."
+                    )
+            except (ValueError, TypeError, OSError):
+                pass
+
+        # Coverage caveat: layer's spatial extent covers a small slice
+        # of Anchorage. Skip when coverage_pct is None (unhandled SR);
+        # honest silence beats a guessed flag.
+        if coverage_pct is not None:
+            if coverage_pct == 0.0:
+                provenance.append(
+                    "**COVERAGE:** this layer's spatial extent does "
+                    "not overlap Anchorage at all. Confirm this is "
+                    "the right layer."
+                )
+            elif coverage_pct < self.COVERAGE_THRESHOLD:
+                pct_int = max(1, int(round(coverage_pct * 100)))
+                provenance.append(
+                    f"**LIMITED COVERAGE:** this layer's extent "
+                    f"covers ~{pct_int}% of Anchorage. Confirm the "
+                    f"question's area of interest falls inside the "
+                    f"layer's coverage."
+                )
 
         if not records:
             if provenance:
@@ -1856,6 +1923,58 @@ class AnchorageGISPlugin(DataPlugin):
             return f"{stripped}/0"
         return stripped
 
+    # Anchorage muni bbox in WGS84 (xmin, ymin, xmax, ymax). Generous
+    # envelope around Cook Inlet to Eklutna — used for the
+    # coverage-gap devil's-advocate check, not for filtering. Exact
+    # boundary fidelity isn't needed; the goal is to flag clearly
+    # partial-coverage layers (e.g. a single neighborhood layer).
+    ANCHORAGE_BBOX_WGS84 = (-150.5, 60.5, -148.5, 61.6)
+
+    @staticmethod
+    def _webmerc_to_wgs84(x: float, y: float) -> Tuple[float, float]:
+        # Inline Web Mercator → WGS84 to avoid a pyproj dependency for
+        # one coordinate conversion. Earth radius per EPSG:3857 spec.
+        import math
+        lon = x / 6378137.0 * 180.0 / math.pi
+        lat = (
+            math.atan(math.exp(y / 6378137.0)) * 2.0 - math.pi / 2.0
+        ) * 180.0 / math.pi
+        return lon, lat
+
+    @classmethod
+    def _anchorage_coverage_pct(cls, extent: Any) -> Optional[float]:
+        # Returns (layer ∩ muni) / muni-area, in [0, ~1+]. >1 if the
+        # layer is larger than the muni (statewide data). Used to fire
+        # the LIMITED COVERAGE caveat for layers covering <50% of the
+        # muni. Returns None when we can't honestly compute coverage
+        # (unhandled SR, malformed extent) so the caveat is suppressed
+        # rather than guessed.
+        if not isinstance(extent, dict):
+            return None
+        coords = [extent.get(k) for k in ("xmin", "ymin", "xmax", "ymax")]
+        if any(not isinstance(v, (int, float)) for v in coords):
+            return None
+        xmin, ymin, xmax, ymax = coords
+        sr = extent.get("spatialReference") or {}
+        wkid = sr.get("wkid") or sr.get("latestWkid")
+        if wkid in (4326, 4269):
+            pass
+        elif wkid in (102100, 3857, 102113):
+            xmin, ymin = cls._webmerc_to_wgs84(xmin, ymin)
+            xmax, ymax = cls._webmerc_to_wgs84(xmax, ymax)
+        else:
+            return None
+        muni = cls.ANCHORAGE_BBOX_WGS84
+        ix = max(xmin, muni[0])
+        iy = max(ymin, muni[1])
+        ax = min(xmax, muni[2])
+        ay = min(ymax, muni[3])
+        if ix >= ax or iy >= ay:
+            return 0.0
+        intersection = (ax - ix) * (ay - iy)
+        muni_area = (muni[2] - muni[0]) * (muni[3] - muni[1])
+        return intersection / muni_area
+
     @staticmethod
     def _validate_lonlat(lon: Any, lat: Any) -> tuple[float, float]:
         """Validate WGS84 coordinates. Note: lon first, then lat."""
@@ -1978,12 +2097,27 @@ class AnchorageGISPlugin(DataPlugin):
             ),
             None,
         )
+        # Devil's-advocate signals — pre-compute and stash so the
+        # formatter can fire the staleness and coverage caveats without
+        # a second round-trip. Both are best-effort: missing/malformed
+        # values just suppress the corresponding caveat.
+        editing = data.get("editingInfo") or {}
+        last_edit_date = (
+            editing.get("dataLastEditDate")
+            or editing.get("lastEditDate")
+        )
+        if not isinstance(last_edit_date, (int, float)):
+            last_edit_date = None
+        coverage_pct = self._anchorage_coverage_pct(data.get("extent"))
+
         return {
             "date_fields": date_fields,
             "coded_domains": coded_domains or None,
             "geometry_type": data.get("geometryType"),
             "name_field": name_field,
             "field_names": field_names or None,
+            "last_edit_date": last_edit_date,
+            "coverage_pct": coverage_pct,
         }
 
     # ── Aggregation helpers ───────────────────────────────────────────────
@@ -2760,10 +2894,16 @@ class AnchorageGISPlugin(DataPlugin):
         header_cols.extend(sum_fields)
         lines.append("| " + " | ".join(header_cols) + " |")
         lines.append("|" + "---|" * len(header_cols))
+        small_bucket_seen = False
         for group, bucket in bucket_list:
             row = [str(group)]
             if include_count:
-                row.append(f"{bucket['count']:,}")
+                cnt = bucket["count"]
+                if cnt < self.SMALL_SAMPLE_THRESHOLD:
+                    small_bucket_seen = True
+                    row.append(f"{cnt:,} (small sample)")
+                else:
+                    row.append(f"{cnt:,}")
             for fld in sum_fields:
                 val = bucket[fld]
                 if isinstance(val, float) and val.is_integer():
@@ -2771,6 +2911,15 @@ class AnchorageGISPlugin(DataPlugin):
                 else:
                     row.append(f"{val:,}")
             lines.append("| " + " | ".join(row) + " |")
+        if small_bucket_seen:
+            lines += [
+                "",
+                f"_Buckets tagged_ **(small sample)** _hold fewer than "
+                f"{self.SMALL_SAMPLE_THRESHOLD} source features. "
+                f"Percentages and shares computed on these buckets are "
+                f"weak — name the count, not the percent, when "
+                f"summarizing._",
+            ]
 
         if unmatched_count:
             lines += [
@@ -5082,6 +5231,8 @@ class AnchorageGISPlugin(DataPlugin):
                         if not return_geometry
                         else None
                     ),
+                    last_edit_date=quick_meta.get("last_edit_date"),
+                    coverage_pct=quick_meta.get("coverage_pct"),
                 )
                 if not records:
                     text += self._no_data_hint(where)
@@ -5130,6 +5281,8 @@ class AnchorageGISPlugin(DataPlugin):
                         total_count=None,
                         date_fields=layer_meta.get("date_fields"),
                         coded_domains=layer_meta.get("coded_domains"),
+                        last_edit_date=layer_meta.get("last_edit_date"),
+                        coverage_pct=layer_meta.get("coverage_pct"),
                     )
 
             elif tool_name == "spatial_query_polygon":
@@ -5202,6 +5355,8 @@ class AnchorageGISPlugin(DataPlugin):
                         total_count=None,
                         date_fields=date_fields,
                         coded_domains=coded_domains,
+                        last_edit_date=layer_meta.get("last_edit_date"),
+                        coverage_pct=layer_meta.get("coverage_pct"),
                     )
 
             elif tool_name == "aggregate_by_polygon":

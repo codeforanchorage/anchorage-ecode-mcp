@@ -2310,6 +2310,171 @@ class TestFormatters:
         assert "truncated" in text
         assert "chars total" in text
 
+    def test_single_record_caveat(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        text = plugin._format_query_results(
+            [{"OBJECTID": 1, "X": "y"}],
+            limit=10,
+            total_count=1,
+        )
+        assert "SINGLE-RECORD" in text
+        assert "N=1 anecdote" in text
+
+    def test_small_sample_caveat(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        text = plugin._format_query_results(
+            [{"OBJECTID": i} for i in range(1, 6)],
+            limit=10,
+            total_count=5,
+        )
+        assert "SMALL SAMPLE" in text
+        assert "5 matching" in text
+        # Don't fire the single-record version
+        assert "SINGLE-RECORD" not in text
+
+    def test_no_caveat_at_threshold(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        text = plugin._format_query_results(
+            [{"OBJECTID": i} for i in range(1, 11)],
+            limit=10,
+            total_count=10,
+        )
+        assert "SINGLE-RECORD" not in text
+        assert "SMALL SAMPLE" not in text
+
+    def test_staleness_caveat_fires_on_old_layer(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        # 3 years before the test runs (epoch ms)
+        from datetime import datetime, timezone, timedelta
+        old_dt = datetime.now(timezone.utc) - timedelta(days=3 * 365)
+        last_edit_ms = int(old_dt.timestamp() * 1000)
+        text = plugin._format_query_results(
+            [{"OBJECTID": 1}],
+            limit=1,
+            total_count=500,
+            last_edit_date=last_edit_ms,
+        )
+        assert "DATA FRESHNESS" in text
+        assert old_dt.strftime("%Y-%m-%d") in text
+
+    def test_staleness_caveat_silent_on_fresh_layer(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        from datetime import datetime, timezone, timedelta
+        fresh_ms = int(
+            (datetime.now(timezone.utc) - timedelta(days=30))
+            .timestamp() * 1000
+        )
+        text = plugin._format_query_results(
+            [{"OBJECTID": 1}],
+            limit=1,
+            total_count=500,
+            last_edit_date=fresh_ms,
+        )
+        assert "DATA FRESHNESS" not in text
+
+    def test_coverage_caveat_partial(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        text = plugin._format_query_results(
+            [{"OBJECTID": 1}],
+            limit=1,
+            total_count=500,
+            coverage_pct=0.18,
+        )
+        assert "LIMITED COVERAGE" in text
+        assert "~18%" in text
+
+    def test_coverage_caveat_zero_overlap(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        text = plugin._format_query_results(
+            [{"OBJECTID": 1}],
+            limit=1,
+            total_count=500,
+            coverage_pct=0.0,
+        )
+        assert "COVERAGE" in text
+        assert "does not overlap" in text
+
+    def test_coverage_caveat_silent_at_full(self, anchorage_config):
+        plugin = AnchorageGISPlugin(anchorage_config)
+        plugin.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
+        text = plugin._format_query_results(
+            [{"OBJECTID": 1}],
+            limit=1,
+            total_count=500,
+            coverage_pct=0.95,
+        )
+        assert "COVERAGE" not in text
+        assert "LIMITED" not in text
+
+
+class TestAnchorageCoveragePct:
+    def test_wgs84_full_overlap(self):
+        # Bbox exactly the muni — coverage close to 1.0.
+        extent = {
+            "xmin": -150.5, "ymin": 60.5,
+            "xmax": -148.5, "ymax": 61.6,
+            "spatialReference": {"wkid": 4326},
+        }
+        pct = AnchorageGISPlugin._anchorage_coverage_pct(extent)
+        assert pct is not None
+        assert 0.95 <= pct <= 1.05
+
+    def test_wgs84_partial_overlap(self):
+        # Bbox covers only a small slice of downtown Anchorage.
+        extent = {
+            "xmin": -149.95, "ymin": 61.18,
+            "xmax": -149.85, "ymax": 61.22,
+            "spatialReference": {"wkid": 4326},
+        }
+        pct = AnchorageGISPlugin._anchorage_coverage_pct(extent)
+        assert pct is not None
+        assert 0 < pct < 0.05
+
+    def test_wgs84_no_overlap(self):
+        # Florida — far from Anchorage, should be 0.
+        extent = {
+            "xmin": -82, "ymin": 25, "xmax": -80, "ymax": 27,
+            "spatialReference": {"wkid": 4326},
+        }
+        pct = AnchorageGISPlugin._anchorage_coverage_pct(extent)
+        assert pct == 0.0
+
+    def test_web_mercator_handled(self):
+        # Web Mercator bbox roughly over Anchorage downtown.
+        # -149.9, 61.2 in WGS84 ≈ -16685000, 8666000 in Web Mercator.
+        extent = {
+            "xmin": -16700000, "ymin": 8650000,
+            "xmax": -16600000, "ymax": 8700000,
+            "spatialReference": {"wkid": 102100},
+        }
+        pct = AnchorageGISPlugin._anchorage_coverage_pct(extent)
+        assert pct is not None
+        assert pct > 0
+
+    def test_unhandled_sr_returns_none(self):
+        # Alaska Albers — we don't convert, should bail out.
+        extent = {
+            "xmin": 100000, "ymin": 1200000,
+            "xmax": 200000, "ymax": 1300000,
+            "spatialReference": {"wkid": 3338},
+        }
+        pct = AnchorageGISPlugin._anchorage_coverage_pct(extent)
+        assert pct is None
+
+    def test_malformed_extent_returns_none(self):
+        assert AnchorageGISPlugin._anchorage_coverage_pct(None) is None
+        assert AnchorageGISPlugin._anchorage_coverage_pct({}) is None
+        assert AnchorageGISPlugin._anchorage_coverage_pct(
+            {"xmin": "bad"}
+        ) is None
+
 
 class TestErrorRewriter:
     """Reactive rewriting of ArcGIS error messages so weaker models
