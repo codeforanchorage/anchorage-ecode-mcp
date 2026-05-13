@@ -311,6 +311,67 @@ class TestWhereValidator:
         assert result == "deleted_at IS NULL"
 
 
+class TestWhereValidatorAgainstSchema:
+    def test_default_where_skipped(self):
+        WhereValidator.validate_against_schema("1=1", {"STATUS"})
+        WhereValidator.validate_against_schema("", {"STATUS"})
+
+    def test_empty_allowed_fields_skips(self):
+        WhereValidator.validate_against_schema("FOO='x'", None)
+        WhereValidator.validate_against_schema("FOO='x'", set())
+
+    def test_valid_field_passes(self):
+        WhereValidator.validate_against_schema(
+            "STATUS='Active'", {"STATUS", "NAME"}
+        )
+
+    def test_typo_field_raises_with_suggestion(self):
+        with pytest.raises(ValueError, match="STATUUS"):
+            WhereValidator.validate_against_schema(
+                "STATUUS='Active'", {"STATUS", "NAME"}
+            )
+
+    def test_typo_field_includes_closest_match(self):
+        try:
+            WhereValidator.validate_against_schema(
+                "STATUUS='Active'", {"STATUS", "NAME"}
+            )
+        except ValueError as e:
+            assert "STATUS" in str(e)
+            assert "did you mean" in str(e).lower()
+
+    def test_unknown_field_no_close_match(self):
+        with pytest.raises(ValueError, match="XYZQR"):
+            WhereValidator.validate_against_schema(
+                "XYZQR='foo'", {"STATUS", "NAME"}
+            )
+
+    def test_sql_keywords_not_treated_as_fields(self):
+        # IS, NULL, AND, OR, IN, LIKE — all SQL keywords, not fields.
+        WhereValidator.validate_against_schema(
+            "STATUS IS NULL AND NAME LIKE 'A%'", {"STATUS", "NAME"}
+        )
+
+    def test_case_sensitive_field_match(self):
+        # ArcGIS field names are case-sensitive. STATUS != status.
+        with pytest.raises(ValueError, match="status"):
+            WhereValidator.validate_against_schema(
+                "status='Active'", {"STATUS"}
+            )
+
+    def test_string_values_not_treated_as_fields(self):
+        # The literal 'Park' must not be flagged as an unknown field.
+        WhereValidator.validate_against_schema(
+            "NAME='Park'", {"NAME"}
+        )
+
+    def test_function_call_field_inside(self):
+        # UPPER is a keyword; STATUS inside is the real field.
+        WhereValidator.validate_against_schema(
+            "UPPER(STATUS)='ACTIVE'", {"STATUS"}
+        )
+
+
 # ── Config schema ──────────────────────────────────────────────────────
 
 

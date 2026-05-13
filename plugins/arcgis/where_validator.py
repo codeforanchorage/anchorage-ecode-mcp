@@ -4,7 +4,9 @@ Hardens SQL WHERE clauses, out_fields lists, and order_by expressions
 against injection before they are forwarded to an ArcGIS REST endpoint.
 """
 
+import difflib
 import re
+from typing import Iterable, Optional
 
 
 class WhereValidator:
@@ -89,6 +91,104 @@ class WhereValidator:
                 )
 
         return where
+
+    # Reserved SQL/Esri tokens that look like identifiers but aren't
+    # field references. Anything outside this set that survives literal
+    # stripping is treated as a candidate field name and checked against
+    # the layer schema in ``validate_against_schema``.
+    SQL_RESERVED = frozenset(
+        {
+            "AND", "OR", "NOT", "BETWEEN", "IN", "LIKE", "ESCAPE", "IS",
+            "NULL", "TRUE", "FALSE",
+            "DATE", "TIMESTAMP", "TIME",
+            "CURRENT_DATE", "CURRENT_TIMESTAMP",
+            "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND",
+            "CASE", "WHEN", "THEN", "ELSE", "END",
+            "UPPER", "LOWER", "TRIM", "LTRIM", "RTRIM",
+            "LENGTH", "LEN", "SUBSTRING", "SUBSTR",
+            "CHARINDEX", "POSITION", "COALESCE", "NULLIF",
+            "CAST", "AS", "EXTRACT", "TO_DATE", "TO_TIMESTAMP",
+            "ABS", "ROUND", "CEIL", "CEILING", "FLOOR",
+            "MIN", "MAX", "SUM", "AVG", "COUNT", "STDDEV",
+            "ANY", "ALL", "SOME", "DISTINCT",
+        }
+    )
+
+    _STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
+    _NUM_LITERAL_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
+    _IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+    @classmethod
+    def validate_against_schema(
+        cls,
+        where: str,
+        allowed_fields: Optional[Iterable[str]],
+    ) -> None:
+        """Verify every identifier in ``where`` is a real layer field.
+
+        Catches typo'd field names — a hallucination magnet for LLMs —
+        before they hit ArcGIS, which would otherwise return a cryptic
+        ``Unable to perform query`` error. On unknown identifiers we
+        raise with a ``difflib`` suggestion so the caller (often a
+        model) can self-correct.
+
+        Args:
+            where: A WHERE clause that has already passed
+                ``WhereValidator.validate``.
+            allowed_fields: Field names from the layer schema. Field
+                names in ArcGIS are case-sensitive. Pass ``None`` /
+                empty to skip the check (e.g. when the schema fetch
+                failed — graceful degradation).
+
+        Raises:
+            ValueError: When the WHERE references an identifier that
+                isn't in ``allowed_fields`` and isn't a SQL keyword or
+                function from ``SQL_RESERVED``.
+        """
+        if not where:
+            return
+        stripped_where = where.strip()
+        if not stripped_where or stripped_where == "1=1":
+            return
+        if not allowed_fields:
+            return
+
+        allowed_set = {f for f in allowed_fields if f}
+        if not allowed_set:
+            return
+
+        # Drop string literals first so values like 'Park' don't get
+        # mis-tokenized as field names. Then strip numeric literals.
+        no_strings = cls._STRING_LITERAL_RE.sub("", where)
+        no_numbers = cls._NUM_LITERAL_RE.sub("", no_strings)
+        candidates = set(cls._IDENT_RE.findall(no_numbers))
+        candidates = {
+            c for c in candidates if c.upper() not in cls.SQL_RESERVED
+        }
+        unknown = sorted(c for c in candidates if c not in allowed_set)
+        if not unknown:
+            return
+
+        sorted_allowed = sorted(allowed_set)
+        parts = []
+        for u in unknown:
+            suggestions = difflib.get_close_matches(
+                u, sorted_allowed, n=1, cutoff=0.6
+            )
+            if suggestions:
+                parts.append(
+                    f"Field {u!r} not found in this layer — did you "
+                    f"mean {suggestions[0]!r}? (Field names are "
+                    f"case-sensitive.)"
+                )
+            else:
+                parts.append(
+                    f"Field {u!r} not found in this layer."
+                )
+        parts.append(
+            "Call get_layer_schema to see all available field names."
+        )
+        raise ValueError(" ".join(parts))
 
 
 class OutFieldsValidator:

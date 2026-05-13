@@ -461,8 +461,12 @@ class AnchorageGISPlugin(DataPlugin):
                 ):
                     # Render coded values as "<code> (<label>)" so the
                     # model doesn't have to guess what e.g. R1A means.
+                    # Skip the parenthetical when code and label are
+                    # the same string to avoid noise like
+                    # "Status: Open (Open)".
                     label = coded_domains[key][value]
-                    value = f"{value} ({label})"
+                    if str(value) != str(label):
+                        value = f"{value} ({label})"
                 lines.append(f"  {key}: {value}")
             if geometry is not None:
                 geom_str = json.dumps(geometry, separators=(",", ":"))
@@ -1952,7 +1956,7 @@ class AnchorageGISPlugin(DataPlugin):
             }
             if fname and mapping:
                 coded_domains[fname] = mapping
-        field_names = {f.get("name") for f in fields}
+        field_names = {f.get("name") for f in fields if f.get("name")}
         name_field = next(
             (
                 f
@@ -1966,6 +1970,7 @@ class AnchorageGISPlugin(DataPlugin):
             "coded_domains": coded_domains or None,
             "geometry_type": data.get("geometryType"),
             "name_field": name_field,
+            "field_names": field_names or None,
         }
 
     # ── Aggregation helpers ───────────────────────────────────────────────
@@ -4989,11 +4994,27 @@ class AnchorageGISPlugin(DataPlugin):
                 )
                 validated_where = WhereValidator.validate(where)
 
-                # Always fetch layer quick-meta — date_fields for
-                # epoch→ISO rendering, geometry_type for the
-                # polyline-grain warning. One round-trip serves both
-                # so the cost is the same as the old date-fields-only
-                # fetch.
+                # Fetch the layer quick-meta up front so we can
+                # validate the WHERE clause against real field names
+                # *before* incurring the query — a typo'd field name
+                # otherwise produces a cryptic ArcGIS error and a
+                # round-trip wasted. Best-effort: if the meta fetch
+                # fails (returns {}) we skip schema validation and
+                # let the query speak for itself.
+                quick_meta = await self._get_layer_quick_meta(service_url) or {}
+                try:
+                    WhereValidator.validate_against_schema(
+                        validated_where, quick_meta.get("field_names")
+                    )
+                except ValueError as e:
+                    return ToolResult(
+                        content=[],
+                        success=False,
+                        error_message=str(e),
+                    )
+
+                # Now run the (more expensive) query and count in
+                # parallel for latency.
                 parallel_tasks = [
                     self.query_data(
                         item_id,
@@ -5002,13 +5023,11 @@ class AnchorageGISPlugin(DataPlugin):
                         return_geometry=return_geometry,
                     ),
                     self._get_record_count(service_url, validated_where),
-                    self._get_layer_quick_meta(service_url),
                 ]
 
                 results = await asyncio.gather(*parallel_tasks)
                 records = results[0]
                 total_count = results[1]
-                quick_meta = results[2] or {}
                 # When return_geometry=true the backend is f=geojson,
                 # which renders dates as ISO strings already — skip the
                 # epoch-to-date conversion path.
