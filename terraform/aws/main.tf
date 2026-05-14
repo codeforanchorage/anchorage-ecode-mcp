@@ -106,6 +106,10 @@ resource "aws_cloudwatch_log_group" "lambda_logs" {
   name              = "/aws/lambda/${local.lambda_name}"
   retention_in_days = 14
 
+  tags = {
+    Project = "mcp-server"
+  }
+
   # Rename-safety: new log group must exist before Lambda writes to it.
   lifecycle {
     create_before_destroy = true

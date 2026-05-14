@@ -47,6 +47,10 @@ resource "aws_cloudwatch_log_group" "api_gateway_access" {
   name              = "/aws/apigateway/${local.lambda_name}-access"
   retention_in_days = 30
 
+  tags = {
+    Project = "mcp-server"
+  }
+
   lifecycle {
     create_before_destroy = true
   }
