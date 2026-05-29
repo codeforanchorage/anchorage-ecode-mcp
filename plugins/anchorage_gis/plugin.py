@@ -561,19 +561,11 @@ class AnchorageGISPlugin(DataPlugin):
                     )
                 lines.append(f"  geometry (GeoJSON, WGS84): {geom_str}")
             lines.append("")
-        # A3 (Copilot): re-state the TRUNCATED warning as prose at the
-        # bottom so GPT-4o-style summarization picks it up even if the
-        # structured marker at the top gets dropped during rendering.
-        # Redundant for Claude (which reads top-down faithfully); cheap
-        # insurance for everyone else.
-        if truncated:
-            lines.append(
-                f"(Reminder: results above are a sample of "
-                f"{len(records)} from {total_count:,} matching "
-                f"records. Do not generalize counts or percentages "
-                f"from them; use the TOTAL COUNT for 'how many' "
-                f"answers.)"
-            )
+        # The TRUNCATED banner and TOTAL COUNT line above already carry
+        # the sampling caveat. Copilot (now GPT-5.1) and Claude both read
+        # the full response top-down, so the older bottom-of-response
+        # restatement that guarded against GPT-4o-style summarization is
+        # no longer needed and has been dropped.
         return "\n".join(lines)
 
     # ── DataPlugin interface methods ──────────────────────────────────────
@@ -688,10 +680,11 @@ class AnchorageGISPlugin(DataPlugin):
     def _no_data_hint(where_clause: str) -> str:
         """Hint to append after an empty result with a non-trivial WHERE.
 
-        A 4o-class model frequently writes ``Field='exact value'`` when
-        what it wanted is ``Field LIKE '%substring%'``. ArcGIS returns
-        zero rows silently and the model reports the data does not
-        exist. Append a recovery instruction so the model retries.
+        Any model can write ``Field='exact value'`` when what it wanted
+        is ``Field LIKE '%substring%'``. ArcGIS returns zero rows
+        silently, and without a nudge the model reports the data does
+        not exist. Append a concrete recovery instruction so the model
+        retries instead of giving up.
         """
         normalized = (where_clause or "").strip()
         if not normalized or normalized == "1=1":
@@ -710,12 +703,13 @@ class AnchorageGISPlugin(DataPlugin):
         )
 
     # Field-name priority for picking the user-facing identifier from
-    # a feature's attributes. A 4o-class model latches onto the first
-    # identifier-shaped value it sees in the response and reports it
-    # back as canonical -- if the lead line says "OBJECTID 778" the
-    # model will say "parcel 778" even when Parcel_ID is right below.
-    # We promote one of these field names into the lead position so
-    # the wrong identifier never even appears first.
+    # a feature's attributes. A model can latch onto the first
+    # identifier-shaped value it sees in the response and report it back
+    # as canonical -- if the lead line says "OBJECTID 778" the model may
+    # say "parcel 778" even when Parcel_ID is right below. We promote one
+    # of these field names into the lead position so the wrong identifier
+    # never appears first, rather than relying on the model to sort it
+    # out from a warning.
     NATURAL_ID_FIELD_PRIORITY = (
         # Parcel-style identifiers (most common request shape).
         "Parcel_ID", "PARCEL_ID", "ParcelID", "PARCELID",
@@ -3949,11 +3943,11 @@ class AnchorageGISPlugin(DataPlugin):
         lines.append("")
 
         # If even the per-OID fallback couldn't load attributes, we
-        # must NOT surface raw OBJECTIDs -- GPT-4o-class models report
-        # them as parcel numbers no matter how loud the warning sits
-        # next to them. Return a clean refusal with concrete recovery
-        # steps for the model to give the user, instead of dangerous
-        # raw data.
+        # must NOT surface raw OBJECTIDs -- a model can report them as
+        # parcel numbers no matter how loud the warning sits next to
+        # them, so we don't hand over the raw IDs at all. Return a clean
+        # refusal with concrete recovery steps for the model to give the
+        # user, instead of dangerous raw data.
         if not features_by_oid and qualifying_oids:
             reason = (
                 attrs_error

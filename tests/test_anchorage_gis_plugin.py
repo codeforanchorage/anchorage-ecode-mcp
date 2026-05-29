@@ -2694,12 +2694,11 @@ class TestGetDistinctValues:
 
 
 class TestPickNaturalId:
-    """A 4o-class model latches onto the FIRST identifier-shaped
-    value it sees in the rendered output. If the lead line says
-    'OBJECTID 778', the model reports 778 as the parcel number even
-    when Parcel_ID sits right below. The natural-ID picker promotes
-    a user-facing field into the lead position to short-circuit
-    that failure mode."""
+    """A model can latch onto the FIRST identifier-shaped value it
+    sees in the rendered output. If the lead line says 'OBJECTID 778',
+    the model may report 778 as the parcel number even when Parcel_ID
+    sits right below. The natural-ID picker promotes a user-facing
+    field into the lead position to short-circuit that failure mode."""
 
     def test_prefers_parcel_id_over_name(self):
         # Parcel_ID outranks Name when both are present — parcel
@@ -3253,7 +3252,7 @@ class TestFindFeaturesSpanningClassifications:
     async def test_lead_identifier_is_natural_id_not_objectid(
         self, plugin
     ):
-        # Regression for the GPT-4o-reports-OBJECTID-as-parcel-number
+        # Regression for the model-reports-OBJECTID-as-parcel-number
         # bug. When attributes include a user-facing identifier
         # (Parcel_ID), the rendered lead line MUST feature it
         # prominently and demote OBJECTID to a parenthetical. Without
