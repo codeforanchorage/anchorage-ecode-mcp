@@ -64,7 +64,14 @@ try:
          "clientInfo": {"name": "smoke", "version": "1.0"}},
     )
     si = r["result"]["serverInfo"]
-    check("initialize", si["name"] == "opencontext", json.dumps(si))
+    pv = r["result"]["protocolVersion"]
+    # serverInfo now reports the configured name (was hardcoded "opencontext"),
+    # and the server echoes the client's requested protocol version.
+    check(
+        "initialize",
+        si["name"] == "Anchorage GIS MCP" and pv == "2025-03-26",
+        json.dumps({"serverInfo": si, "protocolVersion": pv}),
+    )
 except Exception as e:
     check("initialize", False, repr(e))
 
