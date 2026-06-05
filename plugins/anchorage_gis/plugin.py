@@ -2237,10 +2237,10 @@ class AnchorageGISPlugin(DataPlugin):
     # resultOffset at this step until AGG_SOURCE_LIMIT is reached.
     AGG_PAGE_SIZE = 1000
 
-    # Transient-failure retry for the high-fan-out spatial paths
-    # (_paged_geojson_fetch, _overlay_area_in_target). Cold starts and brief
-    # ArcGIS blips otherwise surface as an opaque "Tool execution failed".
-    # Keep attempts few and backoff short -- the API Gateway ceiling is 29s.
+    # Transient-failure retry for the spatial fetch path
+    # (_paged_geojson_fetch, used by aggregate + coverage). Cold starts and
+    # brief ArcGIS blips otherwise surface as an opaque "Tool execution
+    # failed". Keep attempts few and backoff short -- the gateway ceiling is 29s.
     ARCGIS_MAX_ATTEMPTS = 3
     ARCGIS_RETRY_BACKOFF_S = 0.4
 
@@ -2258,12 +2258,13 @@ class AnchorageGISPlugin(DataPlugin):
     # classification layer has hundreds of polygons.
     SPANNING_QUERY_CONCURRENCY = 10
 
-    # coverage_by_polygon fans out one server-side SUM(area) query per
-    # target polygon. Cap the target count so the fan-out finishes inside
-    # API Gateway's 29s ceiling: ~235 targets ran ~6.7s in testing, so 800
-    # at this concurrency stays well under. Narrow target_where past this.
+    # coverage_by_polygon fetches overlay footprints in BATCHES of target
+    # polygons (one spatial query per batch, not per target) then assigns
+    # them client-side. A per-target fan-out (~235 queries) tripped ArcGIS
+    # per-IP throttling; batching keeps it to ceil(targets / batch) queries.
     COVERAGE_TARGET_LIMIT = 800
-    COVERAGE_QUERY_CONCURRENCY = 12
+    COVERAGE_TARGET_BATCH = 50          # target polygons per overlay query
+    COVERAGE_OVERLAY_LIMIT = 5000       # overlay features fetched per batch
     # How many rows of the per-target breakdown to render (sorted by
     # coverage). The headline count is always exact; the table is a sample.
     COVERAGE_TABLE_ROWS = 50
@@ -3019,8 +3020,15 @@ class AnchorageGISPlugin(DataPlugin):
         where: str,
         out_fields: str,
         limit: int,
+        extra_params: Optional[Dict[str, Any]] = None,
+        method: str = "get",
     ) -> List[Dict[str, Any]]:
-        """Page through a layer and return raw GeoJSON features (geom + props)."""
+        """Page through a layer and return raw GeoJSON features (geom + props).
+
+        ``extra_params`` (e.g. a spatial geometry/spatialRel filter) is merged
+        into each page request. Pass ``method='post'`` when the extra params
+        carry a large geometry that would overflow a GET URL.
+        """
         query_url = f"{layer_url}/query"
         out_fields = OutFieldsValidator.validate(out_fields or "*")
         features: List[Dict[str, Any]] = []
@@ -3037,9 +3045,16 @@ class AnchorageGISPlugin(DataPlugin):
                 "resultOffset": str(offset),
                 "maxAllowableOffset": str(self.GEOMETRY_SIMPLIFY_OFFSET_DEG),
             }
-            data = await self._request_json_with_retry(
-                query_url, method="get", params=params
-            )
+            if extra_params:
+                params.update(extra_params)
+            if method == "post":
+                data = await self._request_json_with_retry(
+                    query_url, method="post", data=params
+                )
+            else:
+                data = await self._request_json_with_retry(
+                    query_url, method="get", params=params
+                )
             page = data.get("features") or []
             if not page:
                 break
@@ -3346,43 +3361,6 @@ class AnchorageGISPlugin(DataPlugin):
         "esriFieldTypeOID",
     })
 
-    async def _overlay_area_in_target(
-        self,
-        overlay_query_url: str,
-        esri_target: Dict[str, Any],
-        overlay_where: str,
-        overlay_area_field: str,
-        sem: asyncio.Semaphore,
-    ) -> float:
-        """Server-side SUM of overlay-feature area intersecting one target.
-
-        Uses ArcGIS outStatistics so the sum is computed upstream -- no
-        geometry crosses the wire. Intersect-based (a feature straddling the
-        target boundary is counted in full, not clipped).
-        """
-        params = {
-            "where": overlay_where,
-            "geometry": json.dumps(esri_target, separators=(",", ":")),
-            "geometryType": "esriGeometryPolygon",
-            "inSR": "4326",
-            "spatialRel": "esriSpatialRelIntersects",
-            "outStatistics": json.dumps([{
-                "statisticType": "sum",
-                "onStatisticField": overlay_area_field,
-                "outStatisticFieldName": "cov_sum",
-            }]),
-            "f": "json",
-        }
-        async with sem:
-            data = await self._request_json_with_retry(
-                overlay_query_url, method="post", data=params
-            )
-        feats = data.get("features") or []
-        if not feats:
-            return 0.0
-        val = (feats[0].get("attributes") or {}).get("cov_sum")
-        return float(val) if val is not None else 0.0
-
     async def _coverage_by_polygon(self, args: Dict[str, Any]) -> str:
         target_item_id = self._validate_item_id(
             (args.get("target_item_id") or "").strip()
@@ -3486,10 +3464,11 @@ class AnchorageGISPlugin(DataPlugin):
             )
         truncated = len(targets) >= max_targets
 
-        sem = asyncio.Semaphore(self.COVERAGE_QUERY_CONCURRENCY)
-        overlay_query_url = f"{overlay_url}/query"
-
-        async def score(feat: Dict[str, Any]) -> Dict[str, Any]:
+        # Build the per-target geometry/area/bbox set for client-side
+        # assignment. Skip targets with no geometry or non-positive area.
+        parcels: List[Dict[str, Any]] = []
+        skipped = 0
+        for feat in targets:
             props = feat.get("properties") or {}
             geom = feat.get("geometry")
             tid = props.get(target_id_field)
@@ -3498,25 +3477,87 @@ class AnchorageGISPlugin(DataPlugin):
             except (TypeError, ValueError):
                 area = 0.0
             if not geom or area <= 0:
-                return {"id": tid, "coverage": None}
-            try:
-                esri = self._geojson_to_esri_polygon(geom)
-                covered = await self._overlay_area_in_target(
-                    overlay_query_url, esri, overlay_where,
-                    overlay_area_field, sem,
-                )
-            except Exception:
-                return {"id": tid, "coverage": None}
-            return {
-                "id": tid,
-                "coverage": 100.0 * covered / area,
-                "covered": covered,
-                "area": area,
-            }
+                skipped += 1
+                continue
+            parcels.append({
+                "id": tid, "area": area, "geom": geom,
+                "bbox": self._geometry_bbox(geom), "covered": 0.0,
+            })
 
-        rows = await asyncio.gather(*[score(f) for f in targets])
-        scored = [r for r in rows if r["coverage"] is not None]
-        skipped = len(rows) - len(scored)
+        # Fetch overlay footprints that intersect the targets, ONE spatial
+        # query per BATCH of target polygons (not per target -- that fan-out
+        # tripped ArcGIS per-IP throttling). Each batch unions its parcels'
+        # rings into a single filter geometry, POSTed so the large body fits.
+        overlay_truncated = False
+        seen_overlay: set = set()
+        overlay_pts: List[Tuple[Tuple[float, float], float]] = []
+        batch_size = self.COVERAGE_TARGET_BATCH
+        for i in range(0, len(parcels), batch_size):
+            batch = parcels[i:i + batch_size]
+            multi_coords: List[Any] = []
+            for p in batch:
+                g = p["geom"]
+                if g.get("type") == "Polygon":
+                    multi_coords.append(g.get("coordinates") or [])
+                elif g.get("type") == "MultiPolygon":
+                    multi_coords.extend(g.get("coordinates") or [])
+            esri = self._geojson_to_esri_polygon(
+                {"type": "MultiPolygon", "coordinates": multi_coords}
+            )
+            feats = await self._paged_geojson_fetch(
+                overlay_url,
+                where=overlay_where,
+                out_fields=overlay_area_field,
+                limit=self.COVERAGE_OVERLAY_LIMIT,
+                method="post",
+                extra_params={
+                    "geometry": json.dumps(esri, separators=(",", ":")),
+                    "geometryType": "esriGeometryPolygon",
+                    "inSR": "4326",
+                    "spatialRel": "esriSpatialRelIntersects",
+                },
+            )
+            if len(feats) >= self.COVERAGE_OVERLAY_LIMIT:
+                overlay_truncated = True
+            for f in feats:
+                oid = f.get("id")
+                if oid is not None:
+                    if oid in seen_overlay:
+                        continue
+                    seen_overlay.add(oid)
+                pt = self._feature_to_point(f.get("geometry") or {}, "auto")
+                if pt is None:
+                    continue
+                try:
+                    a = float((f.get("properties") or {}).get(overlay_area_field))
+                except (TypeError, ValueError):
+                    continue
+                overlay_pts.append((pt, a))
+
+        # Assign each overlay feature to the target whose polygon contains its
+        # centroid (bbox prefilter), summing overlay area. Centroid assignment
+        # gives each footprint to exactly one parcel (no double-count).
+        for pt, a in overlay_pts:
+            px, py = pt
+            for p in parcels:
+                bb = p["bbox"]
+                if bb is not None and (
+                    px < bb[0] or px > bb[2] or py < bb[1] or py > bb[3]
+                ):
+                    continue
+                if self._geometry_contains_point(p["geom"], pt):
+                    p["covered"] += a
+                    break
+
+        scored = [
+            {
+                "id": p["id"],
+                "coverage": 100.0 * p["covered"] / p["area"],
+                "covered": p["covered"],
+                "area": p["area"],
+            }
+            for p in parcels
+        ]
         zero_cov = sum(1 for r in scored if r["coverage"] == 0.0)
 
         def in_band(c: float) -> bool:
@@ -3578,9 +3619,10 @@ class AnchorageGISPlugin(DataPlugin):
 
         # Caveats.
         caveats = [
-            "_Coverage is **intersect-based, not clipped**: an overlay "
-            "feature straddling a target boundary is counted in full, so "
-            "coverage can exceed 100%. Good for screening, not survey-grade._",
+            "_Each overlay feature is assigned to the target whose polygon "
+            "contains its **centroid**, and its full area is counted (not "
+            "geometrically clipped), so coverage can exceed 100% on dense "
+            "lots. Good for screening, not survey-grade._",
             f"_Both areas use the layers' stored `{target_area_field}` / "
             f"`{overlay_area_field}`; the ratio is valid when both layers "
             f"share a spatial reference (true for MOA hosted layers)._",
@@ -3588,9 +3630,15 @@ class AnchorageGISPlugin(DataPlugin):
         if zero_cov:
             caveats.append(
                 f"_{zero_cov:,} target(s) returned **0% coverage** (no "
-                f"overlay feature intersects) -- vacant land, or outside the "
-                f"overlay layer's extent. Decide whether 0% belongs in your "
-                f"answer._"
+                f"overlay feature centroid falls inside) -- vacant land, or "
+                f"outside the overlay layer's extent. Decide whether 0% "
+                f"belongs in your answer._"
+            )
+        if overlay_truncated:
+            caveats.append(
+                f"_An overlay batch hit the "
+                f"{self.COVERAGE_OVERLAY_LIMIT:,}-feature fetch cap; coverage "
+                f"for some targets may be undercounted. Narrow target_where._"
             )
         if skipped:
             caveats.append(
@@ -5526,10 +5574,10 @@ class AnchorageGISPlugin(DataPlugin):
                     f"'lots more than 80% paved'. Works WITHOUT a shared key: "
                     f"the overlay is joined to each target spatially (so use "
                     f"this when footprints/overlay have no parcel id). For "
-                    f"each target it sums overlay area intersecting it "
-                    f"(server-side) and divides by the target's own area. "
-                    f"Returns 'N of M targets in band' plus the "
-                    f"lowest-coverage targets. Intersect-based, not clipped "
+                    f"each target it sums the area of overlay features whose "
+                    f"centroid falls inside and divides by the target's own "
+                    f"area. Returns 'N of M targets in band' plus the "
+                    f"lowest-coverage targets. Centroid-assigned, unclipped "
                     f"(screening-grade)."
                 ),
                 input_schema={

@@ -4174,16 +4174,42 @@ class TestCoverageByPolygon:
         p.plugin_config = AnchorageGISPluginConfig(**anchorage_config)
         return p
 
-    def _target(self, pid, area):
+    @staticmethod
+    def _target(pid, area, x0):
+        # Unit-square parcel spanning x in [x0, x0+1], y in [0, 1].
         return {
             "properties": {"Parcel_ID": pid, "Shape__Area": area},
-            "geometry": _SQUARE,
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [[x0, 0], [x0 + 1, 0], [x0 + 1, 1], [x0, 1], [x0, 0]]
+                ],
+            },
         }
 
-    def _patches(self, plugin, targets, cov_sum=100.0):
-        """Patch layer resolution/meta/fetch; stub the overlay sum query."""
-        plugin.client = Mock()
-        plugin.client.post = AsyncMock(return_value=_cov_resp(cov_sum))
+    @staticmethod
+    def _bldg(oid, cx, area):
+        # Small footprint centered at (cx, 0.5) -- its centroid lands in the
+        # parcel covering that x. Shape__Area carries the footprint area.
+        h = 0.1
+        return {
+            "type": "Feature",
+            "id": oid,
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [cx - h, 0.5 - h], [cx + h, 0.5 - h],
+                    [cx + h, 0.5 + h], [cx - h, 0.5 + h], [cx - h, 0.5 - h],
+                ]],
+            },
+            "properties": {"Shape__Area": area},
+        }
+
+    def _patches(self, plugin, targets, overlay):
+        """Patch resolution/meta and route _paged_geojson_fetch by layer."""
+        def fake_fetch(layer_url, where, out_fields, limit,
+                       extra_params=None, method="get"):
+            return list(targets) if ("a" * 32) in layer_url else list(overlay)
         return (
             patch.object(
                 plugin, "_resolve_layer_url", new_callable=AsyncMock,
@@ -4195,7 +4221,7 @@ class TestCoverageByPolygon:
             ),
             patch.object(
                 plugin, "_paged_geojson_fetch", new_callable=AsyncMock,
-                return_value=targets,
+                side_effect=fake_fetch,
             ),
             patch.object(
                 plugin, "_safe_layer_meta", new_callable=AsyncMock,
@@ -4205,13 +4231,18 @@ class TestCoverageByPolygon:
 
     @pytest.mark.asyncio
     async def test_under_threshold_band(self, plugin):
-        # cov_sum=100 fixed; areas drive coverage: A=10%, B=50%, C=100%.
+        # footprint area 100 each; parcel areas drive coverage: A=10%, B=50%, C=100%.
         targets = [
-            self._target("A", 1000.0),
-            self._target("B", 200.0),
-            self._target("C", 100.0),
+            self._target("A", 1000.0, 0),
+            self._target("B", 200.0, 2),
+            self._target("C", 100.0, 4),
         ]
-        p1, p2, p3, p4 = self._patches(plugin, targets)
+        overlay = [
+            self._bldg(1, 0.5, 100.0),
+            self._bldg(2, 2.5, 100.0),
+            self._bldg(3, 4.5, 100.0),
+        ]
+        p1, p2, p3, p4 = self._patches(plugin, targets, overlay)
         with p1, p2, p3, p4:
             text = await plugin._coverage_by_polygon({
                 "target_item_id": "a" * 32,
@@ -4228,8 +4259,9 @@ class TestCoverageByPolygon:
 
     @pytest.mark.asyncio
     async def test_no_band_measures_all(self, plugin):
-        targets = [self._target("A", 1000.0), self._target("B", 200.0)]
-        p1, p2, p3, p4 = self._patches(plugin, targets)
+        targets = [self._target("A", 1000.0, 0), self._target("B", 200.0, 2)]
+        overlay = [self._bldg(1, 0.5, 100.0), self._bldg(2, 2.5, 100.0)]
+        p1, p2, p3, p4 = self._patches(plugin, targets, overlay)
         with p1, p2, p3, p4:
             text = await plugin._coverage_by_polygon({
                 "target_item_id": "a" * 32,
@@ -4242,11 +4274,16 @@ class TestCoverageByPolygon:
     @pytest.mark.asyncio
     async def test_band_min_and_max(self, plugin):
         targets = [
-            self._target("A", 1000.0),  # 10%
-            self._target("B", 250.0),   # 40%
-            self._target("C", 100.0),   # 100%
+            self._target("A", 1000.0, 0),  # 10%
+            self._target("B", 200.0, 2),   # 50%
+            self._target("C", 100.0, 4),   # 100%
         ]
-        p1, p2, p3, p4 = self._patches(plugin, targets)
+        overlay = [
+            self._bldg(1, 0.5, 100.0),
+            self._bldg(2, 2.5, 100.0),
+            self._bldg(3, 4.5, 100.0),
+        ]
+        p1, p2, p3, p4 = self._patches(plugin, targets, overlay)
         with p1, p2, p3, p4:
             text = await plugin._coverage_by_polygon({
                 "target_item_id": "a" * 32,
@@ -4255,14 +4292,15 @@ class TestCoverageByPolygon:
                 "min_coverage_pct": 20,
                 "max_coverage_pct": 80,
             })
-        # B (40%) only: A below min, C above max.
+        # B (50%) only: A below min, C above max.
         assert "1 of 3 targets fall in the band" in text
         assert "20% <= coverage < 80%" in text
 
     @pytest.mark.asyncio
     async def test_zero_coverage_caveat(self, plugin):
-        targets = [self._target("A", 1000.0)]
-        p1, p2, p3, p4 = self._patches(plugin, targets, cov_sum=0.0)
+        # Parcel with no footprint anywhere near it -> 0% coverage.
+        targets = [self._target("A", 1000.0, 0)]
+        p1, p2, p3, p4 = self._patches(plugin, targets, [])
         with p1, p2, p3, p4:
             text = await plugin._coverage_by_polygon({
                 "target_item_id": "a" * 32,
@@ -4275,8 +4313,9 @@ class TestCoverageByPolygon:
 
     @pytest.mark.asyncio
     async def test_zero_area_target_skipped(self, plugin):
-        targets = [self._target("A", 1000.0), self._target("B", 0.0)]
-        p1, p2, p3, p4 = self._patches(plugin, targets)
+        targets = [self._target("A", 1000.0, 0), self._target("B", 0.0, 2)]
+        overlay = [self._bldg(1, 0.5, 100.0)]
+        p1, p2, p3, p4 = self._patches(plugin, targets, overlay)
         with p1, p2, p3, p4:
             text = await plugin._coverage_by_polygon({
                 "target_item_id": "a" * 32,
@@ -4288,7 +4327,7 @@ class TestCoverageByPolygon:
 
     @pytest.mark.asyncio
     async def test_rejects_unknown_id_field(self, plugin):
-        p1, p2, p3, p4 = self._patches(plugin, [])
+        p1, p2, p3, p4 = self._patches(plugin, [], [])
         with p1, p2, p3, p4:
             with pytest.raises(ValueError, match="target_id_field"):
                 await plugin._coverage_by_polygon({
