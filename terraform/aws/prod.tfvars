@@ -9,10 +9,10 @@ lambda_timeout  = 120
 api_quota_limit = 3000
 api_rate_limit  = 5
 api_burst_limit = 10
-# First deploy uses the default API Gateway URL. Set this to
-# "anchorage-ecode.codeforanchorage.org" once the Route53 zone for
-# codeforanchorage.org (apex) is reachable from this AWS account.
-custom_domain   = ""
+# DNS for codeforanchorage.org is managed externally at DreamHost, so the
+# ACM validation CNAME and the routing CNAME are added there by hand (see
+# outputs acm_validation_cname_name/value and custom_domain_target).
+custom_domain   = "anchorage-ecode.codeforanchorage.org"
 
 # Cap concurrent Lambda executions. Cost and blast-radius protection if
 # WAF is bypassed via distributed sources. Conversational MCP traffic does
