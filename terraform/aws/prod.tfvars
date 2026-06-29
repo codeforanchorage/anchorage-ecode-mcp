@@ -9,7 +9,10 @@ lambda_timeout  = 120
 api_quota_limit = 3000
 api_rate_limit  = 5
 api_burst_limit = 10
-custom_domain   = "anchorage-ecode.codeforanchorage.org"
+# First deploy uses the default API Gateway URL. Set this to
+# "anchorage-ecode.codeforanchorage.org" once the Route53 zone for
+# codeforanchorage.org (apex) is reachable from this AWS account.
+custom_domain   = ""
 
 # Cap concurrent Lambda executions. Cost and blast-radius protection if
 # WAF is bypassed via distributed sources. Conversational MCP traffic does
@@ -21,9 +24,6 @@ lambda_reserved_concurrency = 10
 # real users and tight enough to slow scrapers and denial-of-wallet probes.
 waf_rate_limit_per_5min = 300
 
-# Hardened, API-key-gated /mcp-gcc route for an M365 GCC Copilot consumer.
-# Kept enabled. The Copilot Studio connector isn't wired up yet, but the route
-# + API key are live in prod and retained for when it is. (The buffering tools
-# + instructions also ship on the public /mcp route, same Lambda.) Retrieve the
-# key with: terraform output -raw gcc_api_key_value
-enable_gcc_route = true
+# GIS/M365-Copilot leftover; the eCode server only serves the public /mcp
+# route, so the extra API-key-gated /mcp-gcc route is disabled.
+enable_gcc_route = false
