@@ -95,3 +95,25 @@ variable "ecode_api_secret" {
   sensitive   = true
   default     = ""
 }
+
+variable "use_shared_waf" {
+  description = <<-EOT
+    Associate this MCP's API Gateway stage with the FLEET-WIDE WAFv2 web ACL
+    (created by the mcp-stats repo) instead of standing up a dedicated one here.
+
+    The shared ACL must already exist and have published its ARN to SSM before
+    this is turned on. Flipping this to true DESTROYS this repo's own web ACL,
+    so the shared ACL must already carry an equivalent rule for this MCP.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "shared_waf_ssm_parameter" {
+  description = <<-EOT
+    SSM Parameter Store path holding the shared fleet web ACL's ARN. Must match
+    `fleet_waf_ssm_parameter` in the mcp-stats repo.
+  EOT
+  type        = string
+  default     = "/mcp-fleet/waf/web_acl_arn"
+}
