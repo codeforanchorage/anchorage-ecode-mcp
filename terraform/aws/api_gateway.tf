@@ -195,7 +195,12 @@ resource "aws_api_gateway_stage" "prod" {
     })
   }
 
-  depends_on = [aws_api_gateway_account.this]
+  # NOTE: this stage previously used `depends_on = [aws_api_gateway_account.this]`
+  # so the account-level CloudWatch role was guaranteed to be set before the
+  # stage tried to write access logs. That singleton now lives in the mcp-stats
+  # repo (terraform/aws/apigw_account.tf), so the ordering became a CROSS-STATE
+  # prerequisite Terraform cannot express: apply mcp-stats before standing up a
+  # brand-new MCP from scratch. Existing stages are unaffected.
 
   # Rename-safety: base-path mapping repoints to new stage before old is destroyed.
   lifecycle {
