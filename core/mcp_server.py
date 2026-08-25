@@ -296,9 +296,17 @@ class MCPServer:
         result = await self.plugin_manager.execute_tool(tool_name, arguments)
 
         if result.success:
-            return {
+            response: Dict[str, Any] = {
                 "content": result.content,
             }
+            # `structuredContent` is the machine-readable twin of
+            # `content`. Only tools that declare an outputSchema populate
+            # it, and the spec requires the value conform to that schema.
+            # `content` still carries the human-readable rendering, so
+            # clients that ignore structured output are unaffected.
+            if result.structured_content is not None:
+                response["structuredContent"] = result.structured_content
+            return response
         else:
             error_msg = result.error_message or "An unknown error occurred"
             # Include error in content so all clients (curl, Inspector, Claude) receive it.

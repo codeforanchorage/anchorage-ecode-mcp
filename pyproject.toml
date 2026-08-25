@@ -26,6 +26,10 @@ dev = [
     "pytest-xdist>=3.0.0",
     "ruff>=0.1.0",
     "pip-audit>=2.0.0",
+    # A declared outputSchema is binding -- the spec says servers MUST
+    # conform and clients SHOULD validate -- so the tests validate real tool
+    # output against the declared schema rather than eyeballing the shape.
+    "jsonschema>=4.0.0",
 ]
 
 [project.urls]
