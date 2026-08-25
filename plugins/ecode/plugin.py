@@ -46,6 +46,162 @@ GUID_RE = re.compile(r"^[A-Za-z0-9]+$")
 # 401/403 are our credentials and 5xx is upstream -- both genuine faults.
 CALLER_ERROR_STATUSES = frozenset({400, 404})
 
+# ── Structured output ───────────────────────────────────────────────────
+#
+# A declared outputSchema is BINDING: the MCP spec says servers MUST return
+# conforming structured results and clients SHOULD validate them. So nothing
+# below constrains a value real eCode360 data can violate -- no `maximum` on
+# counts, no `required` on a field the API can omit, and every enum is closed
+# only where this code, not the upstream, decides the value.
+#
+# The human-readable `content` block stays markdown rather than the
+# serialized JSON the spec suggests (SHOULD, not MUST): the prose carries the
+# citation formatting and the "published code text, not legal advice" framing
+# that make this server steer models well, and the same data rides in
+# structuredContent anyway.
+
+# Stable identifiers a caller can branch on. The rendered prose and the
+# structured array are built from ONE list per response so they cannot drift.
+CAVEAT_MORE_PAGES = "more_pages_available"
+CAVEAT_PAGE_PAST_END = "page_past_end"
+CAVEAT_DUPLICATE_SECTIONS = "duplicate_sections_in_page"
+CAVEAT_BODY_IS_ATTACHMENT = "body_is_attachment"
+CAVEAT_RENDERED_TEXT_TRUNCATED = "rendered_text_truncated"
+CAVEAT_SECTION_NOT_IN_FORCE = "section_not_in_force"
+CAVEAT_NODE_HAS_NO_CHILDREN = "node_has_no_children"
+CAVEAT_TOC_ENDPOINT_UNAVAILABLE = "toc_endpoint_unavailable"
+
+# Words that, in a section's NUMBER/TITLE, mean the body is not operative
+# law. Checked against the title only: "repealed" appears in the body of
+# plenty of sections that are perfectly in force (an ordinance repealing
+# something else), so matching content would produce constant false alarms.
+INACTIVE_TITLE_MARKERS = (
+    "reserved",
+    "repealed",
+    "superseded",
+    "rescinded",
+)
+
+_CAVEAT_SCHEMA = {
+    "type": "array",
+    "description": (
+        "Qualifications that change how the result must be read. Each has a "
+        "stable `code` so a caller can branch on it instead of noticing prose."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"},
+        },
+        "required": ["code", "message"],
+    },
+}
+
+# A node as it appears in the outline. `ref` is the section number
+# (e.g. "21.05.010"); `guid` is the opaque id every other tool takes.
+_NODE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "guid": {"type": "string"},
+        "ref": {"type": ["string", "null"]},
+        "title": {"type": ["string", "null"]},
+        "type": {"type": ["string", "null"]},
+    },
+    "required": ["guid"],
+}
+
+SEARCH_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string"},
+        "page": {"type": "integer", "description": "0-indexed"},
+        "total_count": {
+            "type": ["integer", "null"],
+            "description": (
+                "Total matching sections across all pages. null means the "
+                "upstream did not report one (unmeasured); 0 means the search "
+                "ran and matched nothing (a known, complete count). They are "
+                "not interchangeable."
+            ),
+        },
+        "summary": {"type": "string"},
+        "rows": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "guid": {"type": "string"},
+                    "ref": {"type": ["string", "null"]},
+                    "title": {"type": ["string", "null"]},
+                    "snippet": {"type": ["string", "null"]},
+                    "url": {"type": "string"},
+                },
+                "required": ["guid", "url"],
+            },
+        },
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": ["query", "page", "total_count", "summary", "rows", "caveats"],
+}
+
+SECTION_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "guid": {"type": "string"},
+        "ref": {"type": ["string", "null"]},
+        "title": {"type": ["string", "null"]},
+        "url": {"type": "string"},
+        "text": {
+            "type": "string",
+            "description": (
+                "The full section body, including nested subsections. NOT "
+                "clipped: the markdown block caps its rendering for "
+                "readability, but truncating the machine-readable half would "
+                "defeat its purpose."
+            ),
+        },
+        "has_attachment": {"type": "boolean"},
+        "is_pdf": {"type": "boolean"},
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": [
+        "guid",
+        "url",
+        "text",
+        "has_attachment",
+        "is_pdf",
+        "caveats",
+    ],
+}
+
+# The outline tools return a tree, not a table. Forcing chapters ->
+# articles -> sections into `rows` would throw away the parent/child
+# relation that is the entire reason to call them.
+STRUCTURE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "node": _NODE_SCHEMA,
+        "parent": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "children": {"type": "array", "items": _NODE_SCHEMA},
+        "summary": {"type": "string"},
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": ["node", "children", "summary", "caveats"],
+}
+
+TOC_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "node": _NODE_SCHEMA,
+        "children": {"type": "array", "items": _NODE_SCHEMA},
+        "summary": {"type": "string"},
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": ["node", "children", "summary", "caveats"],
+}
+
 
 class EcodeAPIError(RuntimeError):
     """An eCode360 API call failed for a reason that is not the caller's.
@@ -160,12 +316,27 @@ class EcodePlugin(MCPPlugin):
 
     # ── Tool definitions ────────────────────────────────────────────────
 
+    # Human-readable display names. The wire `name` is prefixed
+    # (`ecode__get_table_of_contents`) because it must be a stable,
+    # collision-free identifier; that string reads poorly in a client's
+    # tool picker. Clients resolve display names as title ->
+    # annotations.title -> name, so these are what a user actually sees.
+    # Keyed by the UNPREFIXED tool name, matching the ToolDefinition
+    # entries below.
+    TOOL_TITLES = {
+        "search_code": "Search Code",
+        "get_table_of_contents": "Table of Contents",
+        "browse_structure": "Browse Structure",
+        "get_section": "Get Section",
+        "get_customer_info": "Customer Info",
+    }
+
     def get_tools(self) -> List[ToolDefinition]:
         city = (
             self.plugin_config.city_name if self.plugin_config else "the municipality"
         )
         read_only = {"readOnlyHint": True, "openWorldHint": True}
-        return [
+        tools = [
             ToolDefinition(
                 name="search_code",
                 description=(
@@ -192,6 +363,7 @@ class EcodePlugin(MCPPlugin):
                     },
                     "required": ["query"],
                 },
+                output_schema=SEARCH_OUTPUT_SCHEMA,
                 annotations=read_only,
             ),
             ToolDefinition(
@@ -203,6 +375,7 @@ class EcodePlugin(MCPPlugin):
                     "get_section. Start here to orient before drilling in."
                 ),
                 input_schema={"type": "object", "properties": {}},
+                output_schema=TOC_OUTPUT_SCHEMA,
                 annotations=read_only,
             ),
             ToolDefinition(
@@ -224,6 +397,7 @@ class EcodePlugin(MCPPlugin):
                         },
                     },
                 },
+                output_schema=STRUCTURE_OUTPUT_SCHEMA,
                 annotations=read_only,
             ),
             ToolDefinition(
@@ -244,6 +418,7 @@ class EcodePlugin(MCPPlugin):
                     },
                     "required": ["guid"],
                 },
+                output_schema=SECTION_OUTPUT_SCHEMA,
                 annotations=read_only,
             ),
             ToolDefinition(
@@ -256,6 +431,17 @@ class EcodePlugin(MCPPlugin):
                 annotations=read_only,
             ),
         ]
+
+        # Every tool here is read-only, so `annotations` is uniform and
+        # `title` is the only per-tool display concern.
+        #
+        # Deliberately NOT set: `idempotentHint`. The MCP schema documents it
+        # as meaningful only when readOnlyHint == false, so on these tools it
+        # would carry no information. A test pins its absence.
+        for tool in tools:
+            if tool.title is None:
+                tool.title = self.TOOL_TITLES.get(tool.name)
+        return tools
 
     # ── Tool dispatch ───────────────────────────────────────────────────
 
@@ -277,11 +463,11 @@ class EcodePlugin(MCPPlugin):
                         "0-indexed, 20 per page."
                     )
                 data = await self._search(query, page)
-                return self._ok(self._format_search(data))
+                return self._ok(*self._format_search(data, query, page))
 
             if tool_name == "get_table_of_contents":
                 data = await self._get_toc()
-                return self._ok(self._format_toc(data))
+                return self._ok(*self._format_toc(data))
 
             if tool_name == "browse_structure":
                 guid = self._guid_arg(arguments, default="ROOT")
@@ -290,14 +476,14 @@ class EcodePlugin(MCPPlugin):
                 )
                 # structure responses wrap the node in an {error, results} envelope
                 node = data.get("results", data) if isinstance(data, dict) else data
-                return self._ok(self._format_structure(node))
+                return self._ok(*self._format_structure(node))
 
             if tool_name == "get_section":
                 guid = self._guid_arg(arguments)
                 data = await self._get_json(
                     self._cust_path(f"/code/content/{quote(guid, safe='')}")
                 )
-                return self._ok(self._format_content(data))
+                return self._ok(*self._format_content(data))
 
             if tool_name == "get_customer_info":
                 data = await self._get_json(self._cust_path(""))
@@ -461,8 +647,24 @@ class EcodePlugin(MCPPlugin):
     # ── Result helpers ──────────────────────────────────────────────────
 
     @staticmethod
-    def _ok(text: str) -> ToolResult:
-        return ToolResult(content=[{"type": "text", "text": text}], success=True)
+    def _ok(text: str, structured: Optional[Any] = None) -> ToolResult:
+        return ToolResult(
+            content=[{"type": "text", "text": text}],
+            structured_content=structured,
+            success=True,
+        )
+
+    @staticmethod
+    def _caveats(entries: List[tuple]) -> tuple:
+        """Build the structured array and the rendered lines from ONE list.
+
+        Generating them separately is how a qualification ends up in the
+        prose but not the machine-readable half, or the reverse. Tests
+        assert every structured message appears in the text.
+        """
+        structured = [{"code": code, "message": msg} for code, msg in entries]
+        lines = [f"Note: {msg}" for _code, msg in entries]
+        return structured, lines
 
     @staticmethod
     def _err(message: str) -> ToolResult:
@@ -470,26 +672,98 @@ class EcodePlugin(MCPPlugin):
 
     # ── Formatters ──────────────────────────────────────────────────────
 
-    def _format_search(self, data: Dict[str, Any]) -> str:
-        results = data.get("results", []) or []
-        total = data.get("totalResultCount", len(results))
-        page = self._as_int(data.get("page", 0))
-        max_pages = self._as_int(data.get("maxPages", 1), default=1)
-        if not results:
-            return f"No results for query {data.get('query', '')!r}."
+    def _empty_search_result(
+        self,
+        query: str,
+        page: int,
+        total_count: Optional[int] = 0,
+        max_pages: int = 0,
+    ) -> tuple:
+        """Zero rows: text plus a CONFORMING structured object.
 
+        Mirrors _format_search deliberately. A branch that short-circuits
+        with a plain string before the formatter would advertise an
+        outputSchema and then return no structuredContent -- a conformance
+        break invisible to happy-path tests, and a code search matching
+        nothing is common here.
+
+        `total_count` is passed IN rather than assumed to be 0. Zero rows has
+        two very different causes and reporting both as a complete count of
+        zero is a lie in one of them:
+
+          * the search ran and matched nothing -> upstream reports 0, and 0
+            is the honest, complete count;
+          * the caller asked for a page past the end -> upstream still
+            reports the real total (618 for "dog license" at page 999), and
+            claiming 0 would say "no such law exists" about a query with 618
+            matching sections.
+        """
+        entries: List[tuple] = []
+        if total_count and max_pages:
+            summary = (
+                f"No results on page {page + 1} for query {query!r}; "
+                f"{total_count} match(es) exist across {max_pages} page(s)."
+            )
+            entries.append(
+                (
+                    CAVEAT_PAGE_PAST_END,
+                    f"Page {page + 1} is past the last page ({max_pages}). "
+                    f"{total_count} section(s) still match {query!r} -- "
+                    f"re-request a page between 0 and {max_pages - 1}.",
+                )
+            )
+        else:
+            summary = f"No results for query {query!r}."
+
+        caveats, caveat_lines = self._caveats(entries)
+        return "\n".join([summary] + caveat_lines), {
+            "query": query,
+            "page": page,
+            "total_count": total_count,
+            "summary": summary,
+            "rows": [],
+            "caveats": caveats,
+        }
+
+    def _format_search(
+        self, data: Dict[str, Any], query: str = "", page: int = 0
+    ) -> tuple:
+        results = data.get("results", []) or []
+        query = data.get("query") or query
+        page = self._as_int(data.get("page", page))
+        max_pages = self._as_int(data.get("maxPages", 1), default=1)
+
+        # `totalResultCount` absent is NOT the same as zero. Only a search
+        # that ran and matched nothing is a known count of 0.
+        raw_total = data.get("totalResultCount")
+        if raw_total is not None:
+            total_count = self._as_int(raw_total)
+        else:
+            total_count = 0 if not results else None
+
+        if not results:
+            return self._empty_search_result(
+                query, page, total_count, max_pages
+            )
+
+        rows: List[Dict[str, Any]] = []
         lines = [
-            f"{total} result(s) for {data.get('query', '')!r} "
+            f"{total_count if total_count is not None else len(results)} "
+            f"result(s) for {query!r} "
             f"(page {page + 1} of {max_pages}, 20/page):",
             "",
         ]
         for i, r in enumerate(results, 1 + page * 20):
             # Search results key the node id as `id`; the snippet as `text`;
             # and both title and snippet may contain <em> highlight markup.
+            # guid and ref are taken as the API returned them and never
+            # re-derived from rendered text -- a citation that does not match
+            # the section it came from is worse than no citation.
             guid = r.get("id") or self._guid_from_url(r.get("url", ""))
             snippet = self._strip_html(r.get("text") or r.get("snippet", ""))
             title = self._strip_html(r.get("title", "")) or "Untitled"
-            heading = f"{r.get('number', '')} {title}".strip()
+            ref = (r.get("number") or "").strip() or None
+            heading = f"{ref or ''} {title}".strip()
             lines.append(f"{i}. {heading}")
             lines.append(f"   guid: {guid or '(unknown)'}   type: {r.get('type', '')}")
             if r.get("pdf"):
@@ -499,9 +773,64 @@ class EcodePlugin(MCPPlugin):
             if guid:
                 lines.append(f"   {PUBLIC_URL.format(guid=guid)}")
             lines.append("")
+
+            if guid:
+                rows.append(
+                    {
+                        "guid": guid,
+                        "ref": ref,
+                        # Unclipped in the structured channel even though the
+                        # markdown elides it -- see SECTION_OUTPUT_SCHEMA.
+                        "title": title,
+                        "snippet": snippet or None,
+                        "url": PUBLIC_URL.format(guid=guid),
+                    }
+                )
+
+        entries: List[tuple] = []
         if page + 1 < max_pages:
-            lines.append(f"More results: call search_code with page={page + 1}.")
-        return "\n".join(lines)
+            remaining = (
+                f"{total_count - len(results) * (page + 1)} more"
+                if total_count is not None
+                else "more"
+            )
+            entries.append(
+                (
+                    CAVEAT_MORE_PAGES,
+                    f"This is page {page + 1} of {max_pages}; {remaining} "
+                    f"matching section(s) are not shown. Call search_code "
+                    f"with page={page + 1} to continue.",
+                )
+            )
+
+        # One section can match a query more than once. Report the distinct
+        # section count whenever it differs from the hit count, so "how many
+        # sections mention X" is not silently answered with a hit total.
+        distinct = len({row["guid"] for row in rows})
+        if distinct and distinct != len(rows):
+            entries.append(
+                (
+                    CAVEAT_DUPLICATE_SECTIONS,
+                    f"{len(rows)} hits on this page cover {distinct} distinct "
+                    f"section(s); count sections, not hits.",
+                )
+            )
+
+        caveats, caveat_lines = self._caveats(entries)
+        lines.extend(caveat_lines)
+
+        summary = (
+            f"{total_count if total_count is not None else len(rows)} result(s) "
+            f"for {query!r}; showing {len(rows)} on page {page + 1} of {max_pages}."
+        )
+        return "\n".join(lines), {
+            "query": query,
+            "page": page,
+            "total_count": total_count,
+            "summary": summary,
+            "rows": rows,
+            "caveats": caveats,
+        }
 
     @staticmethod
     def _as_int(value: Any, default: int = 0) -> int:
@@ -510,35 +839,133 @@ class EcodePlugin(MCPPlugin):
         except (TypeError, ValueError):
             return default
 
-    def _format_toc(self, data: Dict[str, Any]) -> str:
+    def _format_toc(self, data: Dict[str, Any]) -> tuple:
         header = []
+        entries: List[tuple] = []
         if data.get("_fallback"):
-            header.append(f"(Note: {data['_fallback']})")
+            entries.append(
+                (
+                    CAVEAT_TOC_ENDPOINT_UNAVAILABLE,
+                    f"The table-of-contents endpoint is unavailable for this "
+                    f"library; this outline came from {data['_fallback']}.",
+                )
+            )
         title = data.get("title", "Table of Contents")
         header.append(f"Table of Contents — {title}")
-        guid = data.get("guid") or data.get("id")
-        if guid:
-            header.append(f"root guid: {guid}")
+        guid = data.get("guid") or data.get("id") or "ROOT"
+        header.append(f"root guid: {guid}")
         header.append("")
-        body = self._render_children(data.get("children", []) or [], depth=0)
-        return "\n".join(header) + ("\n".join(body) if body else "(no entries)")
 
-    def _format_structure(self, data: Dict[str, Any]) -> str:
-        guid = data.get("guid") or data.get("id", "")
+        raw_children = data.get("children", []) or []
+        body = self._render_children(raw_children, depth=0)
+        children = self._structured_children(raw_children)
+        if not children:
+            entries.append(
+                (
+                    CAVEAT_NODE_HAS_NO_CHILDREN,
+                    "The outline came back empty; use browse_structure "
+                    "with guid='ROOT' to walk the tree directly.",
+                )
+            )
+
+        caveats, caveat_lines = self._caveats(entries)
+        text = "\n".join(
+            caveat_lines
+            + header
+            + (body if body else ["(no entries)"])
+        )
+        summary = f"{len(children)} top-level entr(y/ies) under {title}."
+        return text, {
+            "node": {
+                "guid": str(guid),
+                "ref": data.get("number") or None,
+                "title": title,
+                "type": data.get("type") or None,
+            },
+            "children": children,
+            "summary": summary,
+            "caveats": caveats,
+        }
+
+    def _format_structure(self, data: Dict[str, Any]) -> tuple:
+        guid = str(data.get("guid") or data.get("id", "") or "ROOT")
+        url = PUBLIC_URL.format(guid=guid) if guid and guid != "ROOT" else None
         lines = [
             f"{data.get('label', '')} {data.get('number', '')} "
             f"{data.get('title', '')}".strip(),
             f"guid: {guid}   type: {data.get('type', '')}",
             f"parent: {data.get('parent') or '(none)'}",
-            f"link: {PUBLIC_URL.format(guid=guid)}" if guid and guid != "ROOT" else "",
+            f"link: {url}" if url else "",
             "",
             "Children:",
         ]
-        children = data.get("children", []) or []
-        body = self._render_children(children, depth=0)
+        raw_children = data.get("children", []) or []
+        body = self._render_children(raw_children, depth=0)
+        children = self._structured_children(raw_children)
+
+        entries: List[tuple] = []
+        if not children:
+            entries.append(
+                (
+                    CAVEAT_NODE_HAS_NO_CHILDREN,
+                    "This node has no children; it is probably a leaf "
+                    "section, so call get_section with its guid to read the "
+                    "text.",
+                )
+            )
+
         lines.extend(body or ["  (none — this may be a leaf section; "
                               "use get_section to read its text)"])
-        return "\n".join(line for line in lines if line != "")
+        caveats, caveat_lines = self._caveats(entries)
+        lines.extend(caveat_lines)
+
+        summary = (
+            f"{len(children)} child node(s) under "
+            f"{(data.get('number') or data.get('title') or guid)}."
+        )
+        return "\n".join(line for line in lines if line != ""), {
+            "node": {
+                "guid": guid,
+                "ref": data.get("number") or None,
+                "title": data.get("title") or None,
+                "type": data.get("type") or None,
+            },
+            "parent": data.get("parent") or None,
+            "url": url,
+            "children": children,
+            "summary": summary,
+            "caveats": caveats,
+        }
+
+    def _structured_children(self, children: List[Any]) -> List[Dict[str, Any]]:
+        """Children as a tree of {guid, ref, title, type}.
+
+        A tree, not `rows`: the whole point of the outline tools is walking
+        chapters -> articles -> sections, and flattening into a table throws
+        away the relation the caller came for. Bare-guid children (the API
+        sometimes returns just an id) still yield a usable entry.
+        """
+        out: List[Dict[str, Any]] = []
+        for child in children:
+            if isinstance(child, str):
+                out.append(
+                    {"guid": child, "ref": None, "title": None, "type": None}
+                )
+                continue
+            if not isinstance(child, dict):
+                continue
+            guid = child.get("guid") or child.get("id")
+            if not guid:
+                continue
+            out.append(
+                {
+                    "guid": str(guid),
+                    "ref": (child.get("number") or "").strip() or None,
+                    "title": (child.get("title") or "").strip() or None,
+                    "type": child.get("type") or None,
+                }
+            )
+        return out
 
     def _render_children(self, children: List[Any], depth: int) -> List[str]:
         """Render a list of child nodes (each a dict, or a bare guid string)."""
@@ -555,31 +982,108 @@ class EcodePlugin(MCPPlugin):
             out.append(f"{indent}- {label or '(untitled)'}  [guid: {guid}]")
         return out
 
-    def _format_content(
-        self, data: Dict[str, Any], _budget: Optional[List[int]] = None
-    ) -> str:
-        if _budget is None:
-            _budget = [MAX_CONTENT_CHARS]
-            guid = data.get("id") or data.get("guid", "")
-            head = [
-                " ".join(
-                    p for p in [data.get("number", ""), data.get("title", "")] if p
-                ).strip()
-                or "(untitled section)",
-                f"guid: {guid}   type: {data.get('type', '')}",
-                f"link: {PUBLIC_URL.format(guid=guid)}" if guid else "",
-            ]
-            images = data.get("images") or []
-            attachments = data.get("attachments") or {}
-            if images:
-                head.append(f"images: {len(images)} (relative links on ecode360.com)")
-            if attachments:
-                head.append(f"attachments: {', '.join(attachments.keys())}")
-            head.append("")
-            body = self._render_content_node(data, depth=0, budget=_budget)
-            return "\n".join(h for h in head if h != "") + "\n" + body
+    # Effectively unlimited, for rendering the structured copy of a section
+    # body. The markdown block is capped for readability; the machine-readable
+    # half must not be, or the structured channel is strictly worse than the
+    # prose it exists to replace.
+    _UNCAPPED = 10**9
 
-        return self._render_content_node(data, depth=0, budget=_budget)
+    def _format_content(self, data: Dict[str, Any]) -> tuple:
+        guid = str(data.get("id") or data.get("guid", "") or "")
+        ref = (data.get("number") or "").strip() or None
+        title = (data.get("title") or "").strip() or None
+        url = PUBLIC_URL.format(guid=guid) if guid else ""
+
+        images = data.get("images") or []
+        attachments = data.get("attachments") or {}
+        is_pdf = bool(data.get("pdf"))
+        has_attachment = bool(attachments) or bool(images)
+
+        # Render twice: once capped for the human block, once uncapped for
+        # structuredContent.
+        display_body = self._render_content_node(
+            data, depth=0, budget=[MAX_CONTENT_CHARS]
+        )
+        full_body = self._render_content_node(
+            data, depth=0, budget=[self._UNCAPPED]
+        )
+
+        entries: List[tuple] = []
+
+        # A section that is reserved, repealed or superseded is not operative
+        # law, which changes how everything below it must be read. That makes
+        # it a banner at the top of the response, not a footnote at the end.
+        inactive = self._inactive_marker(ref, title)
+        if inactive:
+            entries.append(
+                (
+                    CAVEAT_SECTION_NOT_IN_FORCE,
+                    f"This section is marked {inactive.upper()} in the "
+                    f"published code -- treat the text below as a record of "
+                    f"what the section says, not as operative law in force.",
+                )
+            )
+        if is_pdf or (attachments and not full_body.strip()):
+            entries.append(
+                (
+                    CAVEAT_BODY_IS_ATTACHMENT,
+                    "The body of this section is a PDF or attachment rather "
+                    "than text; read it at the ecode360.com link.",
+                )
+            )
+        if len(full_body) > len(display_body):
+            entries.append(
+                (
+                    CAVEAT_RENDERED_TEXT_TRUNCATED,
+                    f"The text below is capped at {MAX_CONTENT_CHARS:,} "
+                    f"characters ({len(full_body):,} in full). The complete "
+                    f"body is in structuredContent.text, or fetch child "
+                    f"guids individually with get_section.",
+                )
+            )
+
+        caveats, caveat_lines = self._caveats(entries)
+
+        head = [
+            " ".join(p for p in [ref or "", title or ""] if p).strip()
+            or "(untitled section)",
+            f"guid: {guid}   type: {data.get('type', '')}",
+            f"link: {url}" if url else "",
+        ]
+        if images:
+            head.append(f"images: {len(images)} (relative links on ecode360.com)")
+        if attachments:
+            head.append(f"attachments: {', '.join(attachments.keys())}")
+        head.append("")
+
+        text = "\n".join(
+            caveat_lines + [h for h in head if h != ""]
+        ) + "\n" + display_body
+
+        return text, {
+            "guid": guid,
+            "ref": ref,
+            "title": title,
+            "url": url,
+            "text": full_body,
+            "has_attachment": has_attachment,
+            "is_pdf": is_pdf,
+            "caveats": caveats,
+        }
+
+    @staticmethod
+    def _inactive_marker(ref: Optional[str], title: Optional[str]) -> Optional[str]:
+        """Whether a section's heading marks it as not in force.
+
+        Heading only. "repealed" turns up constantly in the BODY of sections
+        that are perfectly in force -- an ordinance repealing something else
+        -- so matching content would cry wolf on ordinary law.
+        """
+        heading = f"{ref or ''} {title or ''}".lower()
+        for marker in INACTIVE_TITLE_MARKERS:
+            if marker in heading:
+                return marker
+        return None
 
     def _render_content_node(
         self, node: Dict[str, Any], depth: int, budget: List[int]
