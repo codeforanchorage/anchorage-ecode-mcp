@@ -17,6 +17,16 @@ from core.plugin_manager import PluginManager
 logger = logging.getLogger(__name__)
 
 
+class MethodNotFoundError(Exception):
+    """Raised when a request names a method this server does not implement.
+
+    Mapped to JSON-RPC -32601 ("Method not found") rather than the generic
+    -32603 ("Internal error"): an unknown method is a client-side mistake,
+    not a server fault, and clients probing for optional MCP methods rely
+    on the distinction.
+    """
+
+
 class MCPServer:
     """MCP Server that handles JSON-RPC requests and routes to Plugin Manager."""
 
@@ -69,7 +79,9 @@ class MCPServer:
             elif method == "tools/call":
                 result = await self._handle_tools_call(params)
             elif method == "ping":
-                result = {"status": "ok"}
+                # The spec defines the ping result as an empty object; the
+                # liveness signal is the response itself, not its body.
+                result = {}
             elif method == "notifications/initialized":
                 # MCP notification - no response needed
                 duration_ms = (time.perf_counter() - start_time) * 1000
@@ -93,7 +105,7 @@ class MCPServer:
                         },
                     )
                     return None
-                raise ValueError(f"Unknown method: {method}")
+                raise MethodNotFoundError(f"Unknown method: {method}")
 
             # Don't send response for notifications
             if is_notification:
@@ -131,12 +143,18 @@ class MCPServer:
 
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
+            # An unknown method is a caller error (-32601), not a server
+            # fault (-32603), and does not warrant an error-level log or a
+            # traceback.
+            is_unknown_method = isinstance(e, MethodNotFoundError)
             error_response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {
-                    "code": -32603,
-                    "message": "Internal error",
+                    "code": -32601 if is_unknown_method else -32603,
+                    "message": (
+                        "Method not found" if is_unknown_method else "Internal error"
+                    ),
                     "data": str(e),
                 },
             }
@@ -150,10 +168,11 @@ class MCPServer:
             )
             if session_id:
                 response_log_data["mcp_session_id"] = session_id
-            logger.error(
+            log = logger.warning if is_unknown_method else logger.error
+            log(
                 f"Error handling JSON-RPC request {method}: {e}",
                 extra={**response_log_data, "error_type": type(e).__name__},
-                exc_info=True,
+                exc_info=not is_unknown_method,
             )
 
             # Don't send error response for notifications
@@ -161,12 +180,25 @@ class MCPServer:
                 return None
             return error_response
 
-    # MCP protocol revisions this server implements. The wire format for a
-    # tools-only server is compatible across these, so we echo the client's
-    # requested version when it's one we recognize, else fall back to a
-    # known-good default. (Previously this was hardcoded, which could make
-    # clients on a newer revision -- e.g. M365 Copilot -- warn or balk.)
-    SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+    # MCP protocol revisions this server implements, newest first. The wire
+    # format for a tools-only server is compatible across these -- each
+    # revision's additions (icons, tasks, elicitation) are optional and
+    # unused here -- so we echo the client's requested version when it's one
+    # we recognize, else fall back to a known-good default. (Previously this
+    # was hardcoded, which could make clients on a newer revision -- e.g.
+    # M365 Copilot -- warn or balk.)
+    #
+    # NOT listed: 2026-07-28, which drops the initialize handshake entirely
+    # in favour of per-request `_meta` and a mandatory server/discover RPC.
+    # That is a dual-era migration, not a version-string addition, so a
+    # client declaring it is correctly rejected until that work lands.
+    SUPPORTED_PROTOCOL_VERSIONS = (
+        "2025-11-25",
+        "2025-06-18",
+        "2025-03-26",
+        "2024-11-05",
+    )
+    # Spec-defined assumption for HTTP clients that send no version at all.
     DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 
     async def _handle_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:

@@ -1,5 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
+server_version: "1.1.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
