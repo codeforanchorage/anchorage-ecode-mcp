@@ -51,7 +51,7 @@ tests/                  # Unit tests
 Claude Desktop / App
     → stdio bridge (npx) or Go client
 Lambda / Local Server
-    → server.adapters.aws_lambda or local_server.py
+    → server.adapters.aws_lambda or scripts/local_server.py
     → MCP Server (core/mcp_server.py)
     → Plugin Manager
     → Plugin (e.g., CKAN)
