@@ -20,6 +20,58 @@ class PluginType(str, Enum):
     ANALYTICS = "analytics"
 
 
+class ToolInputError(ValueError):
+    """Raised when a tool rejects the caller's arguments.
+
+    A marker, not a behaviour change: it exists so the outer handler can
+    tell "the caller asked for something invalid" from "this server
+    broke", and log the first at WARNING with no traceback. A traceback
+    is a claim that the server failed; spending one on "you forgot guid"
+    is what makes real faults hard to find.
+
+    Deliberately NOT inferred from ValueError. json.JSONDecodeError
+    subclasses ValueError, so a malformed eCode360 payload would be
+    misfiled as a caller mistake and silently lose its stack trace.
+    Upstream faults stay plain ValueError/RuntimeError and keep theirs.
+
+    Subclasses ValueError so every existing `except ValueError` keeps
+    working, which makes converting a raise site mechanical and safe.
+    """
+
+
+class InvalidToolParamsError(ValueError):
+    """Raised when a tools/call request is itself malformed.
+
+    Covers the cases the MCP tools spec calls "requests that fail to
+    satisfy the CallToolRequest schema" -- a missing tool name, or
+    `arguments` that is not an object. Mapped to JSON-RPC -32602
+    ("Invalid params"): the request never described a valid call, so it
+    is neither a server fault (-32603) nor a tool execution error.
+
+    Subclasses ValueError for the same reason ToolInputError does.
+    """
+
+
+class UnknownToolError(ValueError):
+    """Raised when tools/call names a tool this server does not expose.
+
+    Mapped to JSON-RPC -32602 with the message shape the MCP tools spec
+    uses ("Unknown tool: <name>") rather than the generic -32603
+    "Internal error": naming a missing tool is a caller mistake, not a
+    server fault. The available-tool list travels in `data` so a model
+    can self-correct instead of just being told no.
+
+    Subclasses ValueError deliberately: it is an argument problem, and
+    existing `except ValueError` handlers around execute_tool keep
+    working unchanged.
+    """
+
+    def __init__(self, tool_name: str, available: str = "") -> None:
+        self.tool_name = tool_name
+        self.available = available
+        super().__init__(f"Unknown tool: {tool_name}")
+
+
 class ToolDefinition(BaseModel):
     """Definition of an MCP tool provided by a plugin."""
 

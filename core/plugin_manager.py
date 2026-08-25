@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from core.interfaces import MCPPlugin, ToolResult
+from core.interfaces import MCPPlugin, ToolResult, UnknownToolError
 from core.validators import ConfigurationError, get_enabled_plugin_config
 
 logger = logging.getLogger(__name__)
@@ -241,9 +241,7 @@ class PluginManager:
 
         if tool_name not in self.tools:
             available = ", ".join(sorted(self.tools.keys()))
-            raise ValueError(
-                f"Tool '{tool_name}' not found. Available tools: {available}"
-            )
+            raise UnknownToolError(tool_name, available)
 
         plugin_name, actual_tool_name = self.tools[tool_name]
         plugin = self.plugins.get(plugin_name)

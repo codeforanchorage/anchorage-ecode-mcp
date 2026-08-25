@@ -367,8 +367,11 @@ class TestToolsCall:
 
         assert response is not None
         assert "error" in response
-        assert response["error"]["code"] == -32603
-        assert "Tool name is required" in response["error"]["data"]
+        # A tools/call with no `name` never described a valid call, so it is
+        # Invalid params -- not a server fault.
+        assert response["error"]["code"] == -32602
+        assert response["error"]["message"] == "Invalid params"
+        assert "name" in response["error"]["data"]
 
     @pytest.mark.asyncio
     async def test_tools_call_handles_missing_arguments(self):
