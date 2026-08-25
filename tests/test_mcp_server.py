@@ -52,8 +52,8 @@ class TestInitialize:
         serverInfo name + instructions from config."""
         plugin_manager = MagicMock(spec=PluginManager)
         plugin_manager.config = {
-            "server_name": "Anchorage GIS MCP",
-            "instructions": "Start with find_gis_content.",
+            "server_name": "Anchorage Municipal Code MCP",
+            "instructions": "Start with search_code.",
         }
         server = MCPServer(plugin_manager)
 
@@ -69,8 +69,8 @@ class TestInitialize:
         result = response["result"]
         # Requested version is supported -> echoed back.
         assert result["protocolVersion"] == "2025-06-18"
-        assert result["serverInfo"]["name"] == "Anchorage GIS MCP"
-        assert result["instructions"] == "Start with find_gis_content."
+        assert result["serverInfo"]["name"] == "Anchorage Municipal Code MCP"
+        assert result["instructions"] == "Start with search_code."
 
     @pytest.mark.asyncio
     async def test_initialize_negotiates_2025_11_25(self):
