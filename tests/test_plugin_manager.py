@@ -9,7 +9,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from core.plugin_manager import PluginManager
-from core.interfaces import MCPPlugin, ToolDefinition, ToolResult, PluginType
+from core.interfaces import (
+    MCPPlugin,
+    PluginType,
+    ToolDefinition,
+    ToolResult,
+    UnknownToolError,
+)
 from core.validators import ConfigurationError
 
 
@@ -391,10 +397,15 @@ class TestToolExecution:
 
             await manager.load_plugins()
 
-            with pytest.raises(ValueError) as exc_info:
+            # UnknownToolError subclasses ValueError, so this still catches
+            # it; the message now matches the shape the MCP tools spec uses
+            # for an unknown tool.
+            with pytest.raises(UnknownToolError) as exc_info:
                 await manager.execute_tool("ckan__nonexistent", {})
 
-            assert "not found" in str(exc_info.value).lower()
+            assert str(exc_info.value) == "Unknown tool: ckan__nonexistent"
+            assert exc_info.value.tool_name == "ckan__nonexistent"
+            assert isinstance(exc_info.value, ValueError)
 
     @pytest.mark.asyncio
     async def test_execute_tool_fails_when_not_initialized(self):

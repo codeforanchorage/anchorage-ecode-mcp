@@ -12,12 +12,19 @@ every request; all endpoints are GET under ``/v1`` and return JSON.
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import httpx
 
-from core.interfaces import MCPPlugin, PluginType, ToolDefinition, ToolResult
+from core.interfaces import (
+    MCPPlugin,
+    PluginType,
+    ToolDefinition,
+    ToolInputError,
+    ToolResult,
+)
 from plugins.ecode.config_schema import EcodePluginConfig
 
 logger = logging.getLogger(__name__)
@@ -27,6 +34,44 @@ PUBLIC_URL = "https://ecode360.com/{guid}"
 
 # Cap rendered section text so a deeply nested chapter cannot blow up a response.
 MAX_CONTENT_CHARS = 14000
+
+# Node guids are opaque alphanumeric identifiers (in this library, all
+# numeric -- e.g. 49401992). ROOT is the reserved alias for the top of the
+# structure tree. Section NUMBERS (21.05.010) are a different namespace and
+# are never accepted as guids by the API.
+GUID_RE = re.compile(r"^[A-Za-z0-9]+$")
+
+# eCode360 statuses that mean the CALLER asked for something wrong rather
+# than the server failing: 404 (no such node) and 400 (malformed request).
+# 401/403 are our credentials and 5xx is upstream -- both genuine faults.
+CALLER_ERROR_STATUSES = frozenset({400, 404})
+
+
+class EcodeAPIError(RuntimeError):
+    """An eCode360 API call failed for a reason that is not the caller's.
+
+    Carries the HTTP status so callers of _get_json can branch on it (the
+    TOC fallback needs to recognise a 404 without string-matching the
+    message, which is what it used to do).
+    """
+
+    def __init__(self, message: str, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class EcodeNotFoundError(ToolInputError):
+    """The caller asked for a node the published code does not contain.
+
+    A ToolInputError, not a server fault: a 404 here means the guid was
+    wrong, which is a caller mistake and by far the most common one this
+    server sees -- a model reaching get_section with a guid it parsed out
+    of prose.
+    """
+
+    def __init__(self, message: str, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(message)
 
 
 class EcodePlugin(MCPPlugin):
@@ -219,10 +264,18 @@ class EcodePlugin(MCPPlugin):
     ) -> ToolResult:
         try:
             if tool_name == "search_code":
-                query = arguments.get("query")
+                query = (arguments.get("query") or "").strip()
                 if not query:
-                    return self._err("query is required")
-                page = int(arguments.get("page", 0))
+                    raise ToolInputError(
+                        "query is required -- pass the words or phrase to search "
+                        "the municipal code for (e.g. 'dog license')."
+                    )
+                page = self._int_arg(arguments, "page", 0)
+                if page < 0:
+                    raise ToolInputError(
+                        f"page must be 0 or greater (got {page}); results are "
+                        "0-indexed, 20 per page."
+                    )
                 data = await self._search(query, page)
                 return self._ok(self._format_search(data))
 
@@ -231,20 +284,18 @@ class EcodePlugin(MCPPlugin):
                 return self._ok(self._format_toc(data))
 
             if tool_name == "browse_structure":
-                guid = arguments.get("guid") or "ROOT"
+                guid = self._guid_arg(arguments, default="ROOT")
                 data = await self._get_json(
-                    self._cust_path(f"/structure/{quote(str(guid), safe='')}")
+                    self._cust_path(f"/structure/{quote(guid, safe='')}")
                 )
                 # structure responses wrap the node in an {error, results} envelope
                 node = data.get("results", data) if isinstance(data, dict) else data
                 return self._ok(self._format_structure(node))
 
             if tool_name == "get_section":
-                guid = arguments.get("guid")
-                if not guid:
-                    return self._err("guid is required")
+                guid = self._guid_arg(arguments)
                 data = await self._get_json(
-                    self._cust_path(f"/code/content/{quote(str(guid), safe='')}")
+                    self._cust_path(f"/code/content/{quote(guid, safe='')}")
                 )
                 return self._ok(self._format_content(data))
 
@@ -254,9 +305,80 @@ class EcodePlugin(MCPPlugin):
 
             return self._err(f"Unknown tool: {tool_name}")
 
+        except ToolInputError as e:
+            # The caller asked for something invalid. That is not a server
+            # fault, so no traceback -- a stack trace here is a false claim
+            # that this server broke, and it buries the real ones. The
+            # message still reaches the caller verbatim.
+            logger.warning(
+                "Invalid arguments for tool %s: %s",
+                tool_name,
+                e,
+                extra={"tool_name": tool_name, "error_type": type(e).__name__},
+            )
+            return self._err(str(e) or "Invalid tool arguments")
+
         except Exception as e:
             logger.error("Error executing tool %s: %s", tool_name, e, exc_info=True)
             return self._err(str(e) or "Tool execution failed")
+
+    # ── Caller-argument coercion ────────────────────────────────────────
+
+    @staticmethod
+    def _int_arg(args: Dict[str, Any], name: str, default: Any = None) -> int:
+        """Coerce a caller-supplied argument to int, or explain why not.
+
+        A bare int() raises "invalid literal for int() with base 10: 'two'"
+        -- which reads as a server fault in the logs and tells the caller
+        nothing about which argument was wrong.
+        """
+        raw = args.get(name, default)
+        try:
+            return int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ToolInputError(
+                f"{name} must be an integer (got {raw!r})"
+            ) from exc
+
+    @staticmethod
+    def _guid_arg(
+        args: Dict[str, Any], name: str = "guid", default: Optional[str] = None
+    ) -> str:
+        """Validate a caller-supplied node guid.
+
+        This is the most common caller error this server sees: a model
+        reaches get_section or browse_structure with something it parsed out
+        of prose -- usually the section NUMBER (21.05.010), which is a
+        different namespace and always 404s. Catching it here turns an
+        opaque upstream 404 into a message that names the mistake and says
+        how to recover.
+        """
+        raw = args.get(name, default)
+        if raw is None or not str(raw).strip():
+            raise ToolInputError(
+                f"{name} is required. A guid is the opaque node id returned "
+                "by search_code, get_table_of_contents or browse_structure "
+                "(e.g. '49401992') -- not a section number. Call search_code "
+                "first and read the guid from the result."
+            )
+        guid = str(raw).strip()
+        if guid.upper() == "ROOT":
+            return "ROOT"
+        if not GUID_RE.match(guid):
+            looks_like_reference = any(c.isdigit() for c in guid) and (
+                "." in guid or "\u00a7" in guid
+            )
+            hint = (
+                " That looks like a section NUMBER, not a guid."
+                if looks_like_reference
+                else ""
+            )
+            raise ToolInputError(
+                f"{name} must be an alphanumeric node id such as '49401992' "
+                f"(got {guid!r})." + hint + " Use search_code to find the "
+                "section and read its guid from the result."
+            )
+        return guid
 
     # ── HTTP helpers ────────────────────────────────────────────────────
 
@@ -272,9 +394,20 @@ class EcodePlugin(MCPPlugin):
             resp = await self.client.get(path, params=params)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise RuntimeError(
-                f"eCode API error (HTTP {e.response.status_code}) for {path}: "
-                f"{self._extract_api_error(e.response)}"
+            status = e.response.status_code
+            detail = self._extract_api_error(e.response)
+            if status in CALLER_ERROR_STATUSES:
+                # The caller named something that is not in this code library.
+                # A caller mistake, so it must not log as a server fault.
+                raise EcodeNotFoundError(
+                    f"eCode360 has no such entry (HTTP {status}): {detail}. "
+                    "Check the guid -- use search_code to look the section up "
+                    "and read its guid from the result.",
+                    status,
+                ) from e
+            raise EcodeAPIError(
+                f"eCode API error (HTTP {status}) for {path}: {detail}",
+                status,
             ) from e
         return resp.json()
 
@@ -289,8 +422,12 @@ class EcodePlugin(MCPPlugin):
         OpenAPI spec, so treat 404 as 'use structure instead')."""
         try:
             return await self._get_json(self._cust_path("/code/toc"))
-        except RuntimeError as e:
-            if "HTTP 404" in str(e):
+        except (EcodeAPIError, EcodeNotFoundError) as e:
+            # A 404 here means the endpoint is absent for this customer, not
+            # that the caller asked for the wrong thing -- so it is handled,
+            # never surfaced. Branch on the status code rather than string-
+            # matching the message, which is what this used to do.
+            if e.status_code == 404:
                 logger.info("toc endpoint 404; falling back to structure ROOT")
                 data = await self._get_json(self._cust_path("/structure/ROOT"))
                 data["_fallback"] = "structure/ROOT (toc endpoint unavailable)"
@@ -502,8 +639,6 @@ class EcodePlugin(MCPPlugin):
 
     @staticmethod
     def _strip_html(text: str) -> str:
-        import re
-
         return re.sub(r"<[^>]+>", "", text or "").strip()
 
 

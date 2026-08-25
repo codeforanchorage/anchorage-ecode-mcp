@@ -12,6 +12,7 @@ from core.logging_utils import (
     format_jsonrpc_request_log,
     format_jsonrpc_response_log,
 )
+from core.interfaces import InvalidToolParamsError, UnknownToolError
 from core.plugin_manager import PluginManager
 
 logger = logging.getLogger(__name__)
@@ -143,19 +144,33 @@ class MCPServer:
 
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
-            # An unknown method is a caller error (-32601), not a server
-            # fault (-32603), and does not warrant an error-level log or a
-            # traceback.
-            is_unknown_method = isinstance(e, MethodNotFoundError)
+            # Caller errors (an unknown method, a malformed tools/call, an
+            # unknown tool) are the client's mistake, not a server fault:
+            # they get their own JSON-RPC code, a WARNING-level log, and no
+            # traceback. Anything else is genuinely ours and stays -32603 +
+            # ERROR. An explicit mapping, not a boolean, so adding the next
+            # caller-error code does not mean another nested conditional.
+            if isinstance(e, MethodNotFoundError):
+                code, message, data = -32601, "Method not found", str(e)
+            elif isinstance(e, InvalidToolParamsError):
+                code, message, data = -32602, "Invalid params", str(e)
+            elif isinstance(e, UnknownToolError):
+                # Shape follows the tools spec's own example:
+                # {"code": -32602, "message": "Unknown tool: <name>"}.
+                # The available-tool list rides in `data` so a model can
+                # self-correct rather than just being told "no".
+                code, message = -32602, str(e)
+                data = f"Available tools: {e.available}" if e.available else str(e)
+            else:
+                code, message, data = -32603, "Internal error", str(e)
+            is_caller_error = code != -32603
             error_response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {
-                    "code": -32601 if is_unknown_method else -32603,
-                    "message": (
-                        "Method not found" if is_unknown_method else "Internal error"
-                    ),
-                    "data": str(e),
+                    "code": code,
+                    "message": message,
+                    "data": data,
                 },
             }
 
@@ -168,11 +183,11 @@ class MCPServer:
             )
             if session_id:
                 response_log_data["mcp_session_id"] = session_id
-            log = logger.warning if is_unknown_method else logger.error
+            log = logger.warning if is_caller_error else logger.error
             log(
                 f"Error handling JSON-RPC request {method}: {e}",
                 extra={**response_log_data, "error_type": type(e).__name__},
-                exc_info=not is_unknown_method,
+                exc_info=not is_caller_error,
             )
 
             # Don't send error response for notifications
@@ -262,8 +277,21 @@ class MCPServer:
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
+        # Validate the request shape before dispatch. Both of these are
+        # malformed CallToolRequests, not server faults: without this, a
+        # missing name surfaced as -32603 "Internal error", and a
+        # non-object `arguments` reached the plugin and came back as a raw
+        # Python AttributeError ("'str' object has no attribute 'get'")
+        # dressed up as a tool result. Both verified against prod.
         if not tool_name:
-            raise ValueError("Tool name is required")
+            raise InvalidToolParamsError(
+                "Missing required parameter 'name' (the tool to call)"
+            )
+        if not isinstance(arguments, dict):
+            raise InvalidToolParamsError(
+                f"Parameter 'arguments' must be an object, got "
+                f"{type(arguments).__name__}"
+            )
 
         result = await self.plugin_manager.execute_tool(tool_name, arguments)
 
@@ -303,10 +331,12 @@ class MCPServer:
         try:
             request = json.loads(body)
         except json.JSONDecodeError as e:
-            logger.error(
+            # A malformed body is the caller's mistake. -32700 already
+            # tells them exactly that; our own parse traceback adds
+            # nothing and reads as a server fault.
+            logger.warning(
                 f"Invalid JSON in request body: {e}",
                 extra={"error_type": "JSONDecodeError"},
-                exc_info=True,
             )
             return {
                 "statusCode": 400,
