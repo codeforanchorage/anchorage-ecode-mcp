@@ -106,6 +106,15 @@ _NODE_SCHEMA = {
         "guid": {"type": "string"},
         "ref": {"type": ["string", "null"]},
         "title": {"type": ["string", "null"]},
+        "label": {
+            "type": ["string", "null"],
+            "description": (
+                "What KIND of node this is in the code's own vocabulary -- "
+                "Title, Part, Chapter, Article, Litem. This is the field the "
+                "structure endpoint actually populates on children; `type` "
+                "is only present on the node itself."
+            ),
+        },
         "type": {"type": ["string", "null"]},
     },
     "required": ["guid"],
@@ -135,9 +144,24 @@ SEARCH_OUTPUT_SCHEMA = {
                     "ref": {"type": ["string", "null"]},
                     "title": {"type": ["string", "null"]},
                     "snippet": {"type": ["string", "null"]},
-                    "url": {"type": "string"},
+                    "url": {
+                        "type": "string",
+                        "description": (
+                            "As returned by the API where it supplies one "
+                            "(document hits link to a PDF on "
+                            "live.ecode360.com); otherwise the canonical "
+                            "https://ecode360.com/<guid> form."
+                        ),
+                    },
+                    "is_pdf": {
+                        "type": "boolean",
+                        "description": (
+                            "The hit is a PDF document, so get_section will "
+                            "return an attachment rather than code text."
+                        ),
+                    },
                 },
-                "required": ["guid", "url"],
+                "required": ["guid", "url", "is_pdf"],
             },
         },
         "caveats": _CAVEAT_SCHEMA,
@@ -763,15 +787,17 @@ class EcodePlugin(MCPPlugin):
             snippet = self._strip_html(r.get("text") or r.get("snippet", ""))
             title = self._strip_html(r.get("title", "")) or "Untitled"
             ref = (r.get("number") or "").strip() or None
+            is_pdf = bool(r.get("pdf"))
+            url = self._result_url(r, guid)
             heading = f"{ref or ''} {title}".strip()
             lines.append(f"{i}. {heading}")
             lines.append(f"   guid: {guid or '(unknown)'}   type: {r.get('type', '')}")
-            if r.get("pdf"):
-                lines.append("   (PDF document)")
+            if is_pdf:
+                lines.append("   (PDF document — the body is a PDF, not code text)")
             if snippet:
                 lines.append(f"   …{snippet}…")
-            if guid:
-                lines.append(f"   {PUBLIC_URL.format(guid=guid)}")
+            if url:
+                lines.append(f"   {url}")
             lines.append("")
 
             if guid:
@@ -783,7 +809,12 @@ class EcodePlugin(MCPPlugin):
                         # markdown elides it -- see SECTION_OUTPUT_SCHEMA.
                         "title": title,
                         "snippet": snippet or None,
-                        "url": PUBLIC_URL.format(guid=guid),
+                        "url": url,
+                        # The prose says "(PDF document)"; the structured half
+                        # must say the same thing, or a caller acting on rows
+                        # alone will send this guid to get_section and get an
+                        # attachment instead of text.
+                        "is_pdf": is_pdf,
                     }
                 )
 
@@ -878,8 +909,9 @@ class EcodePlugin(MCPPlugin):
         return text, {
             "node": {
                 "guid": str(guid),
-                "ref": data.get("number") or None,
+                "ref": (data.get("number") or "").strip() or None,
                 "title": title,
+                "label": (data.get("label") or "").strip() or None,
                 "type": data.get("type") or None,
             },
             "children": children,
@@ -926,8 +958,9 @@ class EcodePlugin(MCPPlugin):
         return "\n".join(line for line in lines if line != ""), {
             "node": {
                 "guid": guid,
-                "ref": data.get("number") or None,
-                "title": data.get("title") or None,
+                "ref": (data.get("number") or "").strip() or None,
+                "title": (data.get("title") or "").strip() or None,
+                "label": (data.get("label") or "").strip() or None,
                 "type": data.get("type") or None,
             },
             "parent": data.get("parent") or None,
@@ -949,7 +982,13 @@ class EcodePlugin(MCPPlugin):
         for child in children:
             if isinstance(child, str):
                 out.append(
-                    {"guid": child, "ref": None, "title": None, "type": None}
+                    {
+                        "guid": child,
+                        "ref": None,
+                        "title": None,
+                        "label": None,
+                        "type": None,
+                    }
                 )
                 continue
             if not isinstance(child, dict):
@@ -962,6 +1001,11 @@ class EcodePlugin(MCPPlugin):
                     "guid": str(guid),
                     "ref": (child.get("number") or "").strip() or None,
                     "title": (child.get("title") or "").strip() or None,
+                    # `label` is the kind (Title / Part / Chapter / Litem) and
+                    # is the only kind field the API sets on children; `type`
+                    # is absent there, so advertising it alone would have made
+                    # every child's kind read as null.
+                    "label": (child.get("label") or "").strip() or None,
                     "type": child.get("type") or None,
                 }
             )
@@ -976,9 +1020,16 @@ class EcodePlugin(MCPPlugin):
                 out.append(f"{indent}- guid {child}")
                 continue
             guid = child.get("guid") or child.get("id", "")
-            label = " ".join(
-                p for p in [child.get("number", ""), child.get("title", "")] if p
-            ).strip()
+            # Include the node kind (Title / Part / Chapter / Litem). Several
+            # real nodes carry an empty `number`, so without it a child can
+            # render as nothing but a title and a guid, losing where it sits
+            # in the hierarchy -- which is the entire reason to call this.
+            parts = [
+                child.get("label", ""),
+                child.get("number", ""),
+                child.get("title", ""),
+            ]
+            label = " ".join(p for p in parts if (p or "").strip()).strip()
             out.append(f"{indent}- {label or '(untitled)'}  [guid: {guid}]")
         return out
 
@@ -1133,6 +1184,33 @@ class EcodePlugin(MCPPlugin):
         )
 
     # ── Small utilities ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _result_url(result: Dict[str, Any], guid: str) -> str:
+        """The link to cite for a search hit.
+
+        Two different situations, and using one rule for both gets one of
+        them wrong:
+
+        * An ordinary code SECTION. The API's `url` is a live.ecode360.com
+          address carrying the transient search-highlight query string
+          (?highlight=fence#8682677). That is a link to this search, not to
+          the law, so the canonical https://ecode360.com/<guid> form is the
+          better citation and is what gets rendered.
+
+        * A DOCUMENT hit (type "doc" / pdf true). Here the API's `url` is the
+          PDF itself, e.g.
+          live.ecode360.com/documents/AN6998/public/753252538.pdf. There is
+          no code section behind it, so synthesizing
+          https://ecode360.com/<guid> would cite a different resource than
+          the one that actually matched -- a citation that looks right and
+          is not. Use what the API returned.
+        """
+        url = (result.get("url") or "").strip()
+        is_document = bool(result.get("pdf")) or result.get("type") == "doc"
+        if is_document and url:
+            return url
+        return PUBLIC_URL.format(guid=guid) if guid else url
 
     @staticmethod
     def _guid_from_url(url: str) -> str:
