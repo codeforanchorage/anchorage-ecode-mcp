@@ -145,6 +145,7 @@ class UniversalHTTPHandler:
     ALLOWED_ORIGINS = frozenset(
         {
             "https://claude.ai",
+            "https://claude.com",
             "https://console.anthropic.com",
             "http://localhost:6274",
             "http://127.0.0.1:6274",
@@ -190,9 +191,35 @@ class UniversalHTTPHandler:
             "Access-Control-Allow-Origin": allow_origin,
             "Vary": "Origin",
             "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "content-type, accept, mcp-session-id",
+            "Access-Control-Allow-Headers": (
+                "content-type, accept, mcp-session-id, mcp-protocol-version"
+            ),
             "Access-Control-Expose-Headers": "x-request-id, mcp-session-id",
         }
+
+    @classmethod
+    def _origin_rejected(cls, request_origin: Optional[str]) -> bool:
+        """Whether a request must be refused because of its Origin.
+
+        The MCP HTTP transport requires servers to answer 403 Forbidden for
+        an invalid Origin -- the defence against DNS-rebinding attacks, which
+        matters here because /mcp is anonymous and CloudWatch already shows
+        it being probed. Echoing CORS headers only for allowlisted origins,
+        which is all this handler did before, is NOT the same thing: the
+        request was still served, and a non-browser attacker never reads the
+        CORS headers at all.
+
+        Only a *present* Origin can be invalid: native MCP clients (Claude
+        Desktop, Claude Code, the claude.ai backend connector, curl, the
+        Lambda console) send none, and are unaffected.
+
+        Args:
+            request_origin: The Origin header from the request, if any.
+
+        Returns:
+            True if the request should be rejected with 403.
+        """
+        return bool(request_origin) and request_origin not in cls.ALLOWED_ORIGINS
 
     async def handle_request(
         self,
@@ -223,6 +250,35 @@ class UniversalHTTPHandler:
 
         # Pull Origin header so CORS responses can reflect allowlisted origins.
         request_origin = headers.get("origin") if headers else None
+
+        # Reject disallowed browser origins outright (DNS-rebinding defence)
+        # before the request reaches any routing or plugin code.
+        if self._origin_rejected(request_origin):
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            error_body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32600,
+                        "message": "Forbidden",
+                        "data": "Origin not allowed",
+                    },
+                }
+            )
+            logger.warning(
+                f"403 error: Origin '{request_origin}' not allowed",
+                extra={
+                    "request_id": request_id,
+                    "request_path": path,
+                    "http_method": method,
+                    "request_origin": request_origin,
+                    "duration_ms": duration_ms,
+                },
+            )
+            error_headers = {"Content-Type": "application/json"}
+            error_headers.update(self._get_cors_headers(None))
+            return (403, error_headers, error_body)
 
         # Validate path - must be an MCP route
         if path not in self.MCP_PATHS:
@@ -285,6 +341,53 @@ class UniversalHTTPHandler:
                 error_headers,
                 error_body,
             )
+
+        # Validate the MCP-Protocol-Version header, which clients have been
+        # required to send on every post-handshake request since 2025-06-18.
+        # Absent means an older client: the spec says assume 2025-03-26, so
+        # we let it through untouched.
+        #
+        # The error body deliberately uses -32600 rather than the 2026-07-28
+        # UnsupportedProtocolVersionError (-32022). Per that revision's
+        # backward-compatibility rules a dual-era client treats a 400 with no
+        # recognized *modern* error body as 'this is a legacy server' and
+        # falls back to the initialize handshake, which is what we want;
+        # returning -32022 would instead advertise a modern server we are not
+        # yet, and the client would retry rather than fall back.
+        declared_version = headers.get("mcp-protocol-version") if headers else None
+        if (
+            declared_version
+            and declared_version not in MCPServer.SUPPORTED_PROTOCOL_VERSIONS
+        ):
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            error_body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32600,
+                        "message": "Unsupported protocol version",
+                        "data": {
+                            "requested": declared_version,
+                            "supported": list(MCPServer.SUPPORTED_PROTOCOL_VERSIONS),
+                        },
+                    },
+                }
+            )
+            logger.warning(
+                f"400 error: unsupported MCP-Protocol-Version "
+                f"'{declared_version}'",
+                extra={
+                    "request_id": request_id,
+                    "request_path": path,
+                    "http_method": method,
+                    "mcp_protocol_version": declared_version,
+                    "duration_ms": duration_ms,
+                },
+            )
+            error_headers = {"Content-Type": "application/json"}
+            error_headers.update(self._get_cors_headers(request_origin))
+            return (400, error_headers, error_body)
 
         # Parse JSON to check if this is an initialize request
         # NOTE: This is intentionally parsing the JSON body separately from the
@@ -462,6 +565,27 @@ class UniversalHTTPHandler:
             Tuple of (status_code, response_headers, response_body)
         """
         request_id = request_id or "unknown"
+
+        # Refuse the preflight outright for a disallowed origin, so the
+        # browser never issues the actual request.
+        if self._origin_rejected(request_origin):
+            logger.warning(
+                f"403 preflight: Origin '{request_origin}' not allowed",
+                extra={
+                    "request_id": request_id,
+                    "request_origin": request_origin,
+                },
+            )
+            return (
+                403,
+                {
+                    **self._get_cors_headers(None),
+                    "Content-Type": "application/json",
+                    "X-Request-ID": request_id,
+                },
+                "",
+            )
+
         cors_headers = {
             **self._get_cors_headers(request_origin),
             "Access-Control-Max-Age": "86400",

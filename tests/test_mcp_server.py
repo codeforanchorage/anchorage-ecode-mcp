@@ -73,6 +73,45 @@ class TestInitialize:
         assert result["instructions"] == "Start with find_gis_content."
 
     @pytest.mark.asyncio
+    async def test_initialize_negotiates_2025_11_25(self):
+        """The 2025-11-25 revision is supported and echoed back."""
+        plugin_manager = MagicMock(spec=PluginManager)
+        plugin_manager.config = {}
+        server = MCPServer(plugin_manager)
+
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25"},
+        }
+
+        response = await server.handle_request(request)
+
+        assert response["result"]["protocolVersion"] == "2025-11-25"
+
+    @pytest.mark.asyncio
+    async def test_initialize_does_not_claim_2026_07_28(self):
+        """2026-07-28 drops the handshake entirely -- never claim it.
+
+        It replaces initialize with per-request _meta plus a mandatory
+        server/discover RPC. Advertising it without implementing that
+        migration would make dual-era clients skip the handshake we
+        actually depend on.
+        """
+        assert "2026-07-28" not in MCPServer.SUPPORTED_PROTOCOL_VERSIONS
+
+    @pytest.mark.asyncio
+    async def test_initialize_still_supports_2024_11_05(self):
+        """The original revision stays supported.
+
+        Dropping it would break clients pinned to it for no gain: the
+        tools-only wire format is unchanged across every revision in
+        the tuple.
+        """
+        assert "2024-11-05" in MCPServer.SUPPORTED_PROTOCOL_VERSIONS
+
+    @pytest.mark.asyncio
     async def test_initialize_unsupported_version_falls_back(self):
         """An unrecognized requested version falls back to the default."""
         plugin_manager = MagicMock(spec=PluginManager)
@@ -367,8 +406,8 @@ class TestPing:
     """Test ping method handling."""
 
     @pytest.mark.asyncio
-    async def test_ping_returns_ok(self):
-        """Test that ping returns ok status."""
+    async def test_ping_returns_empty_object(self):
+        """The spec defines the ping result as an empty object."""
         plugin_manager = MagicMock(spec=PluginManager)
         server = MCPServer(plugin_manager)
 
@@ -384,7 +423,8 @@ class TestPing:
         assert response is not None
         assert response["jsonrpc"] == "2.0"
         assert response["id"] == 1
-        assert response["result"]["status"] == "ok"
+        # The liveness signal is the response itself, not its body.
+        assert response["result"] == {}
 
 
 class TestNotifications:
@@ -445,7 +485,9 @@ class TestUnknownMethods:
 
         assert response is not None
         assert "error" in response
-        assert response["error"]["code"] == -32603
+        # An unknown method is a caller error, not a server fault.
+        assert response["error"]["code"] == -32601
+        assert response["error"]["message"] == "Method not found"
         assert "Unknown method" in response["error"]["data"]
 
 
