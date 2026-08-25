@@ -54,13 +54,17 @@ resource "aws_cloudwatch_metric_alarm" "lambda_throttles" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "lambda_duration_near_timeout" {
-  alarm_name          = "${local.lambda_name}-lambda-duration-near-timeout"
-  alarm_description   = "Lambda p95 duration is approaching the configured timeout"
-  namespace           = "AWS/Lambda"
-  metric_name         = "Duration"
-  extended_statistic  = "p95"
-  period              = 300
-  evaluation_periods  = 2
+  alarm_name         = "${local.lambda_name}-lambda-duration-near-timeout"
+  alarm_description  = "Lambda p95 duration is approaching the configured timeout"
+  namespace          = "AWS/Lambda"
+  metric_name        = "Duration"
+  extended_statistic = "p95"
+  period             = 300
+  evaluation_periods = 2
+  # 80% of the Lambda timeout. Now that the timeout is aligned just under API
+  # Gateway's 29s ceiling this fires at ~22.4s -- i.e. BEFORE the gateway
+  # starts returning 504s. While the timeout was 120s the threshold sat at
+  # 96s, which could only trip long after users were already seeing failures.
   threshold           = local.lambda_timeout * 1000 * 0.8
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"

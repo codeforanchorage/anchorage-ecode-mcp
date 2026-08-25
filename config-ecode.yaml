@@ -34,7 +34,13 @@ plugins:
     base_url: "https://api.ecode360.com"
     customer_id: "AN6998"
     city_name: "Municipality of Anchorage"
-    timeout: 60
+    # Per-upstream-request HTTP timeout. MUST stay below lambda_timeout
+    # (28s) or a hung eCode360 call outlives the Lambda: the function is
+    # killed mid-flight and the caller gets an opaque 502 instead of a
+    # readable "upstream timed out" tool error. 20s leaves ~8s to finish
+    # and return. Observed worst-case real tool duration over 60 days is
+    # 7.6s (p99 5.3s), so this is far above anything legitimate.
+    timeout: 20
     # Secrets are NEVER stored here (config.yaml is baked into the Lambda zip).
     # On Lambda, Terraform injects these env vars (sensitive):
     api_key_env: "ECODE_API_KEY"
@@ -47,7 +53,17 @@ aws:
   region: "us-west-2"
   lambda_name: "anchorage-ecode-mcp"
   lambda_memory: 512
-  lambda_timeout: 120
+  # MUST stay under the API Gateway integration timeout (29s, a hard REST
+  # limit that is not adjustable -- see terraform/aws/api_gateway.tf). Above
+  # it the gateway returns 504 while the Lambda keeps running, billing
+  # compute the client already gave up on and holding one of only 10
+  # reserved-concurrency slots for the remainder. 28s guarantees the Lambda
+  # self-terminates first, so the timeout is attributed in Lambda's own
+  # metrics and the slot frees at once.
+  # NOTE: this value takes precedence over `lambda_timeout` in
+  # terraform/aws/prod.tfvars (see the locals block in
+  # terraform/aws/main.tf) -- change it HERE.
+  lambda_timeout: 28
 
 logging:
   level: "INFO"
