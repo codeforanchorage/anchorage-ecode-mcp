@@ -67,6 +67,20 @@ New plugins must implement `MCPPlugin` (or `DataPlugin` for data sources). Place
 
 Copy `config-example.yaml` to `config.yaml`. Enable exactly one plugin. Config supports `${ENV_VAR}` substitution. For Lambda, config is serialized to the `OPENCONTEXT_CONFIG` env var by Terraform.
 
+Two AWS sizing values are read from `config.yaml` in preference to `terraform/aws/prod.tfvars` — `lambda_memory` and `lambda_timeout` (see the `locals` block in `terraform/aws/main.tf`). Editing them in the tfvars alone silently does nothing. `lambda_name` uses the opposite precedence, so check `main.tf` per variable rather than assuming.
+
+**`terraform/aws/config.yaml` is a BUILD ARTIFACT, not a source file.** `scripts/deploy.sh` (line 307) copies the repo-root `config.yaml` over it during packaging, and it is gitignored. Two consequences: edits made directly to it vanish on the next deploy, and a bare `terraform plan` run inside `terraform/aws/` (without the packaging steps) reads the STALE copy — so a config change shows up as nothing but a code-hash diff, and a "timeout fix" can appear to apply while changing nothing. Always go through `./scripts/deploy.sh -e prod`, which repackages before planning.
+
+**Timeout ladder** — each layer must sit under the one above it:
+
+| Layer | Value | Why |
+|---|---|---|
+| API Gateway integration | 29s | hard REST limit, not adjustable |
+| Lambda (`lambda_timeout`) | 28s | self-terminates before the gateway gives up |
+| Plugin HTTP (`plugins.ecode.timeout`) | 20s | a hung upstream returns a readable tool error instead of the Lambda being killed mid-flight |
+
+`tests/test_deployment_config.py` pins this ordering so it cannot silently invert again.
+
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) runs ruff lint/format, pip-audit, pytest with coverage, and Go tests on push to main/develop and on PRs.
