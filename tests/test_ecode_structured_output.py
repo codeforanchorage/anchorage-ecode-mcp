@@ -640,3 +640,149 @@ class TestStructuredContentReachesTheWire:
         validate(response["result"]["structuredContent"], SEARCH_OUTPUT_SCHEMA)
         # And it survives JSON serialization onto the wire.
         json.dumps(response)
+
+
+# --------------------------------------------------------------------------
+# F -- domain correctness
+# --------------------------------------------------------------------------
+
+
+class TestCitationDoesNotDrift:
+    """A citation that looks right and points somewhere else is this
+    server's version of the silently-wrong-number bug."""
+
+    DOC_HIT = {
+        "query": "off-street parking",
+        "page": "0",
+        "maxPages": 1,
+        "totalResultCount": 1,
+        "results": [
+            {
+                "id": "753252538",
+                "title": "OLD Title 21 Expired 12-31-2015",
+                "type": "doc",
+                "pdf": True,
+                "url": (
+                    "https://live.ecode360.com/documents/AN6998/public/"
+                    "753252538.pdf"
+                ),
+                "text": "off-street parking",
+            }
+        ],
+    }
+
+    SECTION_HIT = {
+        "query": "fence",
+        "page": "0",
+        "maxPages": 1,
+        "totalResultCount": 1,
+        "results": [
+            {
+                "id": "8682677",
+                "title": "Fences and walls.",
+                "number": "§ 120-167",
+                "type": "section",
+                "pdf": False,
+                # The API returns a live.ecode360.com URL carrying the
+                # transient search-highlight query string.
+                "url": "https://live.ecode360.com/8682677?highlight=fence#8682677",
+                "text": "the fence requirements",
+            }
+        ],
+    }
+
+    @pytest.mark.asyncio
+    async def test_document_hit_keeps_the_url_the_api_returned(self, plugin):
+        """A PDF hit has no code section behind it, so synthesizing
+        ecode360.com/<guid> cites a different resource than the one that
+        matched."""
+        _wire(plugin, self.DOC_HIT)
+        result = await plugin.execute_tool(
+            "search_code", {"query": "off-street parking"}
+        )
+        structured = _structured(result)
+        validate(structured, SEARCH_OUTPUT_SCHEMA)
+
+        row = structured["rows"][0]
+        assert row["url"].endswith("753252538.pdf")
+        assert row["url"] != "https://ecode360.com/753252538"
+        assert row["is_pdf"] is True
+        # And the human-readable half agrees.
+        assert row["url"] in _text(result)
+
+    @pytest.mark.asyncio
+    async def test_section_hit_uses_the_clean_canonical_link(self, plugin):
+        """For a section the API's URL is a link to this SEARCH, not to the
+        law; the canonical form is the better citation."""
+        _wire(plugin, self.SECTION_HIT)
+        result = await plugin.execute_tool("search_code", {"query": "fence"})
+        structured = _structured(result)
+        validate(structured, SEARCH_OUTPUT_SCHEMA)
+
+        row = structured["rows"][0]
+        assert row["url"] == "https://ecode360.com/8682677"
+        assert "highlight=" not in row["url"]
+
+    @pytest.mark.asyncio
+    async def test_pdf_flag_matches_between_prose_and_structure(self, plugin):
+        """The prose says "(PDF document)"; a caller acting on rows alone
+        must be able to learn the same thing."""
+        _wire(plugin, self.DOC_HIT)
+        result = await plugin.execute_tool(
+            "search_code", {"query": "off-street parking"}
+        )
+        assert _structured(result)["rows"][0]["is_pdf"] is True
+        assert "PDF document" in _text(result)
+
+
+class TestOutlineNodeKind:
+    """The structure endpoint populates `label` (Title / Part / Chapter /
+    Litem) on children and does NOT populate `type` there."""
+
+    PAYLOAD = {
+        "results": {
+            "guid": "ROOT",
+            "type": "container",
+            "label": "",
+            "number": "",
+            "title": "",
+            "children": [
+                {
+                    "guid": "49672100",
+                    "title": "Code History and Adopting Ordinances",
+                    "number": "Title AO",
+                    "label": "Title",
+                },
+                {
+                    "guid": "49245794",
+                    "title": "PART I: CHARTER",
+                    "number": "",
+                    "label": "Part",
+                },
+            ],
+        }
+    }
+
+    @pytest.mark.asyncio
+    async def test_children_carry_the_label(self, plugin):
+        _wire(plugin, self.PAYLOAD)
+        result = await plugin.execute_tool("browse_structure", {"guid": "ROOT"})
+        structured = _structured(result)
+        validate(structured, STRUCTURE_OUTPUT_SCHEMA)
+
+        labels = [c["label"] for c in structured["children"]]
+        assert labels == ["Title", "Part"], (
+            "children advertised a kind of null because only `type` was "
+            "read, and the API does not set `type` on children"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rendered_child_shows_its_kind_when_number_is_empty(
+        self, plugin
+    ):
+        """Real nodes carry an empty `number`; without the label such a child
+        rendered as a bare title plus a guid, losing where it sits."""
+        _wire(plugin, self.PAYLOAD)
+        result = await plugin.execute_tool("browse_structure", {"guid": "ROOT"})
+        text = _text(result)
+        assert "Part PART I: CHARTER" in text
