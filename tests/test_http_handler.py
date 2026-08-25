@@ -782,17 +782,18 @@ class TestServerInitialization:
         """Test that server initialization reuses existing instances."""
         config = {"plugins": {"ckan": {"enabled": True}}}
 
+        import server.http_handler
+
         with (
             patch("server.http_handler._load_config") as mock_load_config,
             patch("server.http_handler.PluginManager") as mock_pm_class,
+            # patch.object restores both globals on exit. Assigning them
+            # directly used to leave a non-awaitable MagicMock behind for
+            # whatever ran next -- see tests/conftest.py.
+            patch.object(server.http_handler, "_plugin_manager", MagicMock()),
+            patch.object(server.http_handler, "_mcp_server", MagicMock()),
         ):
             mock_load_config.return_value = config
-
-            # Set existing instances
-            import server.http_handler
-
-            server.http_handler._plugin_manager = MagicMock()
-            server.http_handler._mcp_server = MagicMock()
 
             await _initialize_server()
 

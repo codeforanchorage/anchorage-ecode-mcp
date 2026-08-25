@@ -143,7 +143,7 @@ curl -X POST https://your-lambda-url \
 pip install aiohttp
 
 # Start local server
-python3 local_server.py
+python3 scripts/local_server.py
 
 # In another terminal, test with curl
 curl -X POST http://localhost:8000 \

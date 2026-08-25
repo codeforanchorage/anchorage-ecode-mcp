@@ -150,7 +150,7 @@ Before merging anything that touches `plugins/anchorage_gis/`,
    `TestSearchOrgLayersFilter`.
 2. Smoke-test locally:
    ```bash
-   PYTHONIOENCODING=utf-8 venv/Scripts/python scripts/local_server.py
+   venv/Scripts/python scripts/local_server.py
    ```
    Then issue `query_data` against a known MOA item
    (e.g. `858fddc3012e4cd5b4e48d44dc84f4e0`). Records should return.
