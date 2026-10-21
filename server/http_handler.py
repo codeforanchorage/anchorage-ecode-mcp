@@ -16,7 +16,7 @@ from core.logging_utils import (
     format_request_log,
     format_response_log,
 )
-from core.mcp_server import MCPServer
+from core.mcp_server import ERA_MODERN, MCPServer
 from core.plugin_manager import PluginManager
 from core.validators import (
     ConfigurationError,
@@ -192,7 +192,8 @@ class UniversalHTTPHandler:
             "Vary": "Origin",
             "Access-Control-Allow-Methods": "POST, OPTIONS",
             "Access-Control-Allow-Headers": (
-                "content-type, accept, mcp-session-id, mcp-protocol-version"
+                "content-type, accept, mcp-session-id, mcp-protocol-version, "
+                "mcp-method, mcp-name"
             ),
             "Access-Control-Expose-Headers": "x-request-id, mcp-session-id",
         }
@@ -345,16 +346,23 @@ class UniversalHTTPHandler:
         # Validate the MCP-Protocol-Version header, which clients have been
         # required to send on every post-handshake request since 2025-06-18.
         # Absent means an older client: the spec says assume 2025-03-26, so
-        # we let it through untouched.
+        # we let it through untouched. Both legacy (2025-11-25 and earlier,
+        # initialize handshake) and modern (2026-07-28+, per-request _meta)
+        # revisions are served -- see core/mcp_server.py for the split; the
+        # modern era's header/body consistency checks happen there, once
+        # the body has been parsed.
         #
-        # The error body deliberately uses -32600 rather than the 2026-07-28
-        # UnsupportedProtocolVersionError (-32022). Per that revision's
-        # backward-compatibility rules a dual-era client treats a 400 with no
-        # recognized *modern* error body as 'this is a legacy server' and
-        # falls back to the initialize handshake, which is what we want;
-        # returning -32022 would instead advertise a modern server we are not
-        # yet, and the client would retry rather than fall back.
-        declared_version = headers.get("mcp-protocol-version") if headers else None
+        # A version we implement in neither era gets the modern
+        # UnsupportedProtocolVersionError (-32022) listing what we do
+        # support: a modern client retries with one of those, and a
+        # legacy client at least sees a version it can ask for on
+        # initialize. (This used to be a bare -32600 on purpose, so that
+        # dual-era clients would fall back to initialize; now that we are
+        # dual-era ourselves that fallback would cost them a round trip
+        # for nothing.)
+        declared_version = (
+            headers.get("mcp-protocol-version") if headers else None
+        )
         if (
             declared_version
             and declared_version not in MCPServer.SUPPORTED_PROTOCOL_VERSIONS
@@ -365,11 +373,13 @@ class UniversalHTTPHandler:
                     "jsonrpc": "2.0",
                     "id": None,
                     "error": {
-                        "code": -32600,
+                        "code": -32022,
                         "message": "Unsupported protocol version",
                         "data": {
+                            "supported": list(
+                                MCPServer.SUPPORTED_PROTOCOL_VERSIONS
+                            ),
                             "requested": declared_version,
-                            "supported": list(MCPServer.SUPPORTED_PROTOCOL_VERSIONS),
                         },
                     },
                 }
@@ -398,8 +408,12 @@ class UniversalHTTPHandler:
         try:
             request_json = json.loads(body)
             is_initialize = request_json.get("method") == "initialize"
+            is_modern = (
+                MCPServer.request_era(request_json, headers) == ERA_MODERN
+            )
         except (json.JSONDecodeError, AttributeError):
             is_initialize = False
+            is_modern = False
 
         # Generate session ID for initialize requests
         # NOTE: This session ID is for logging and tracing purposes only.
@@ -415,7 +429,12 @@ class UniversalHTTPHandler:
                 extra={"request_id": request_id, "mcp_session_id": session_id},
             )
 
-        effective_session_id = session_id or incoming_session_id
+        # Modern-era (2026-07-28) requests have no session: an
+        # Mcp-Session-Id a client sends anyway is ignored, never echoed or
+        # logged as if it correlated anything.
+        effective_session_id = (
+            None if is_modern else (session_id or incoming_session_id)
+        )
 
         # Log request details
         request_log_data = format_request_log(
