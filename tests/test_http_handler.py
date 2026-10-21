@@ -429,6 +429,37 @@ class TestProtocolVersionHeader:
         assert error_body["error"]["data"]["requested"] == "1999-01-01"
         assert error_body["error"]["data"]["supported"][0] == "2026-07-28"
         assert "2025-11-25" in error_body["error"]["data"]["supported"]
+        # The spec's own UnsupportedProtocolVersionError example echoes
+        # the request id; a client with several requests in flight needs
+        # it to know which one was refused. This used to be null.
+        assert error_body["id"] == 1
+
+    @pytest.mark.asyncio
+    async def test_unsupported_version_without_id_keeps_null_id(self):
+        """A notification (no id) or an unparseable body cannot be
+        correlated, so the error keeps a null id rather than inventing
+        one."""
+        handler = UniversalHTTPHandler()
+
+        status, _headers, body = await handler.handle_request(
+            method="POST",
+            path="/mcp",
+            body=json.dumps(
+                {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            ),
+            headers={"mcp-protocol-version": "1999-01-01"},
+        )
+        assert status == 400
+        assert json.loads(body)["id"] is None
+
+        status, _headers, body = await handler.handle_request(
+            method="POST",
+            path="/mcp",
+            body="{not json",
+            headers={"mcp-protocol-version": "1999-01-01"},
+        )
+        assert status == 400
+        assert json.loads(body)["id"] is None
 
     @pytest.mark.asyncio
     async def test_modern_version_header_is_accepted(self):

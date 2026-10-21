@@ -496,3 +496,50 @@ class TestLogging:
             MODERN,
             "2025-11-25",
         ]
+
+
+class TestTraceContextLogging:
+    """Spec 2026-07-28 documents W3C trace-context keys (`traceparent`,
+    `tracestate`, `baggage`) as conventional `_meta` entries. We flatten
+    the first two onto the request log line so a caller's trace can be
+    joined to our CloudWatch records; `baggage` is free-form and is not
+    copied."""
+
+    @pytest.mark.asyncio
+    async def test_traceparent_is_flattened_onto_request_log(self, caplog):
+        import logging
+
+        request = _request("tools/list", capabilities={})
+        request["params"]["_meta"]["traceparent"] = (
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+        )
+        request["params"]["_meta"]["tracestate"] = "vendor=opaque"
+        request["params"]["_meta"]["baggage"] = "userId=alice"
+
+        with caplog.at_level(logging.INFO, logger="core.mcp_server"):
+            await _server().handle_request(request, era=ERA_MODERN)
+
+        recs = [
+            r for r in caplog.records
+            if r.getMessage() == "JSON-RPC request received"
+        ]
+        assert len(recs) == 1
+        rec = recs[0]
+        assert rec.otel_traceparent.startswith("00-0af7651916cd43dd")
+        assert rec.otel_tracestate == "vendor=opaque"
+        assert not hasattr(rec, "otel_baggage")
+
+    @pytest.mark.asyncio
+    async def test_absent_trace_context_adds_nothing(self, caplog):
+        import logging
+
+        request = _request("tools/list", capabilities={})
+        with caplog.at_level(logging.INFO, logger="core.mcp_server"):
+            await _server().handle_request(request, era=ERA_MODERN)
+
+        rec = next(
+            r for r in caplog.records
+            if r.getMessage() == "JSON-RPC request received"
+        )
+        assert not hasattr(rec, "otel_traceparent")
+
