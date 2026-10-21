@@ -343,6 +343,27 @@ class UniversalHTTPHandler:
                 error_body,
             )
 
+        # Parse JSON once up front: to echo the JSON-RPC id on transport-level
+        # errors (the spec's UnsupportedProtocolVersionError example carries
+        # the request's id, and a client correlating in-flight requests needs
+        # it), to detect initialize requests and mint a session ID, and to
+        # classify the era.
+        # NOTE: This is intentionally parsing the JSON body separately from the
+        # later parsing in _mcp_server.handle_http_request(), so a malformed
+        # body still gets that method's -32700 handling. The body is small;
+        # parsing it twice is an acceptable trade-off for error isolation.
+        body_request_id = None
+        try:
+            request_json = json.loads(body)
+            body_request_id = request_json.get("id")
+            is_initialize = request_json.get("method") == "initialize"
+            is_modern = (
+                MCPServer.request_era(request_json, headers) == ERA_MODERN
+            )
+        except (json.JSONDecodeError, AttributeError):
+            is_initialize = False
+            is_modern = False
+
         # Validate the MCP-Protocol-Version header, which clients have been
         # required to send on every post-handshake request since 2025-06-18.
         # Absent means an older client: the spec says assume 2025-03-26, so
@@ -371,7 +392,7 @@ class UniversalHTTPHandler:
             error_body = json.dumps(
                 {
                     "jsonrpc": "2.0",
-                    "id": None,
+                    "id": body_request_id,
                     "error": {
                         "code": -32022,
                         "message": "Unsupported protocol version",
@@ -398,22 +419,6 @@ class UniversalHTTPHandler:
             error_headers = {"Content-Type": "application/json"}
             error_headers.update(self._get_cors_headers(request_origin))
             return (400, error_headers, error_body)
-
-        # Parse JSON to check if this is an initialize request
-        # NOTE: This is intentionally parsing the JSON body separately from the
-        # later parsing in _mcp_server.handle_http_request(). This early parsing
-        # allows us to detect initialize requests and generate session IDs without
-        # affecting error handling if the JSON is invalid. The body will be parsed
-        # again later, which is an acceptable trade-off for error handling isolation.
-        try:
-            request_json = json.loads(body)
-            is_initialize = request_json.get("method") == "initialize"
-            is_modern = (
-                MCPServer.request_era(request_json, headers) == ERA_MODERN
-            )
-        except (json.JSONDecodeError, AttributeError):
-            is_initialize = False
-            is_modern = False
 
         # Generate session ID for initialize requests
         # NOTE: This session ID is for logging and tracing purposes only.
