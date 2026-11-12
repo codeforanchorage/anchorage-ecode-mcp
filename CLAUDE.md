@@ -67,7 +67,7 @@ New plugins must implement `MCPPlugin` (or `DataPlugin` for data sources). Place
 
 ## Configuration
 
-Copy `config-example.yaml` to `config.yaml`. Enable exactly one plugin. Config supports `${ENV_VAR}` substitution. For Lambda, config is serialized to the `OPENCONTEXT_CONFIG` env var by Terraform.
+Copy `config-example.yaml` to `config.yaml`. Enable exactly one plugin. Config does **NOT** support `${ENV_VAR}` substitution: `core/validators.py::load_and_validate_config` is a plain `yaml.safe_load`, so a `${VAR}` (as shown in `config-example.yaml`) reaches the plugin as that literal string. Read secrets from `os.environ` in the plugin's `initialize()` instead — the eCode plugin reads `ECODE_API_KEY` / `ECODE_API_SECRET` that way. Never put a secret in `config.yaml`: it is baked into the Lambda zip. For Lambda, config is serialized to the `OPENCONTEXT_CONFIG` env var by Terraform.
 
 Two AWS sizing values are read from `config.yaml` in preference to `terraform/aws/prod.tfvars` — `lambda_memory` and `lambda_timeout` (see the `locals` block in `terraform/aws/main.tf`). Editing them in the tfvars alone silently does nothing. `lambda_name` uses the opposite precedence, so check `main.tf` per variable rather than assuming.
 
