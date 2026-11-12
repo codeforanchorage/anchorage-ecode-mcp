@@ -262,13 +262,8 @@ try:
 
     with_schema = {n for n, s in schemas.items() if s}
     check(
-        "the four data tools declare an outputSchema",
-        with_schema == {
-            "ecode__search_code",
-            "ecode__get_section",
-            "ecode__browse_structure",
-            "ecode__get_table_of_contents",
-        },
+        "every tool declares an outputSchema",
+        with_schema == set(tools),
         ", ".join(sorted(with_schema)),
     )
 except Exception as e:
@@ -392,20 +387,24 @@ except Exception as e:
           False, repr(e))
 
 
-# ── 7. the tool that deliberately has no schema ────────────────────────────
+# ── 7. customer info: prose plus conforming structuredContent ──────────────
 
 try:
     r = call_tool("get_customer_info", {})
     txt = text_of(r)
-    # Deliberately declares no outputSchema: it is metadata prose whose value
-    # IS the prose. So it must NOT emit structuredContent either.
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__get_customer_info", sc)
     check(
-        "customer info returns prose and no structuredContent",
-        "AN6998" in txt and structured_of(r) is None,
-        txt.splitlines()[0][:60] if txt else "",
+        "customer info: structuredContent present and conforming",
+        ok
+        and "AN6998" in txt
+        and sc.get("customer_id") == "AN6998"
+        and bool(sc.get("last_updated")),
+        why or f"last_updated={sc.get('last_updated')}",
     )
 except Exception as e:
-    check("customer info returns prose and no structuredContent", False, repr(e))
+    check("customer info: structuredContent present and conforming", False,
+          repr(e))
 
 
 # ── 8. modern era (MCP 2026-07-28, stateless, per-request _meta) ──────────

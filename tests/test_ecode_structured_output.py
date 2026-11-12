@@ -25,6 +25,7 @@ from plugins.ecode.plugin import (
     CAVEAT_RENDERED_TEXT_TRUNCATED,
     CAVEAT_SECTION_NOT_IN_FORCE,
     CAVEAT_TOC_ENDPOINT_UNAVAILABLE,
+    CUSTOMER_OUTPUT_SCHEMA,
     MAX_CONTENT_CHARS,
     SEARCH_OUTPUT_SCHEMA,
     SECTION_OUTPUT_SCHEMA,
@@ -106,21 +107,81 @@ class TestToolMetadata:
             assert t.annotations.get("openWorldHint") is True, t.name
             assert "idempotentHint" not in t.annotations, t.name
 
-    def test_customer_info_declares_no_output_schema(self, plugin):
-        """Deliberately skipped: get_customer_info is metadata prose whose
-        value IS the prose. A schema there is ceremony with no consumer."""
-        by_name = {t.name: t for t in plugin.get_tools()}
-        assert by_name["get_customer_info"].output_schema is None
+    def test_every_tool_declares_a_schema(self, plugin):
+        """get_customer_info used to be skipped as "metadata prose"; it got
+        a schema in 1.3.0 because last_updated is the one machine-readable
+        signal of how current the code text is."""
+        for t in plugin.get_tools():
+            assert t.output_schema is not None, t.name
 
-    def test_the_four_converted_tools_declare_a_schema(self, plugin):
-        by_name = {t.name: t for t in plugin.get_tools()}
-        for name in (
-            "search_code",
-            "get_section",
-            "browse_structure",
-            "get_table_of_contents",
-        ):
-            assert by_name[name].output_schema is not None, name
+
+# Live shape of GET /customer/AN6998, 2026-11-12.
+LIVE_CUSTOMER = {
+    "error": False,
+    "results": {
+        "counties": ["ANCHORAGE"],
+        "id": "AN6998",
+        "govtype": "Municipality",
+        "govsubtype": "",
+        "name": "Municipality of Anchorage, AK",
+        "shortName": "Anchorage",
+        "state": "AK",
+        "updatedDate": "2026-11-10",
+        "url": "https://ecode360.com/AN6998",
+        "mapUrl": "",
+        "subdivisionName": "Borough",
+        "subdivisionNamePlural": "Boroughs",
+    },
+}
+
+
+class TestCustomerInfo:
+    @pytest.mark.asyncio
+    async def test_live_shape_conforms(self, plugin):
+        plugin.client = MagicMock()
+        plugin.client.get = AsyncMock(return_value=_respond(LIVE_CUSTOMER))
+        result = await plugin.execute_tool("get_customer_info", {})
+
+        sc = result.structured_content
+        validate(sc, CUSTOMER_OUTPUT_SCHEMA)
+        assert sc["customer_id"] == "AN6998"
+        assert sc["last_updated"] == "2026-11-10"
+        assert sc["counties"] == ["ANCHORAGE"]
+        assert sc["population"] is None  # absent upstream -> null, not 0
+        assert "2026-11-10" in sc["summary"]
+        text = result.content[0]["text"]
+        assert "AN6998" in text and "Counties: ANCHORAGE" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"results": None},
+            {"results": "oops"},
+            {"results": {"id": "AN6998", "population": 291247,
+                         "pdfOnly": False, "counties": "ANCHORAGE"}},
+            {"results": {"population": True, "pdfOnly": 1,
+                         "counties": [None, ""]}},
+        ],
+    )
+    async def test_sparse_or_odd_shapes_still_conform(self, plugin, payload):
+        """A declared schema is binding: whatever upstream sends, the
+        structured half must validate."""
+        plugin.client = MagicMock()
+        plugin.client.get = AsyncMock(return_value=_respond(payload))
+        result = await plugin.execute_tool("get_customer_info", {})
+
+        assert result.success is True
+        validate(result.structured_content, CUSTOMER_OUTPUT_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_empty_strings_read_as_null(self, plugin):
+        payload = {"results": {"id": "AN6998", "govtype": "", "url": ""}}
+        plugin.client = MagicMock()
+        plugin.client.get = AsyncMock(return_value=_respond(payload))
+        sc = (await plugin.execute_tool("get_customer_info", {}))            .structured_content
+        assert sc["government_type"] is None and sc["url"] is None
 
 
 # --------------------------------------------------------------------------
@@ -607,8 +668,7 @@ class TestStructuredContentReachesTheWire:
         tools = {t["name"]: t for t in manager.get_all_tools()}
         assert tools["ecode__search_code"]["title"] == "Search Code"
         assert "outputSchema" in tools["ecode__search_code"]
-        # A tool that declares none must not emit an empty one.
-        assert "outputSchema" not in tools["ecode__get_customer_info"]
+        assert "outputSchema" in tools["ecode__get_customer_info"]
 
     @pytest.mark.asyncio
     async def test_tools_call_emits_structured_content(self, plugin):
