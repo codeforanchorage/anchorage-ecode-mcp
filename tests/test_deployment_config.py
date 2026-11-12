@@ -76,6 +76,26 @@ class TestTimeoutLadder:
             "return the error"
         )
 
+    def test_call_budget_fits_inside_the_lambda(self):
+        """All upstream requests in ONE tool call (retries, a section-number
+        lookup then the fetch) share TOOL_CALL_BUDGET_S. It must end early
+        enough to format and return before the Lambda is killed."""
+        from plugins.ecode.plugin import TOOL_CALL_BUDGET_S
+
+        lambda_timeout = _load(CONFIG)["aws"]["lambda_timeout"]
+        assert lambda_timeout - TOOL_CALL_BUDGET_S >= 3, (
+            f"TOOL_CALL_BUDGET_S={TOOL_CALL_BUDGET_S}s leaves under 3s "
+            f"before lambda_timeout={lambda_timeout}s"
+        )
+
+    def test_call_budget_covers_one_full_request(self):
+        """Below the plugin timeout, every first request would be cut short
+        of the timeout the config promises."""
+        from plugins.ecode.plugin import TOOL_CALL_BUDGET_S
+
+        plugin_timeout = _load(CONFIG)["plugins"]["ecode"]["timeout"]
+        assert TOOL_CALL_BUDGET_S > plugin_timeout
+
 
 class TestTerraformAgreesWithConfig:
     """config.yaml wins for these, but drift still misleads whoever reads

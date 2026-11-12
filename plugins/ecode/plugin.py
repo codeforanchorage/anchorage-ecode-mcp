@@ -10,10 +10,13 @@ API reference (v2.7): two API-key headers (``api-key`` / ``api-secret``) on
 every request; all endpoints are GET under ``/v1`` and return JSON.
 """
 
+import asyncio
+import contextvars
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import httpx
@@ -46,6 +49,43 @@ GUID_RE = re.compile(r"^[A-Za-z0-9]+$")
 # 401/403 are our credentials and 5xx is upstream -- both genuine faults.
 CALLER_ERROR_STATUSES = frozenset({400, 404})
 
+# A section REFERENCE as a caller (or a model) writes it: "21.05.010",
+# "§ 21.05.010", "CCT.020", "CT-R.010". Dotted, so it can never collide
+# with a guid (GUID_RE forbids the dot).
+SECTION_REF_RE = re.compile(
+    r"^(?:§\s*)?(?=.*\d)([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)$"
+)
+
+# ── Upstream resilience ─────────────────────────────────────────────────
+#
+# One tool call may make more than one upstream request (a retry, or a
+# section-number lookup followed by the fetch). Each request is capped at
+# the plugin `timeout` (20s), so without a shared budget two of them could
+# run past the Lambda's 28s and get it killed mid-flight -- the opaque 502
+# the timeout ladder exists to prevent. Every request in a call therefore
+# draws from ONE budget, kept under lambda_timeout with room to format and
+# return. tests/test_deployment_config.py pins it below lambda_timeout.
+TOOL_CALL_BUDGET_S = 24.0
+
+# Transient failures (connection reset, DNS blip, upstream 5xx) are retried
+# while the call is young. A TIMEOUT is never retried: it already spent the
+# full per-request timeout, and a second one cannot fit in the budget.
+MAX_ATTEMPTS = 3
+RETRY_BACKOFF_S = 0.4
+RETRY_ONLY_WITHIN_S = 6.0
+
+# Deadline (monotonic seconds) of the tool call currently executing. A
+# contextvar, not an attribute: the local server runs calls concurrently on
+# one plugin instance.
+_call_deadline: contextvars.ContextVar[Optional[float]] = (
+    contextvars.ContextVar("ecode_call_deadline", default=None)
+)
+
+# The TOC (~900 KB, ~0.9s per fetch, measured 2026-11-12) and the customer
+# record change only when the code is republished, so they are cached per
+# Lambda container. An hour bounds how stale a republish can look.
+STATIC_CACHE_TTL_S = 3600.0
+
 # ── Structured output ───────────────────────────────────────────────────
 #
 # A declared outputSchema is BINDING: the MCP spec says servers MUST return
@@ -70,6 +110,7 @@ CAVEAT_RENDERED_TEXT_TRUNCATED = "rendered_text_truncated"
 CAVEAT_SECTION_NOT_IN_FORCE = "section_not_in_force"
 CAVEAT_NODE_HAS_NO_CHILDREN = "node_has_no_children"
 CAVEAT_TOC_ENDPOINT_UNAVAILABLE = "toc_endpoint_unavailable"
+CAVEAT_RESOLVED_FROM_SECTION_NUMBER = "resolved_from_section_number"
 
 # Words that, in a section's NUMBER/TITLE, mean the body is not operative
 # law. Checked against the title only: "repealed" appears in the body of
@@ -259,12 +300,14 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self.plugin_config: Optional[EcodePluginConfig] = None
         self.client: Optional[httpx.AsyncClient] = None
+        # path -> (expires_at monotonic, json). See STATIC_CACHE_TTL_S.
+        self._static_cache: Dict[str, Tuple[float, Any]] = {}
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -429,7 +472,9 @@ class EcodePlugin(MCPPlugin):
                 description=(
                     "Retrieve the full text of a code section (and its nested "
                     "subsections) by guid. The guid comes from search_code, "
-                    "get_table_of_contents, or browse_structure. Also surfaces any "
+                    "get_table_of_contents, or browse_structure. A section "
+                    "NUMBER such as '21.05.010' or '§ 21.05.010' is also "
+                    "accepted and resolved to its guid. Also surfaces any "
                     "images/attachments and the public ecode360.com link."
                 ),
                 input_schema={
@@ -437,7 +482,10 @@ class EcodePlugin(MCPPlugin):
                     "properties": {
                         "guid": {
                             "type": "string",
-                            "description": "Section/node guid (e.g. '8682677')",
+                            "description": (
+                                "Section/node guid (e.g. '49422044'), or a "
+                                "section number (e.g. '21.05.010')"
+                            ),
                         },
                     },
                     "required": ["guid"],
@@ -472,6 +520,15 @@ class EcodePlugin(MCPPlugin):
     async def execute_tool(
         self, tool_name: str, arguments: Dict[str, Any]
     ) -> ToolResult:
+        token = _call_deadline.set(time.monotonic() + TOOL_CALL_BUDGET_S)
+        try:
+            return await self._execute_tool(tool_name, arguments)
+        finally:
+            _call_deadline.reset(token)
+
+    async def _execute_tool(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> ToolResult:
         try:
             if tool_name == "search_code":
                 query = (arguments.get("query") or "").strip()
@@ -503,14 +560,22 @@ class EcodePlugin(MCPPlugin):
                 return self._ok(*self._format_structure(node))
 
             if tool_name == "get_section":
-                guid = self._guid_arg(arguments)
+                ref = self._section_ref(arguments.get("guid"))
+                resolved_from = None
+                if ref:
+                    guid = await self._resolve_section_number(ref)
+                    resolved_from = ref
+                else:
+                    guid = self._guid_arg(arguments)
                 data = await self._get_json(
                     self._cust_path(f"/code/content/{quote(guid, safe='')}")
                 )
-                return self._ok(*self._format_content(data))
+                return self._ok(
+                    *self._format_content(data, resolved_from=resolved_from)
+                )
 
             if tool_name == "get_customer_info":
-                data = await self._get_json(self._cust_path(""))
+                data = await self._get_static_json(self._cust_path(""))
                 return self._ok(self._format_customer(data))
 
             return self._err(f"Unknown tool: {tool_name}")
@@ -530,7 +595,11 @@ class EcodePlugin(MCPPlugin):
 
         except Exception as e:
             logger.error("Error executing tool %s: %s", tool_name, e, exc_info=True)
-            return self._err(str(e) or "Tool execution failed")
+            # Several exceptions (every httpx timeout among them) stringify
+            # to ''. Never hand the caller a bare "failed" with no cause.
+            return self._err(
+                str(e) or f"Tool execution failed ({type(e).__name__})"
+            )
 
     # ── Caller-argument coercion ────────────────────────────────────────
 
@@ -590,6 +659,59 @@ class EcodePlugin(MCPPlugin):
             )
         return guid
 
+    # ── Section-number resolution ───────────────────────────────────────
+
+    @staticmethod
+    def _section_ref(raw: Any) -> Optional[str]:
+        """The bare section number if `raw` is written as one, else None.
+
+        "§ 21.05.010" -> "21.05.010"; "49422044" and "ROOT" -> None.
+        """
+        if not isinstance(raw, str):
+            return None
+        match = SECTION_REF_RE.match(raw.strip())
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _norm_ref(ref: Optional[str]) -> str:
+        return re.sub(r"[\s§]", "", ref or "").lower()
+
+    async def _resolve_section_number(self, ref: str) -> str:
+        """Turn a section NUMBER into its guid via search.
+
+        The API has no lookup by number, but a search for the number ranks
+        the section itself first (verified live for 21.05.010). Only an
+        EXACT match on the hit's own `number` is accepted -- a fuzzy pick
+        would cite one section's number over another's text, which is worse
+        than asking the caller to search.
+        """
+        data = await self._search(ref, 0)
+        want = self._norm_ref(ref)
+        guids: List[str] = []
+        for hit in data.get("results", []) or []:
+            if hit.get("pdf") or hit.get("type") == "doc":
+                continue
+            if self._norm_ref(hit.get("number")) != want:
+                continue
+            guid = str(hit.get("id") or self._guid_from_url(hit.get("url", "")))
+            if guid and guid not in guids:
+                guids.append(guid)
+
+        if len(guids) == 1:
+            return guids[0]
+        if not guids:
+            raise ToolInputError(
+                f"No section numbered {ref!r} was found in the published "
+                "code (that looks like a section NUMBER, and none matched it "
+                "exactly). Use search_code to find the section and read its "
+                "guid from the result."
+            )
+        raise ToolInputError(
+            f"Section number {ref!r} matches {len(guids)} different nodes "
+            f"(guids {', '.join(guids)}). Call get_section with one of those "
+            "guids, or use search_code to tell them apart."
+        )
+
     # ── HTTP helpers ────────────────────────────────────────────────────
 
     def _cust_path(self, suffix: str) -> str:
@@ -597,29 +719,128 @@ class EcodePlugin(MCPPlugin):
         cust = self.plugin_config.customer_id
         return f"/customer/{cust}{suffix}"
 
+    def _request_timeout(self) -> Optional[float]:
+        """Per-request timeout override, or None to use the client default.
+
+        None whenever the call budget still covers a full plugin timeout, so
+        the common path passes no extra argument at all.
+        """
+        deadline = _call_deadline.get()
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise EcodeAPIError(
+                f"eCode360 did not answer within this call's "
+                f"{TOOL_CALL_BUDGET_S:g}s budget. The service may be slow "
+                "right now; try again shortly.",
+                504,
+            )
+        if remaining < self.plugin_config.timeout:
+            return remaining
+        return None
+
     async def _get_json(
         self, path: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        try:
-            resp = await self.client.get(path, params=params)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            detail = self._extract_api_error(e.response)
-            if status in CALLER_ERROR_STATUSES:
-                # The caller named something that is not in this code library.
-                # A caller mistake, so it must not log as a server fault.
-                raise EcodeNotFoundError(
-                    f"eCode360 has no such entry (HTTP {status}): {detail}. "
-                    "Check the guid -- use search_code to look the section up "
-                    "and read its guid from the result.",
+        """GET + JSON, retrying transient failures inside the call budget.
+
+        Retried: connection errors and upstream 5xx, while the call is
+        younger than RETRY_ONLY_WITHIN_S. Never retried: timeouts (see
+        TOOL_CALL_BUDGET_S) and 4xx. Every failure surfaces with a message
+        that names the cause -- an httpx timeout stringifies to '', which is
+        how the caller used to get a bare "Tool execution failed".
+        """
+        started = time.monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            timeout = self._request_timeout()
+            kwargs: Dict[str, Any] = {"params": params}
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            try:
+                resp = await self.client.get(path, **kwargs)
+                resp.raise_for_status()
+            except httpx.TimeoutException as e:
+                seconds = timeout or self.plugin_config.timeout
+                raise EcodeAPIError(
+                    f"eCode360 did not respond within {seconds:.0f}s "
+                    f"({type(e).__name__} on {path}). The service may be "
+                    "slow right now; try again shortly.",
+                    504,
+                ) from e
+            except httpx.TransportError as e:
+                if self._may_retry(attempt, started):
+                    await self._backoff(attempt, path, repr(e))
+                    continue
+                raise EcodeAPIError(
+                    f"Could not reach eCode360 after {attempt} attempt(s): "
+                    f"{type(e).__name__}{': ' + str(e) if str(e) else ''}",
+                    503,
+                ) from e
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                detail = self._extract_api_error(e.response)
+                if status in CALLER_ERROR_STATUSES:
+                    # The caller named something that is not in this code
+                    # library. A caller mistake, so it must not log as a
+                    # server fault.
+                    raise EcodeNotFoundError(
+                        f"eCode360 has no such entry (HTTP {status}): "
+                        f"{detail}. Check the guid -- use search_code to look "
+                        "the section up and read its guid from the result.",
+                        status,
+                    ) from e
+                if status >= 500 and self._may_retry(attempt, started):
+                    await self._backoff(attempt, path, f"HTTP {status}")
+                    continue
+                suffix = f" after {attempt} attempt(s)" if attempt > 1 else ""
+                raise EcodeAPIError(
+                    f"eCode API error (HTTP {status}) for {path}{suffix}: "
+                    f"{detail}",
                     status,
                 ) from e
-            raise EcodeAPIError(
-                f"eCode API error (HTTP {status}) for {path}: {detail}",
-                status,
-            ) from e
-        return resp.json()
+            try:
+                return resp.json()
+            except ValueError as e:
+                raise EcodeAPIError(
+                    f"eCode360 returned a non-JSON response for {path} "
+                    f"(content-type "
+                    f"{resp.headers.get('content-type', '?')}).",
+                    502,
+                ) from e
+
+    @staticmethod
+    def _may_retry(attempt: int, started: float) -> bool:
+        return (
+            attempt < MAX_ATTEMPTS
+            and time.monotonic() - started < RETRY_ONLY_WITHIN_S
+        )
+
+    @staticmethod
+    async def _backoff(attempt: int, path: str, why: str) -> None:
+        logger.warning(
+            "transient eCode360 failure on %s (%s); retry %d",
+            path,
+            why,
+            attempt,
+        )
+        await asyncio.sleep(RETRY_BACKOFF_S * attempt)
+
+    async def _get_static_json(self, path: str) -> Any:
+        """_get_json for data that only changes on a code republish.
+
+        Successes are cached per plugin instance (= per Lambda container)
+        for STATIC_CACHE_TTL_S; failures are never cached.
+        """
+        now = time.monotonic()
+        hit = self._static_cache.get(path)
+        if hit and hit[0] > now:
+            return hit[1]
+        data = await self._get_json(path)
+        self._static_cache[path] = (now + STATIC_CACHE_TTL_S, data)
+        return data
 
     async def _search(self, query: str, page: int) -> Dict[str, Any]:
         return await self._get_json(
@@ -631,7 +852,7 @@ class EcodePlugin(MCPPlugin):
         not available for this customer (the endpoint is absent from the older
         OpenAPI spec, so treat 404 as 'use structure instead')."""
         try:
-            return await self._get_json(self._cust_path("/code/toc"))
+            return await self._get_static_json(self._cust_path("/code/toc"))
         except (EcodeAPIError, EcodeNotFoundError) as e:
             # A 404 here means the endpoint is absent for this customer, not
             # that the caller asked for the wrong thing -- so it is handled,
@@ -639,7 +860,11 @@ class EcodePlugin(MCPPlugin):
             # matching the message, which is what this used to do.
             if e.status_code == 404:
                 logger.info("toc endpoint 404; falling back to structure ROOT")
-                data = await self._get_json(self._cust_path("/structure/ROOT"))
+                data = dict(
+                    await self._get_static_json(
+                        self._cust_path("/structure/ROOT")
+                    )
+                )
                 data["_fallback"] = "structure/ROOT (toc endpoint unavailable)"
                 return data
             raise
@@ -1039,7 +1264,9 @@ class EcodePlugin(MCPPlugin):
     # prose it exists to replace.
     _UNCAPPED = 10**9
 
-    def _format_content(self, data: Dict[str, Any]) -> tuple:
+    def _format_content(
+        self, data: Dict[str, Any], resolved_from: Optional[str] = None
+    ) -> tuple:
         guid = str(data.get("id") or data.get("guid", "") or "")
         ref = (data.get("number") or "").strip() or None
         title = (data.get("title") or "").strip() or None
@@ -1060,6 +1287,17 @@ class EcodePlugin(MCPPlugin):
         )
 
         entries: List[tuple] = []
+
+        if resolved_from:
+            # Say so: the caller passed a number, and a model chaining on
+            # this result should learn the guid for next time.
+            entries.append(
+                (
+                    CAVEAT_RESOLVED_FROM_SECTION_NUMBER,
+                    f"Section number {resolved_from!r} was resolved to guid "
+                    f"{guid} by exact match on its number.",
+                )
+            )
 
         # A section that is reserved, repealed or superseded is not operative
         # law, which changes how everything below it must be read. That makes

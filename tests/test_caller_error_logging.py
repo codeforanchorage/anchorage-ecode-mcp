@@ -286,13 +286,37 @@ class TestPluginCallerInput:
         assert result.success is False
         assert "search_code" in result.error_message
 
+    @staticmethod
+    def _search_without_exact_match(plugin):
+        """Search finds only sections that CITE the number, none that IS it.
+
+        A section number is now resolved via search; this is the case that
+        still has to come back as a caller error.
+        """
+        plugin.client = MagicMock()
+        plugin.client.get = AsyncMock(
+            return_value=httpx.Response(
+                status_code=200,
+                json={
+                    "totalResultCount": 1,
+                    "results": [
+                        {"id": "49420252", "number": "§ 21.03.040",
+                         "type": "section", "pdf": False}
+                    ],
+                },
+                request=httpx.Request("GET", "https://api.ecode360.com/v1/x"),
+            )
+        )
+
     @pytest.mark.asyncio
     async def test_section_number_as_guid_is_named_as_such(self, plugin):
         """The predicted failure: a model passes the section NUMBER.
 
         Prod turned this into an opaque upstream 404 with a percent-encoded
-        path in the message.
+        path in the message. Numbers that resolve are now accepted; one that
+        does not must still be named as a number and point at search_code.
         """
+        self._search_without_exact_match(plugin)
         for bad in ("§ 21.05.010", "21.05.010"):
             result = await plugin.execute_tool("get_section", {"guid": bad})
             assert result.success is False, bad
@@ -330,6 +354,7 @@ class TestPluginCallerInput:
     async def test_caller_error_logs_warning_without_traceback(
         self, plugin, caplog
     ):
+        self._search_without_exact_match(plugin)
         with caplog.at_level(logging.WARNING):
             await plugin.execute_tool("get_section", {"guid": "21.05.010"})
 
