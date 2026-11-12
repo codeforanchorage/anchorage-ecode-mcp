@@ -204,15 +204,28 @@ except Exception as e:
     check("bad page names the argument and the value", False, repr(e))
 
 try:
-    r = call_tool("get_section", {"guid": "21.05.010"})
+    r = call_tool("get_section", {"guid": "99.99.999"})
     msg = text_of(r)
     check(
-        "section number as guid is named as such",
+        "unknown section number is named as such",
         "section NUMBER" in msg and "search_code" in msg,
         msg[:70],
     )
 except Exception as e:
-    check("section number as guid is named as such", False, repr(e))
+    check("unknown section number is named as such", False, repr(e))
+
+try:
+    r = call_tool("get_section", {"guid": "§ 21.05.010"})
+    sc = structured_of(r) or {}
+    codes = [c.get("code") for c in sc.get("caveats", [])]
+    check(
+        "section number resolves to its guid",
+        sc.get("guid") == "49422044"
+        and "resolved_from_section_number" in codes,
+        f"guid={sc.get('guid')} caveats={codes}",
+    )
+except Exception as e:
+    check("section number resolves to its guid", False, repr(e))
 
 
 # ── 3. tool metadata ───────────────────────────────────────────────────────
