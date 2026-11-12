@@ -268,6 +268,52 @@ TOC_OUTPUT_SCHEMA = {
 }
 
 
+# Customer (code library) metadata. Every key is always present; a value the
+# upstream omits is null, never a missing key. Types are left wide where the
+# API has never been observed to commit to one (population, pdfOnly).
+CUSTOMER_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "customer_id": {"type": ["string", "null"]},
+        "name": {"type": ["string", "null"]},
+        "short_name": {"type": ["string", "null"]},
+        "state": {"type": ["string", "null"]},
+        "government_type": {"type": ["string", "null"]},
+        "counties": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+        },
+        "population": {"type": ["integer", "string", "null"]},
+        "last_updated": {
+            "type": ["string", "null"],
+            "description": (
+                "Date the published code was last updated on eCode360 "
+                "(YYYY-MM-DD as returned). Ordinances adopted after this "
+                "date may not be reflected in the code text yet."
+            ),
+        },
+        "pdf_only": {"type": ["boolean", "string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "summary": {"type": "string"},
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": [
+        "customer_id",
+        "name",
+        "short_name",
+        "state",
+        "government_type",
+        "counties",
+        "population",
+        "last_updated",
+        "pdf_only",
+        "url",
+        "summary",
+        "caveats",
+    ],
+}
+
+
 class EcodeAPIError(RuntimeError):
     """An eCode360 API call failed for a reason that is not the caller's.
 
@@ -300,7 +346,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -497,9 +543,12 @@ class EcodePlugin(MCPPlugin):
                 name="get_customer_info",
                 description=(
                     f"Get metadata about {city}'s code library: official name, "
-                    "state, government type, last-updated date, and public URL."
+                    "state, government type, last-updated date, and public URL. "
+                    "The last-updated date says how current the published "
+                    "code text is."
                 ),
                 input_schema={"type": "object", "properties": {}},
+                output_schema=CUSTOMER_OUTPUT_SCHEMA,
                 annotations=read_only,
             ),
         ]
@@ -576,7 +625,7 @@ class EcodePlugin(MCPPlugin):
 
             if tool_name == "get_customer_info":
                 data = await self._get_static_json(self._cust_path(""))
-                return self._ok(self._format_customer(data))
+                return self._ok(*self._format_customer(data))
 
             return self._err(f"Unknown tool: {tool_name}")
 
@@ -1402,24 +1451,76 @@ class EcodePlugin(MCPPlugin):
                 parts.append(self._render_content_node(child, depth + 1, budget))
         return "\n".join(p for p in parts if p)
 
-    def _format_customer(self, data: Dict[str, Any]) -> str:
+    def _format_customer(self, data: Dict[str, Any]) -> tuple:
         results = data.get("results", data) if isinstance(data, dict) else {}
         if not isinstance(results, dict):
             results = {}
+
+        def val(key: str) -> Any:
+            # "" means absent in this API (govsubtype, mapUrl); report null.
+            v = results.get(key)
+            return None if v == "" else v
+
+        counties = results.get("counties")
+        if isinstance(counties, list):
+            counties = [str(c) for c in counties if c not in (None, "")]
+        else:
+            counties = None
+        population = val("population")
+        if not isinstance(population, (int, str)) or isinstance(
+            population, bool
+        ):
+            population = None
+        pdf_only = val("pdfOnly")
+        if not isinstance(pdf_only, (bool, str)):
+            pdf_only = None
+
+        def text(key: str) -> Optional[str]:
+            v = val(key)
+            return None if v is None else str(v)
+
+        structured = {
+            "customer_id": text("id"),
+            "name": text("name"),
+            "short_name": text("shortName"),
+            "state": text("state"),
+            "government_type": text("govtype"),
+            "counties": counties or None,
+            "population": population,
+            "last_updated": text("updatedDate"),
+            "pdf_only": pdf_only,
+            "url": text("url"),
+        }
+
         fields = [
-            ("Name", results.get("name")),
-            ("Short name", results.get("shortName")),
-            ("Customer ID", results.get("id")),
-            ("State", results.get("state")),
-            ("Government type", results.get("govtype")),
-            ("Population", results.get("population")),
-            ("Last updated", results.get("updatedDate")),
-            ("PDF only", results.get("pdfOnly")),
-            ("URL", results.get("url")),
+            ("Name", structured["name"]),
+            ("Short name", structured["short_name"]),
+            ("Customer ID", structured["customer_id"]),
+            ("State", structured["state"]),
+            ("Government type", structured["government_type"]),
+            (
+                "Counties",
+                ", ".join(counties) if counties else None,
+            ),
+            ("Population", population),
+            ("Last updated", structured["last_updated"]),
+            ("PDF only", pdf_only),
+            ("URL", structured["url"]),
         ]
-        return "\n".join(
-            f"{label}: {value}" for label, value in fields if value not in (None, "")
+        text_out = "\n".join(
+            f"{label}: {value}" for label, value in fields if value is not None
         )
+        summary = (
+            f"{structured['name'] or structured['customer_id'] or 'Code library'}"
+            + (
+                f", code last updated {structured['last_updated']}."
+                if structured["last_updated"]
+                else "."
+            )
+        )
+        structured["summary"] = summary
+        structured["caveats"] = []
+        return text_out, structured
 
     # ── Small utilities ─────────────────────────────────────────────────
 
