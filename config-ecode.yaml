@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.3.0"
+server_version: "1.4.1"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -14,9 +14,20 @@ instructions: |
   ecode360.com link. Do not rely on memory for the text of the code.
 
   Workflow:
-  1. search_code("<topic or phrase>") to find relevant sections. Each result
-     has a `guid`, a reference number (e.g. § 21.05.010), and a snippet.
-     Page through with page=1, 2, … if needed.
+  1. search_code(query) to find relevant sections. Each result has a
+     `guid`, a reference number (e.g. § 21.05.010), and a snippet. Page
+     through with page=1, 2, … if needed.
+     Terms written side by side are matched with OR, so a list of words or
+     phrases matches every section containing ANY of them -- often
+     hundreds. Write precise queries by default: quote exact phrases, join
+     terms that must all appear with AND (or +term), exclude with NOT.
+     Parentheses group; proximity ("a b"~3) is NOT supported.
+     Example: "snow" AND "sidewalk" AND "occupant" -> 4 sections, led by
+     § 24.80.090; the same three terms without AND -> 254.
+     If AND returns too few, drop the least essential term. If a search
+     returns nothing, the code does not contain that text -- the rule may
+     be state law, repealed, or worded differently; broaden the words, put
+     OR between synonyms, or browse the table of contents.
   2. get_section(guid) to read the FULL text of a section before quoting or
      summarizing it. A known section number (e.g. "21.05.010") also works
      in place of the guid. Quote the controlling language; don't paraphrase legal

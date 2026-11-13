@@ -111,6 +111,53 @@ CAVEAT_SECTION_NOT_IN_FORCE = "section_not_in_force"
 CAVEAT_NODE_HAS_NO_CHILDREN = "node_has_no_children"
 CAVEAT_TOC_ENDPOINT_UNAVAILABLE = "toc_endpoint_unavailable"
 CAVEAT_RESOLVED_FROM_SECTION_NUMBER = "resolved_from_section_number"
+CAVEAT_TERMS_OR_COMBINED = "terms_or_combined"
+CAVEAT_NO_MATCH_IN_CODE = "no_match_in_code"
+CAVEAT_STATE_LAW_NAMED = "state_law_named"
+
+# ── Search-syntax guidance ──────────────────────────────────────────────
+#
+# Verified live against AN6998 on 2026-11-13: eCode360 joins space-
+# separated terms with OR ('"liable in damages" municipality' -> 2404, the
+# same as 'municipality' alone), while AND / and / + require a term (-> 1).
+# NOT / not / - exclude, parentheses group, a trailing * is a wildcard, and
+# title:word matches section titles. Proximity ("a b"~3) is NOT supported:
+# the ~N is ignored and the phrase must match exactly ("shall not liable"~2
+# -> 0 although "shall not be liable" -> 6).
+#
+# The server never rewrites a query; it only says when OR has probably
+# flooded the result set, and only for a query with no AND / + / NOT at all
+# -- one that already uses an operator was written deliberately.
+OR_CAVEAT_MIN_TOTAL = 200
+OR_CAVEAT_MIN_TERMS = 2
+# How many of the caller's terms the suggested AND query uses, in the order
+# the caller wrote them. Measured on the attorney queries (2026-11-13): the
+# first two ANDed returned results for 4 of 5, while ANDing all of them, or
+# the "most specific" (longest) phrases, returned 0 for most.
+OR_CAVEAT_SUGGEST_TERMS = 2
+
+# One search token: an optionally +/- prefixed, optionally field-qualified
+# quoted phrase (with any ~N suffix), a parenthesis, or a bare word.
+_QUERY_TOKEN_RE = re.compile(
+    r'[+-]?(?:\w+:)?"[^"]*"(?:~\d+)?|[()]|[^\s()"]+'
+)
+_QUERY_OPERATORS = frozenset({"and", "or", "not", "&&", "||"})
+# Operators that narrow a result set. Lowercase works too (verified).
+_NARROWING_OPERATORS = frozenset({"and", "not", "&&"})
+
+# A query that names state law. Alaska Statutes are not part of the
+# municipal code, so an empty result for one of these deserves a pointer to
+# how the code actually refers to them (by citation: "AS 23.40" finds
+# § 3.30.050). `AS` is matched case-sensitively so ordinary "as 2" does not
+# trip it.
+STATE_LAW_RE = re.compile(
+    r"\bAS\s?\d|(?i:\bAlaska\s+Statute"
+    r"|\bPublic\s+Employment\s+Relations\s+Act\b)"
+)
+# Named state acts whose citation is known, so the hint can be concrete.
+STATE_LAW_CITATIONS = {
+    "public employment relations act": "AS 23.40",
+}
 
 # Words that, in a section's NUMBER/TITLE, mean the body is not operative
 # law. Checked against the title only: "repealed" appears in the body of
@@ -346,7 +393,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -453,19 +500,45 @@ class EcodePlugin(MCPPlugin):
             ToolDefinition(
                 name="search_code",
                 description=(
-                    f"Full-text search of {city}'s municipal code. Returns up to 20 "
-                    "matching sections per page, each with its title, reference "
-                    "number, a highlighted snippet, and a guid. Use the guid with "
-                    "get_section to read the full text. Supports eCode360 advanced "
-                    'syntax, e.g. proximity: "city council"~3. Page through results '
-                    "with the page argument (0-indexed)."
+                    f"Full-text search of {city}'s municipal code. Returns up "
+                    "to 20 matching sections per page, each with its title, "
+                    "section number, a highlighted snippet and a guid; pass "
+                    "the guid to get_section to read the full text. Page "
+                    "through results with `page` (0-indexed).\n\n"
+                    "QUERY SYNTAX: terms written side by side are matched "
+                    "with OR, so a list of words or phrases matches every "
+                    "section containing ANY of them -- often hundreds or "
+                    "thousands. Write precise queries by default: quote "
+                    "exact phrases, join terms that must all appear with "
+                    "AND (or put + before each), and use NOT (or -term) to "
+                    "exclude one. Parentheses group, e.g. "
+                    '("notice of claim" OR "claim for damages") AND '
+                    "municipality; a trailing * is a wildcard (liab*); "
+                    "title:word matches section titles. Proximity search "
+                    '("a b"~3) is NOT supported -- the ~N is ignored and '
+                    "the phrase must match exactly.\n\n"
+                    'Example: "snow" AND "sidewalk" AND "occupant" returns '
+                    "4 sections, led by the snow-removal duty in "
+                    '§ 24.80.090; "snow" "sidewalk" "occupant" (OR-ed) '
+                    "returns hundreds. If AND returns too few, drop the "
+                    "least essential term rather than reverting to a bag of "
+                    "words.\n\n"
+                    "No results means this code does not contain that "
+                    "text, which can itself be the answer (the rule may be "
+                    "state law, repealed, or worded differently); broaden "
+                    "the words or browse with get_table_of_contents before "
+                    "concluding."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Search term or advanced-syntax query",
+                            "description": (
+                                "An exact phrase in double quotes, or terms "
+                                "joined with AND. Bare space-separated words "
+                                "are OR'd."
+                            ),
                         },
                         "page": {
                             "type": "integer",
@@ -1012,6 +1085,11 @@ class EcodePlugin(MCPPlugin):
             )
         else:
             summary = f"No results for query {query!r}."
+            if total_count == 0:
+                # Zero is a complete count -- the search ran and matched
+                # nothing. Say what that does and does not mean; models (and
+                # their users) otherwise read it as "no such law exists".
+                entries.extend(self._no_match_caveats(query))
 
         caveats, caveat_lines = self._caveats(entries)
         return "\n".join([summary] + caveat_lines), {
@@ -1121,6 +1199,10 @@ class EcodePlugin(MCPPlugin):
                 )
             )
 
+        or_caveat = self._or_flood_caveat(query, total_count)
+        if or_caveat:
+            entries.append(or_caveat)
+
         caveats, caveat_lines = self._caveats(entries)
         lines.extend(caveat_lines)
 
@@ -1136,6 +1218,96 @@ class EcodePlugin(MCPPlugin):
             "rows": rows,
             "caveats": caveats,
         }
+
+    @staticmethod
+    def _query_terms(query: str) -> Tuple[List[str], bool]:
+        """(the query's search terms, whether it uses AND / + / NOT).
+
+        A term is a quoted phrase or a bare word; parentheses and OR are
+        structure, not terms. Any narrowing operator means the caller
+        already chose how terms combine.
+        """
+        terms: List[str] = []
+        narrowed = False
+        for tok in _QUERY_TOKEN_RE.findall(query or ""):
+            if tok in ("(", ")"):
+                continue
+            low = tok.lower()
+            if low in _QUERY_OPERATORS:
+                narrowed = narrowed or low in _NARROWING_OPERATORS
+                continue
+            if tok.startswith(("+", "-")) and len(tok) > 1:
+                narrowed = True
+            terms.append(tok)
+        return terms, narrowed
+
+    def _or_flood_caveat(
+        self, query: str, total_count: Optional[int]
+    ) -> Optional[tuple]:
+        if total_count is None or total_count < OR_CAVEAT_MIN_TOTAL:
+            return None
+        terms, narrowed = self._query_terms(query)
+        if narrowed or len(terms) < OR_CAVEAT_MIN_TERMS:
+            return None
+        # A suggestion in the message only -- the query that ran is the
+        # caller's, unmodified. Only the first few terms: ANDing every term
+        # of a long query usually returns nothing (the attorney's 6-term
+        # notice-of-claim query -> 0), while its first two -> 25 with
+        # § 1.50.010 near the top.
+        suggestion = " AND ".join(terms[:OR_CAVEAT_SUGGEST_TERMS])
+        more = len(terms) > OR_CAVEAT_SUGGEST_TERMS
+        return (
+            CAVEAT_TERMS_OR_COMBINED,
+            f"Terms in this query are matched with OR, so {total_count} "
+            "sections matched. To require terms, join them with AND, e.g. "
+            f"{suggestion}"
+            + (
+                ", then add more terms with AND to narrow further -- "
+                "requiring every term at once often returns nothing."
+                if more
+                else "."
+            )
+            + " This is guidance, not an error.",
+        )
+
+    def _no_match_caveats(self, query: str) -> List[tuple]:
+        cfg = self.plugin_config
+        city = cfg.city_name if cfg else "the municipality"
+        library = cfg.customer_id if cfg else "?"
+        entries: List[tuple] = [
+            (
+                CAVEAT_NO_MATCH_IN_CODE,
+                "This exact text does not appear in the published "
+                f"municipal code of the {city} (eCode360 library "
+                f"{library}). That can be a real answer: the rule may be "
+                "state law (Alaska Statutes / Alaska Administrative Code), "
+                "in a repealed chapter, or worded differently here. Next "
+                "steps: try fewer or broader words, put OR between "
+                "synonyms, drop the quotes, or use browse_structure / "
+                "get_table_of_contents to look through the relevant title.",
+            )
+        ]
+        if STATE_LAW_RE.search(query or ""):
+            lowered = (query or "").lower()
+            cite = next(
+                (c for name, c in STATE_LAW_CITATIONS.items() if name in lowered),
+                None,
+            )
+            how = (
+                f'search for its citation, e.g. "{cite}"'
+                if cite
+                else 'search for the statute citation, e.g. "AS 23.40"'
+            )
+            entries.append(
+                (
+                    CAVEAT_STATE_LAW_NAMED,
+                    "This query names Alaska state law. The Alaska Statutes "
+                    "are not part of the municipal code, so their text is "
+                    "not searchable here. To find municipal sections that "
+                    f"refer to the statute, {how}.",
+                )
+            )
+        return entries
 
     @staticmethod
     def _as_int(value: Any, default: int = 0) -> int:
