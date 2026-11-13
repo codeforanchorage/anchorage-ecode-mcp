@@ -311,9 +311,26 @@ try:
         and valid,
         why or f"total_count={sc.get('total_count') if sc else None!r}",
     )
+    codes = [c.get("code") for c in (sc or {}).get("caveats", [])]
+    check("search miss: carries the no_match_in_code caveat",
+          "no_match_in_code" in codes, f"caveats={codes}")
 except Exception as e:
     check("search miss: structuredContent present, rows [], total_count 0",
           False, repr(e))
+
+try:
+    # Side-by-side terms are OR'd upstream; a flooded result set must say so.
+    r = call_tool(
+        "search_code",
+        {"query": '"sidewalk" "snow" "occupant"', "page": 0},
+    )
+    sc = structured_of(r)
+    codes = [c.get("code") for c in (sc or {}).get("caveats", [])]
+    check("OR-flooded search carries terms_or_combined",
+          "terms_or_combined" in codes,
+          f"total={sc.get('total_count') if sc else None} caveats={codes}")
+except Exception as e:
+    check("OR-flooded search carries terms_or_combined", False, repr(e))
 
 try:
     r = call_tool("search_code", {"query": "dog license", "page": 999})
