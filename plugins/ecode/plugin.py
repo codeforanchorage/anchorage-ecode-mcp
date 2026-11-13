@@ -130,6 +130,11 @@ CAVEAT_STATE_LAW_NAMED = "state_law_named"
 # -- one that already uses an operator was written deliberately.
 OR_CAVEAT_MIN_TOTAL = 200
 OR_CAVEAT_MIN_TERMS = 2
+# How many of the caller's terms the suggested AND query uses, in the order
+# the caller wrote them. Measured on the attorney queries (2026-11-13): the
+# first two ANDed returned results for 4 of 5, while ANDing all of them, or
+# the "most specific" (longest) phrases, returned 0 for most.
+OR_CAVEAT_SUGGEST_TERMS = 2
 
 # One search token: an optionally +/- prefixed, optionally field-qualified
 # quoted phrase (with any ~N suffix), a parenthesis, or a bare word.
@@ -1245,14 +1250,24 @@ class EcodePlugin(MCPPlugin):
         if narrowed or len(terms) < OR_CAVEAT_MIN_TERMS:
             return None
         # A suggestion in the message only -- the query that ran is the
-        # caller's, unmodified.
-        suggestion = " AND ".join(terms)
+        # caller's, unmodified. Only the first few terms: ANDing every term
+        # of a long query usually returns nothing (the attorney's 6-term
+        # notice-of-claim query -> 0), while its first two -> 25 with
+        # § 1.50.010 near the top.
+        suggestion = " AND ".join(terms[:OR_CAVEAT_SUGGEST_TERMS])
+        more = len(terms) > OR_CAVEAT_SUGGEST_TERMS
         return (
             CAVEAT_TERMS_OR_COMBINED,
             f"Terms in this query are matched with OR, so {total_count} "
-            "sections matched. To require all terms, join them with AND, "
-            f"e.g. {suggestion}. If that returns too few, drop the least "
-            "essential term. This is guidance, not an error.",
+            "sections matched. To require terms, join them with AND, e.g. "
+            f"{suggestion}"
+            + (
+                ", then add more terms with AND to narrow further -- "
+                "requiring every term at once often returns nothing."
+                if more
+                else "."
+            )
+            + " This is guidance, not an error.",
         )
 
     def _no_match_caveats(self, query: str) -> List[tuple]:

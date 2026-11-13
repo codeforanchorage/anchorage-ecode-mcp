@@ -111,8 +111,9 @@ class TestTermsOrCombined:
             if c["code"] == CAVEAT_TERMS_OR_COMBINED
         )
         assert "803 sections matched" in msg
-        # The suggestion is built from the caller's own terms.
-        assert "transportation AND right-of-way AND district" in msg
+        # The suggestion is the caller's first two terms, in their order.
+        assert "e.g. transportation AND right-of-way, then add" in msg
+        assert "AND district" not in msg
         assert msg in text, "caveat missing from the human-readable text"
 
     @pytest.mark.asyncio
@@ -128,10 +129,10 @@ class TestTermsOrCombined:
             c["message"] for c in sc["caveats"]
             if c["code"] == CAVEAT_TERMS_OR_COMBINED
         )
-        assert (
-            '"notice" AND "claim" AND "within" AND "days after" AND injury '
-            'AND "municipality shall not be liable"'
-        ) in msg
+        # ANDing all six returns 0 live; the first two return 25 with
+        # § 1.50.010 near the top.
+        assert 'e.g. "notice" AND "claim", then add more terms' in msg
+        assert '"within"' not in msg
         # Still a normal page of results with the usual paging caveat.
         assert CAVEAT_MORE_PAGES in _codes(sc)
         assert len(sc["rows"]) == 20
@@ -139,7 +140,13 @@ class TestTermsOrCombined:
     @pytest.mark.asyncio
     async def test_two_terms_qualify(self, plugin):
         sc, _ = await _search(plugin, '"sidewalk" "snow"', 250)
-        assert CAVEAT_TERMS_OR_COMBINED in _codes(sc)
+        msg = next(
+            c["message"] for c in sc["caveats"]
+            if c["code"] == CAVEAT_TERMS_OR_COMBINED
+        )
+        # Two terms: the suggestion is the whole query, with no "add more".
+        assert 'e.g. "sidewalk" AND "snow".' in msg
+        assert "add more terms" not in msg
 
     @pytest.mark.asyncio
     async def test_below_threshold_no_caveat(self, plugin):
