@@ -58,8 +58,9 @@ aws:
   # MUST stay under the API Gateway integration timeout (29s, a hard REST
   # limit that is not adjustable -- see terraform/aws/api_gateway.tf). Above
   # it the gateway returns 504 while the Lambda keeps running, billing
-  # compute the client already gave up on and holding one of only 10
-  # reserved-concurrency slots for the remainder. 28s guarantees the Lambda
+  # compute the client already gave up on and holding one of the capped
+  # reserved-concurrency slots (lambda_reserved_concurrency in prod.tfvars)
+  # for the remainder. 28s guarantees the Lambda
   # self-terminates first, so the timeout is attributed in Lambda's own
   # metrics and the slot frees at once.
   # NOTE: this value takes precedence over `lambda_timeout` in

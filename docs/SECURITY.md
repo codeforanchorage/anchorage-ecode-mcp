@@ -42,23 +42,26 @@ should read this before changing anything in `plugins/ecode/`,
 
 ### Network and request shape
 
-- **WAF per-IP rate limit** at 300 req / 5 min, blocking mode. This
+- **WAF per-IP rate limit** at 2000 req / 5 min, blocking mode. This
   deployment uses the **shared fleet ACL** (`use_shared_waf = true` in
   `prod.tfvars`), which keeps this MCP's limit as its own counter
   aggregated on `(IP, Host)`. The effective limit lives in mcp-stats'
   `fleet_waf_members` under the key `anchorage-ecode`, not in this repo.
-- **API Gateway throttling** at 5 rps / 10 burst with a 3000 req/day
-  quota (`terraform/aws/api_gateway.tf`, `prod.tfvars`).
+- **API Gateway throttling** at 15 rps / 30 burst, stage-wide via
+  `aws_api_gateway_method_settings` reading `api_rate_limit` /
+  `api_burst_limit` from `prod.tfvars`. The 3000 req/day usage-plan quota
+  applies only to API-key requests (the disabled `/mcp-gcc` route), not to
+  the unkeyed public `/mcp` route.
 - **AWS managed rule sets** (`KnownBadInputsRuleSet`, `CommonRuleSet`)
   in block mode.
-- **Lambda reserved concurrency** capped at 10 to bound cost and blast
+- **Lambda reserved concurrency** capped at 30 to bound cost and blast
   radius if WAF is bypassed (`main.tf`, `prod.tfvars`).
 - **HTTP method allowlist:** only `POST /mcp` and `OPTIONS /mcp` reach
   plugin code; `GET`/`DELETE` return 405 (`server/http_handler.py`).
 - **Timeout ladder** — API Gateway 29s (hard) > Lambda 28s > plugin
   httpx 20s. Beyond correctness this is a availability control: with the
-  Lambda above the gateway ceiling, a slow upstream held one of only ten
-  concurrency slots for up to 91 seconds after the client had already
+  Lambda above the gateway ceiling, a slow upstream held one of the (then
+  ten) concurrency slots for up to 91 seconds after the client had already
   received a 504. Pinned by `tests/test_deployment_config.py`.
 
 ### Cross-origin and DNS rebinding
