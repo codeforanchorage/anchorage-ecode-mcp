@@ -122,3 +122,45 @@ class TestConfigCopiesInSync:
         assert (
             CONFIG.read_bytes() == CONFIG_ECODE.read_bytes()
         ), "config.yaml and config-ecode.yaml have drifted apart"
+
+
+API_GATEWAY_TF = REPO_ROOT / "terraform" / "aws" / "api_gateway.tf"
+
+
+class TestCapacity:
+    """Throttle and concurrency settings that only bite under real load."""
+
+    def test_stage_throttle_reads_the_tfvars(self):
+        """The stage-wide method settings must use the tfvars, not literals.
+
+        They are the ONLY throttle on the unkeyed public /mcp route (the
+        usage plan applies to API-key requests). They were once hard-coded
+        to 10/5, so raising api_*_limit in prod.tfvars silently changed
+        nothing for real users.
+        """
+        text = API_GATEWAY_TF.read_text(encoding="utf-8")
+        block = re.search(
+            r'resource "aws_api_gateway_method_settings" "mcp_post" \{'
+            r".*?\n\}",
+            text,
+            re.DOTALL,
+        )
+        assert block, "aws_api_gateway_method_settings.mcp_post not found"
+        body = block.group(0)
+        assert re.search(
+            r"throttling_burst_limit\s*=\s*var\.api_burst_limit", body
+        )
+        assert re.search(
+            r"throttling_rate_limit\s*=\s*var\.api_rate_limit", body
+        )
+
+    def test_burst_at_least_rate(self):
+        assert _tfvar_int("api_burst_limit") >= _tfvar_int("api_rate_limit")
+
+    def test_reserved_concurrency_covers_burst(self):
+        """Every request the gateway admits in a burst should find a Lambda
+        slot; otherwise the overflow surfaces as Lambda throttles (502s)
+        rather than clean gateway 429s."""
+        assert _tfvar_int("lambda_reserved_concurrency") >= _tfvar_int(
+            "api_burst_limit"
+        )
