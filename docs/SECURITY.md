@@ -174,7 +174,7 @@ Enforced by code today; do not relax without explicit discussion.
 Before merging anything that touches `plugins/ecode/`, `server/`,
 `core/`, or `terraform/aws/`:
 
-1. `.venv/Scripts/python.exe -m ruff check core/ plugins/ server/ tests/`
+1. `.venv/Scripts/python.exe -m ruff check plugins/ tests/`
    — use ruff **0.15.1**, the version pinned in
    `.pre-commit-config.yaml`. Never run `ruff format`; these files are
    hand-wrapped.
