@@ -2,8 +2,8 @@
 
 Exercises the JSON-RPC surface, the transport rules, the caller-error codes
 and the structured-output contract end-to-end against a running deployment.
-Read-only; paces calls to stay under the API Gateway rate limit (5 rps) and
-the WAF per-IP cap (300/5min).
+Read-only; paces calls to stay under the API Gateway rate limit (15 rps) and
+the WAF per-IP cap (2000/5min).
 
     python scripts/smoke_prod.py                      # prod (custom domain)
     python scripts/smoke_prod.py http://localhost:8000/mcp
@@ -70,7 +70,7 @@ def raw(body, headers=None, method="POST"):
     except urllib.error.HTTPError as e:
         payload = e.read().decode()
         status = e.code
-    time.sleep(0.4)  # pace under 5 rps
+    time.sleep(0.4)  # pace well under 15 rps
     try:
         return status, json.loads(payload) if payload else None
     except json.JSONDecodeError:
