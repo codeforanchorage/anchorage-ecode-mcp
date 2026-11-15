@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Load config (OPENCONTEXT_CONFIG env var for tests; default config.yaml)
 _config_path = os.environ.get("OPENCONTEXT_CONFIG", "config.yaml")
-with open(_config_path) as f:
+with open(_config_path, encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 # Configure JSON logging - use pretty format for local development

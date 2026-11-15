@@ -7,7 +7,8 @@ This guide covers three ways to test your OpenContext server locally.
 Before testing:
 
 1. Create `config.yaml` from `config-example.yaml` and enable exactly one plugin
-2. Install dependencies: `pip install aiohttp`
+2. Install dependencies: `pip install -r requirements.txt` (this also installs
+   the `opencontext-core` package, which provides `core/` and `server/`)
 3. Start the server: `python3 scripts/local_server.py`
 
 The server runs at `http://localhost:8000/mcp`. Keep it running while you test.
@@ -110,9 +111,9 @@ asyncio.run(t())
 ## Unit Tests
 
 ```bash
-pip install pytest pytest-asyncio sqlparse
+pip install -r requirements.txt -r requirements-dev.txt
 pytest
-pytest tests/test_plugin_manager.py -v
+pytest tests/test_ecode_plugin.py -v
 pytest --cov=plugins
 ```
 
