@@ -175,6 +175,7 @@ class TestGetTools:
             "get_section",
             "get_sections",
             "find_definition",
+            "read_attachment",
             "get_customer_info",
         }
 
