@@ -132,6 +132,9 @@ class TestInitialization:
             mock_cls.return_value = client
             assert await plugin.initialize() is True
             assert plugin._initialized is True
+            # The Lambda adapter rebuilds the plugin on every invocation,
+            # so an upstream probe here is one eCode360 call per request.
+            client.get.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_missing_credentials_fails(self, ecode_config, monkeypatch):
@@ -142,20 +145,19 @@ class TestInitialization:
         assert plugin._initialized is False
 
     @pytest.mark.asyncio
-    async def test_bad_key_401_fails(self, ecode_config, monkeypatch):
-        monkeypatch.setenv("ECODE_API_KEY", "k")
-        monkeypatch.setenv("ECODE_API_SECRET", "s")
-        plugin = EcodePlugin(ecode_config)
-        err_resp = Mock(status_code=401, text="Unauthorized")
-        with patch("httpx.AsyncClient") as mock_cls:
-            client = AsyncMock()
-            client.get = AsyncMock(
-                side_effect=httpx.HTTPStatusError(
-                    "401", request=Mock(), response=err_resp
-                )
-            )
-            mock_cls.return_value = client
-            assert await plugin.initialize() is False
+    async def test_bad_key_surfaces_on_first_call(self, ecode_config):
+        """initialize() no longer probes, so a rejected key must be named
+        where it now appears: the first tool call."""
+        err_resp = httpx.Response(
+            status_code=403,
+            json={"message": "Forbidden"},
+            request=httpx.Request("GET", "https://api.ecode360.com/v1/x"),
+        )
+        plugin = _plugin_with_client(ecode_config, get_return=err_resp)
+        result = await plugin.execute_tool("get_customer_info", {})
+        assert result.success is False
+        assert "credentials" in result.error_message
+        assert "ECODE_API_KEY" in result.error_message
 
 
 # ── Tool definitions ───────────────────────────────────────────────────
@@ -171,6 +173,8 @@ class TestGetTools:
             "get_table_of_contents",
             "browse_structure",
             "get_section",
+            "get_sections",
+            "find_definition",
             "get_customer_info",
         }
 

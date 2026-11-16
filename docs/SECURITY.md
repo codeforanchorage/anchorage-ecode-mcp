@@ -146,7 +146,7 @@ Enforced by code today; do not relax without explicit discussion.
    config validation (`core/validators.py`) and at runtime
    (`PluginManager.load_plugins()`). Multiple enabled plugins is a hard
    error.
-2. **No write paths.** Every eCode360 call is a `GET`; all five tools
+2. **No write paths.** Every eCode360 call is a `GET`; all seven tools
    are annotated `readOnlyHint: true`. A tool that writes would be a
    security-review-required change.
 3. **The upstream host and library are fixed by config, never by a tool

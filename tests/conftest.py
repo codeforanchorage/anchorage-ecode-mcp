@@ -26,6 +26,23 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def clear_ecode_static_cache():
+    """Empty the plugin's module-level TOC / customer cache around each test.
+
+    The cache is module-level so it survives the per-invocation plugin
+    rebuild on Lambda; in tests that same property would let one test's
+    table of contents answer another's.
+    """
+    from plugins.ecode import plugin as ecode_plugin
+
+    ecode_plugin._STATIC_CACHE.clear()
+    try:
+        yield
+    finally:
+        ecode_plugin._STATIC_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def reset_http_handler_globals():
     """Snapshot and restore ``server.http_handler``'s module globals.
 

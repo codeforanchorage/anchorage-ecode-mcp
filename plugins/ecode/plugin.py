@@ -86,6 +86,37 @@ _call_deadline: contextvars.ContextVar[Optional[float]] = (
 # Lambda container. An hour bounds how stale a republish can look.
 STATIC_CACHE_TTL_S = 3600.0
 
+# (base_url, path) -> (expires_at monotonic, json). MODULE level on purpose:
+# the Lambda adapter shuts the plugin down and builds a new instance on
+# every invocation, so a cache held on the instance never saw a second
+# request (18 table-of-contents calls -> 18 upstream fetches over 14 days
+# of prod logs, 2026-11-15). The module outlives the instance for as long
+# as the container stays warm. Plain data only -- nothing here is bound to
+# an event loop. The key carries base_url and the path carries the
+# customer id, so two differently-configured plugins cannot share entries.
+_STATIC_CACHE: Dict[Tuple[str, str], Tuple[float, Any]] = {}
+
+# ── Batch reads and definitions ─────────────────────────────────────────
+#
+# get_sections exists because models read a chapter one get_section at a
+# time (79 bursts in 14 days of prod logs, the longest 19 calls), each a
+# separate Lambda invocation.
+MAX_BATCH_SECTIONS = 10
+# Upstream requests in flight at once for one tool call.
+BATCH_CONCURRENCY = 5
+# Per-section cap on the rendered markdown in a batch. Lower than
+# MAX_CONTENT_CHARS because up to ten bodies share one response; the full
+# text is still in structuredContent.
+BATCH_SECTION_CHARS = 8000
+
+# eCode360 publishes each defined term as its own node, numbered as the
+# defining section plus an index in braces: "8.05.015A{9}", titled with the
+# term in quotes. title:"term" finds them (verified live 2026-11-15).
+DEFINITION_NUMBER_RE = re.compile(r"^(.*)\{\d+\}$")
+MAX_DEFINITIONS = 8
+MAX_TERM_CHARS = 100
+_QUOTE_CHARS_RE = re.compile('["“”]')
+
 # ── Structured output ───────────────────────────────────────────────────
 #
 # A declared outputSchema is BINDING: the MCP spec says servers MUST return
@@ -114,6 +145,12 @@ CAVEAT_RESOLVED_FROM_SECTION_NUMBER = "resolved_from_section_number"
 CAVEAT_TERMS_OR_COMBINED = "terms_or_combined"
 CAVEAT_NO_MATCH_IN_CODE = "no_match_in_code"
 CAVEAT_STATE_LAW_NAMED = "state_law_named"
+CAVEAT_SECTION_UNAVAILABLE = "section_unavailable"
+CAVEAT_DUPLICATE_REQUESTS = "duplicate_requests_merged"
+CAVEAT_NO_DEFINITION_FOUND = "no_definition_found"
+CAVEAT_MULTIPLE_DEFINITIONS = "multiple_definitions"
+CAVEAT_MORE_DEFINITIONS = "more_definitions_available"
+CAVEAT_DEFINITION_TEXT_FROM_SNIPPET = "definition_text_from_snippet"
 
 # ── Search-syntax guidance ──────────────────────────────────────────────
 #
@@ -287,6 +324,98 @@ SECTION_OUTPUT_SCHEMA = {
     ],
 }
 
+SECTIONS_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "sections": {
+            "type": "array",
+            "description": (
+                "One entry per requested section, in request order. An "
+                "entry with found=false carries `error` and no text; the "
+                "others carry the same fields get_section returns."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "requested": {
+                        "type": "string",
+                        "description": "The guid or number as it was passed.",
+                    },
+                    "found": {"type": "boolean"},
+                    "error": {"type": ["string", "null"]},
+                    "guid": {"type": ["string", "null"]},
+                    "ref": {"type": ["string", "null"]},
+                    "title": {"type": ["string", "null"]},
+                    "url": {"type": ["string", "null"]},
+                    "text": {
+                        "type": ["string", "null"],
+                        "description": "Full section body, NOT clipped.",
+                    },
+                    "has_attachment": {"type": "boolean"},
+                    "is_pdf": {"type": "boolean"},
+                    "caveats": _CAVEAT_SCHEMA,
+                },
+                "required": ["requested", "found", "error", "caveats"],
+            },
+        },
+        "summary": {"type": "string"},
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": ["sections", "summary", "caveats"],
+}
+
+DEFINITION_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "term": {"type": "string"},
+        "total_count": {
+            "type": ["integer", "null"],
+            "description": (
+                "Nodes whose TITLE matches the term, across all pages -- "
+                "definitions and ordinary sections alike. Not the number "
+                "of definitions."
+            ),
+        },
+        "definitions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "guid": {"type": "string"},
+                    "term": {
+                        "type": ["string", "null"],
+                        "description": "The defined term as the code writes it.",
+                    },
+                    "exact_match": {
+                        "type": "boolean",
+                        "description": (
+                            "The defined term equals the requested term "
+                            "(ignoring case, quotes and a trailing period). "
+                            "false means a related term matched, e.g. "
+                            "'Motor vehicles' for 'vehicle'."
+                        ),
+                    },
+                    "defined_in": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Number of the section that contains the "
+                            "definition (e.g. '9.04.010'); pass it to "
+                            "get_section to read which chapter or title "
+                            "the definition applies to."
+                        ),
+                    },
+                    "text": {"type": ["string", "null"]},
+                    "url": {"type": "string"},
+                },
+                "required": ["guid", "exact_match", "url"],
+            },
+        },
+        "summary": {"type": "string"},
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": ["term", "total_count", "definitions", "summary", "caveats"],
+}
+
 # The outline tools return a tree, not a table. Forcing chapters ->
 # articles -> sections into `rows` would throw away the parent/child
 # relation that is the entire reason to call them.
@@ -393,14 +522,12 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self.plugin_config: Optional[EcodePluginConfig] = None
         self.client: Optional[httpx.AsyncClient] = None
-        # path -> (expires_at monotonic, json). See STATIC_CACHE_TTL_S.
-        self._static_cache: Dict[str, Tuple[float, Any]] = {}
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -428,11 +555,14 @@ class EcodePlugin(MCPPlugin):
                 timeout=self.plugin_config.timeout,
             )
 
-            # Verify connectivity + credentials against the (cheap) customer
-            # metadata endpoint. 401/403 here means a bad key or no access.
-            resp = await self.client.get(self._cust_path(""))
-            resp.raise_for_status()
-
+            # Deliberately NO upstream call here. The Lambda adapter builds
+            # a new plugin on every invocation, so a credential probe in
+            # initialize() ran once per REQUEST -- ping, tools/list and the
+            # fleet probe included: 88% of all eCode360 calls over 14 days
+            # of prod logs, adding a median 185 ms (p95 2.5 s) to every
+            # response (2026-11-15). Bad credentials now surface on the
+            # first tool call instead, as a 401/403 that _get_json names
+            # and logs as an error; health_check() still probes on demand.
             self._initialized = True
             logger.info(
                 "eCode plugin initialized for %s (customer %s)",
@@ -441,20 +571,6 @@ class EcodePlugin(MCPPlugin):
             )
             return True
 
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            hint = (
-                " (check ECODE_API_KEY / ECODE_API_SECRET)"
-                if status in (401, 403)
-                else ""
-            )
-            logger.error(
-                "eCode plugin init failed: HTTP %s%s: %s",
-                status,
-                hint,
-                e.response.text[:500],
-            )
-            return False
         except Exception as e:
             logger.error("Failed to initialize eCode plugin: %s", e, exc_info=True)
             return False
@@ -488,6 +604,8 @@ class EcodePlugin(MCPPlugin):
         "get_table_of_contents": "Table of Contents",
         "browse_structure": "Browse Structure",
         "get_section": "Get Section",
+        "get_sections": "Get Sections (Batch)",
+        "find_definition": "Find Definition",
         "get_customer_info": "Customer Info",
     }
 
@@ -613,6 +731,73 @@ class EcodePlugin(MCPPlugin):
                 annotations=read_only,
             ),
             ToolDefinition(
+                name="get_sections",
+                description=(
+                    "Retrieve the full text of SEVERAL code sections in one "
+                    f"call (up to {MAX_BATCH_SECTIONS}). Use this instead of "
+                    "repeated get_section calls whenever you need more than "
+                    "one section -- e.g. a rule plus the definitions and "
+                    "penalty sections it relies on, or the sections of a "
+                    "chapter. Each entry is a guid or a section number "
+                    "('21.05.010'), exactly as get_section accepts. Results "
+                    "come back in request order; a section that cannot be "
+                    "found is reported in place (found=false) without "
+                    "failing the others."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "sections": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": MAX_BATCH_SECTIONS,
+                            "description": (
+                                "Guids (e.g. '49422044') and/or section "
+                                "numbers (e.g. '21.05.010'), "
+                                f"1 to {MAX_BATCH_SECTIONS} of them"
+                            ),
+                        },
+                    },
+                    "required": ["sections"],
+                },
+                output_schema=SECTIONS_OUTPUT_SCHEMA,
+                annotations=read_only,
+            ),
+            ToolDefinition(
+                name="find_definition",
+                description=(
+                    "Look up how the code DEFINES a term. Returns the "
+                    "published definition(s) -- the defined term, its full "
+                    "text, and the section it is defined in. Use this "
+                    "instead of search_code for 'what does X mean' or "
+                    "'how is X defined' questions: searching for "
+                    "'\"X\" means' matches thousands of sections or none. "
+                    "The same term is often defined separately in several "
+                    "titles (traffic, zoning, building...), and each "
+                    "definition applies only within its own chapter or "
+                    "title, so report the one for the area of law the "
+                    "question concerns and say which section it comes "
+                    "from. Pass the bare term, singular, without quotes "
+                    "(e.g. 'minor offense', 'vehicle')."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "term": {
+                            "type": "string",
+                            "description": (
+                                "The word or phrase whose definition you "
+                                "want, e.g. 'occupant'"
+                            ),
+                        },
+                    },
+                    "required": ["term"],
+                },
+                output_schema=DEFINITION_OUTPUT_SCHEMA,
+                annotations=read_only,
+            ),
+            ToolDefinition(
                 name="get_customer_info",
                 description=(
                     f"Get metadata about {city}'s code library: official name, "
@@ -682,18 +867,29 @@ class EcodePlugin(MCPPlugin):
                 return self._ok(*self._format_structure(node))
 
             if tool_name == "get_section":
-                ref = self._section_ref(arguments.get("guid"))
-                resolved_from = None
-                if ref:
-                    guid = await self._resolve_section_number(ref)
-                    resolved_from = ref
-                else:
-                    guid = self._guid_arg(arguments)
-                data = await self._get_json(
-                    self._cust_path(f"/code/content/{quote(guid, safe='')}")
+                data, resolved_from = await self._fetch_section(
+                    arguments.get("guid")
                 )
                 return self._ok(
                     *self._format_content(data, resolved_from=resolved_from)
+                )
+
+            if tool_name == "get_sections":
+                requested, merged = self._sections_arg(arguments)
+                outcomes = await self._fetch_sections(requested)
+                return self._ok(
+                    *self._format_sections(requested, outcomes, merged)
+                )
+
+            if tool_name == "find_definition":
+                term = self._term_arg(arguments)
+                data = await self._search(f'title:"{term}"', 0)
+                hits = self._definition_hits(data, term)
+                bodies = await self._fetch_definition_bodies(
+                    hits[:MAX_DEFINITIONS]
+                )
+                return self._ok(
+                    *self._format_definitions(term, data, hits, bodies)
                 )
 
             if tool_name == "get_customer_info":
@@ -780,6 +976,171 @@ class EcodePlugin(MCPPlugin):
                 "section and read its guid from the result."
             )
         return guid
+
+    @staticmethod
+    def _sections_arg(args: Dict[str, Any]) -> Tuple[List[str], int]:
+        """(distinct requested sections in order, how many repeats merged)."""
+        raw = args.get("sections")
+        if isinstance(raw, str):
+            # A model that has one section in hand often passes a bare
+            # string. That is unambiguous, so take it.
+            raw = [raw]
+        if not isinstance(raw, list) or not raw:
+            raise ToolInputError(
+                "sections is required -- pass a list of guids and/or "
+                "section numbers, e.g. ['21.05.010', '49422044']."
+            )
+        seen: List[str] = []
+        for item in raw:
+            if not isinstance(item, (str, int)) or isinstance(item, bool):
+                raise ToolInputError(
+                    "sections must be a list of strings (guids or section "
+                    f"numbers); got an entry of type {type(item).__name__}."
+                )
+            text = str(item).strip()
+            if not text:
+                raise ToolInputError(
+                    "sections contains an empty entry; each entry must be "
+                    "a guid or a section number."
+                )
+            if text not in seen:
+                seen.append(text)
+        if len(seen) > MAX_BATCH_SECTIONS:
+            raise ToolInputError(
+                f"sections accepts at most {MAX_BATCH_SECTIONS} entries per "
+                f"call (got {len(seen)}). Split the list across calls."
+            )
+        return seen, len(raw) - len(seen)
+
+    @staticmethod
+    def _term_arg(args: Dict[str, Any]) -> str:
+        raw = args.get("term")
+        # Quotes would break out of the title:"..." phrase this is placed
+        # in; the term is a phrase, never search syntax.
+        term = _QUOTE_CHARS_RE.sub("", raw if isinstance(raw, str) else "")
+        term = " ".join(term.split())
+        if not term:
+            raise ToolInputError(
+                "term is required -- pass the word or phrase whose "
+                "definition you want (e.g. 'minor offense')."
+            )
+        if len(term) > MAX_TERM_CHARS:
+            raise ToolInputError(
+                f"term must be a word or short phrase (at most "
+                f"{MAX_TERM_CHARS} characters, got {len(term)}). To search "
+                "for a sentence, use search_code."
+            )
+        return term
+
+    # ── Section fetching ────────────────────────────────────────────────
+
+    async def _fetch_section(
+        self, raw: Any
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """(content JSON, the section number it was resolved from or None).
+
+        `raw` is a guid or a section number, as get_section accepts.
+        """
+        ref = self._section_ref(raw)
+        if ref:
+            guid = await self._resolve_section_number(ref)
+        else:
+            guid = self._guid_arg({"guid": raw})
+        data = await self._get_json(
+            self._cust_path(f"/code/content/{quote(guid, safe='')}")
+        )
+        return data, ref
+
+    async def _fetch_sections(self, requested: List[str]) -> List[Any]:
+        """One outcome per request, in order: a (data, ref) pair or the
+        exception that request raised. Tasks inherit the call deadline (the
+        contextvar is copied into each), so the batch shares one budget."""
+        gate = asyncio.Semaphore(BATCH_CONCURRENCY)
+
+        async def one(raw: str) -> Any:
+            async with gate:
+                return await self._fetch_section(raw)
+
+        return await asyncio.gather(
+            *(one(raw) for raw in requested), return_exceptions=True
+        )
+
+    # ── Definitions ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _norm_term(text: Optional[str]) -> str:
+        cleaned = _QUOTE_CHARS_RE.sub("", text or "")
+        return " ".join(cleaned.split()).rstrip(".").lower()
+
+    def _definition_hits(
+        self, data: Dict[str, Any], term: str
+    ) -> List[Dict[str, Any]]:
+        """The search hits that are definition nodes, exact matches first.
+
+        A definition node is recognised by its number alone
+        ("9.04.010B{116}") -- search results type every hit as "code", so
+        `type` cannot tell a definition from a section whose title merely
+        contains the term.
+        """
+        want = self._norm_term(term)
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for hit in data.get("results", []) or []:
+            number = (hit.get("number") or "").strip()
+            match = DEFINITION_NUMBER_RE.match(number)
+            guid = str(hit.get("id") or "")
+            if not match or not GUID_RE.match(guid) or guid in seen:
+                continue
+            seen.add(guid)
+            defined = self._strip_html(hit.get("title", "")) or None
+            # "9.04.010B{116}" -> "9.04.010": the trailing capital is the
+            # subsection the definitions list sits in, which is not a
+            # section number get_section can resolve.
+            section = re.sub(r"^§\s*", "", match.group(1).strip())
+            section = re.sub(r"(?<=\d)[A-Z]$", "", section).strip()
+            out.append(
+                {
+                    "guid": guid,
+                    "term": defined,
+                    "exact_match": self._norm_term(defined) == want,
+                    "defined_in": section or None,
+                    "snippet": self._strip_html(hit.get("text") or "") or None,
+                }
+            )
+        # Stable: exact matches first, otherwise the API's own ranking.
+        out.sort(key=lambda d: not d["exact_match"])
+        return out
+
+    async def _fetch_definition_bodies(
+        self, hits: List[Dict[str, Any]]
+    ) -> List[Optional[str]]:
+        """Full text per definition, or None where the fetch failed.
+
+        The search snippet is elided mid-sentence, so the body is read from
+        the content endpoint. A failed fetch must not sink the lookup: the
+        caller falls back to the snippet and says so.
+        """
+        gate = asyncio.Semaphore(BATCH_CONCURRENCY)
+
+        async def one(guid: str) -> Optional[str]:
+            async with gate:
+                try:
+                    node = await self._get_json(
+                        self._cust_path(
+                            f"/code/content/{quote(guid, safe='')}"
+                        )
+                    )
+                except (EcodeAPIError, ToolInputError) as e:
+                    logger.warning(
+                        "definition body fetch failed for %s: %s", guid, e
+                    )
+                    return None
+                body = self._render_content_node(
+                    node, depth=0, budget=[self._UNCAPPED]
+                )
+                return body.strip() or None
+
+        return list(await asyncio.gather(*(one(h["guid"]) for h in hits)))
 
     # ── Section-number resolution ───────────────────────────────────────
 
@@ -917,6 +1278,18 @@ class EcodePlugin(MCPPlugin):
                 if status >= 500 and self._may_retry(attempt, started):
                     await self._backoff(attempt, path, f"HTTP {status}")
                     continue
+                if status in (401, 403):
+                    # Our credentials, not the caller's request. This is
+                    # where a bad or rotated key shows up now that
+                    # initialize() no longer probes.
+                    raise EcodeAPIError(
+                        f"eCode360 rejected this server's credentials "
+                        f"(HTTP {status}) for {path}: {detail}. This is a "
+                        "server configuration problem (check "
+                        "ECODE_API_KEY / ECODE_API_SECRET), not a problem "
+                        "with the request.",
+                        status,
+                    ) from e
                 suffix = f" after {attempt} attempt(s)" if attempt > 1 else ""
                 raise EcodeAPIError(
                     f"eCode API error (HTTP {status}) for {path}{suffix}: "
@@ -953,15 +1326,17 @@ class EcodePlugin(MCPPlugin):
     async def _get_static_json(self, path: str) -> Any:
         """_get_json for data that only changes on a code republish.
 
-        Successes are cached per plugin instance (= per Lambda container)
-        for STATIC_CACHE_TTL_S; failures are never cached.
+        Successes are cached in the module-level _STATIC_CACHE (= per warm
+        Lambda container, across plugin instances) for STATIC_CACHE_TTL_S;
+        failures are never cached.
         """
+        key = (self.plugin_config.base_url, path)
         now = time.monotonic()
-        hit = self._static_cache.get(path)
+        hit = _STATIC_CACHE.get(key)
         if hit and hit[0] > now:
             return hit[1]
         data = await self._get_json(path)
-        self._static_cache[path] = (now + STATIC_CACHE_TTL_S, data)
+        _STATIC_CACHE[key] = (now + STATIC_CACHE_TTL_S, data)
         return data
 
     async def _search(self, query: str, page: int) -> Dict[str, Any]:
@@ -1486,7 +1861,10 @@ class EcodePlugin(MCPPlugin):
     _UNCAPPED = 10**9
 
     def _format_content(
-        self, data: Dict[str, Any], resolved_from: Optional[str] = None
+        self,
+        data: Dict[str, Any],
+        resolved_from: Optional[str] = None,
+        max_chars: int = MAX_CONTENT_CHARS,
     ) -> tuple:
         guid = str(data.get("id") or data.get("guid", "") or "")
         ref = (data.get("number") or "").strip() or None
@@ -1501,7 +1879,7 @@ class EcodePlugin(MCPPlugin):
         # Render twice: once capped for the human block, once uncapped for
         # structuredContent.
         display_body = self._render_content_node(
-            data, depth=0, budget=[MAX_CONTENT_CHARS]
+            data, depth=0, budget=[max_chars]
         )
         full_body = self._render_content_node(
             data, depth=0, budget=[self._UNCAPPED]
@@ -1545,7 +1923,7 @@ class EcodePlugin(MCPPlugin):
             entries.append(
                 (
                     CAVEAT_RENDERED_TEXT_TRUNCATED,
-                    f"The text below is capped at {MAX_CONTENT_CHARS:,} "
+                    f"The text below is capped at {max_chars:,} "
                     f"characters ({len(full_body):,} in full). The complete "
                     f"body is in structuredContent.text, or fetch child "
                     f"guids individually with get_section.",
@@ -1578,6 +1956,198 @@ class EcodePlugin(MCPPlugin):
             "text": full_body,
             "has_attachment": has_attachment,
             "is_pdf": is_pdf,
+            "caveats": caveats,
+        }
+
+    def _format_sections(
+        self, requested: List[str], outcomes: List[Any], merged: int = 0
+    ) -> tuple:
+        """Render a batch. Raises if NOTHING could be read, so a batch that
+        failed outright is an error result rather than an empty success."""
+        failures = [o for o in outcomes if isinstance(o, BaseException)]
+        for exc in failures:
+            # Anything that is neither a caller mistake nor a named
+            # upstream failure is a bug here; never fold it into a row.
+            if not isinstance(exc, (ToolInputError, EcodeAPIError)):
+                raise exc
+        if len(failures) == len(outcomes):
+            for exc in failures:
+                # An upstream fault outranks caller mistakes: it is the
+                # one that needs a server-side look.
+                if not isinstance(exc, ToolInputError):
+                    raise exc
+            raise ToolInputError(
+                "None of the requested sections could be read: "
+                + " | ".join(
+                    f"{raw!r}: {exc}" for raw, exc in zip(requested, failures)
+                )
+            )
+
+        blocks: List[str] = []
+        sections: List[Dict[str, Any]] = []
+        entries: List[tuple] = []
+        for raw, outcome in zip(requested, outcomes):
+            if isinstance(outcome, BaseException):
+                message = str(outcome) or type(outcome).__name__
+                entries.append(
+                    (
+                        CAVEAT_SECTION_UNAVAILABLE,
+                        f"Requested section {raw!r} was not returned: "
+                        f"{message}",
+                    )
+                )
+                blocks.append(f"=== {raw} ===\n(not returned -- see note above)")
+                sections.append(
+                    {
+                        "requested": raw,
+                        "found": False,
+                        "error": message,
+                        "guid": None,
+                        "ref": None,
+                        "title": None,
+                        "url": None,
+                        "text": None,
+                        "has_attachment": False,
+                        "is_pdf": False,
+                        "caveats": [],
+                    }
+                )
+                continue
+            data, resolved_from = outcome
+            text, structured = self._format_content(
+                data,
+                resolved_from=resolved_from,
+                max_chars=BATCH_SECTION_CHARS,
+            )
+            blocks.append(f"=== {raw} ===\n{text}")
+            sections.append(
+                {"requested": raw, "found": True, "error": None, **structured}
+            )
+
+        if merged:
+            entries.append(
+                (
+                    CAVEAT_DUPLICATE_REQUESTS,
+                    f"{merged} repeated entr(y/ies) in the request were "
+                    "merged; each distinct section is returned once.",
+                )
+            )
+        found = sum(1 for s in sections if s["found"])
+        summary = f"{found} of {len(sections)} requested section(s) returned."
+        caveats, caveat_lines = self._caveats(entries)
+        text_out = "\n\n".join(["\n".join([summary] + caveat_lines)] + blocks)
+        return text_out, {
+            "sections": sections,
+            "summary": summary,
+            "caveats": caveats,
+        }
+
+    def _format_definitions(
+        self,
+        term: str,
+        data: Dict[str, Any],
+        hits: List[Dict[str, Any]],
+        bodies: List[Optional[str]],
+    ) -> tuple:
+        raw_total = data.get("totalResultCount")
+        total_count = (
+            self._as_int(raw_total) if raw_total is not None else None
+        )
+        max_pages = self._as_int(data.get("maxPages", 1), default=1)
+        shown = hits[: len(bodies)]
+
+        entries: List[tuple] = []
+        definitions: List[Dict[str, Any]] = []
+        lines: List[str] = []
+        from_snippet = 0
+        for i, (hit, body) in enumerate(zip(shown, bodies), 1):
+            text = body or hit["snippet"]
+            if not body:
+                from_snippet += 1
+            url = PUBLIC_URL.format(guid=hit["guid"])
+            where = (
+                f"§ {hit['defined_in']}" if hit["defined_in"] else "(unknown)"
+            )
+            related = "" if hit["exact_match"] else "  [related term]"
+            lines.append(f"{i}. {hit['term'] or '(untitled)'}{related}")
+            lines.append(f"   defined in: {where}   guid: {hit['guid']}")
+            if text:
+                lines.extend(f"   {ln}" for ln in text.splitlines())
+            lines.append(f"   {url}")
+            lines.append("")
+            definitions.append(
+                {
+                    "guid": hit["guid"],
+                    "term": hit["term"],
+                    "exact_match": hit["exact_match"],
+                    "defined_in": hit["defined_in"],
+                    "text": text,
+                    "url": url,
+                }
+            )
+
+        exact = sum(1 for d in definitions if d["exact_match"])
+        if not definitions:
+            summary = f"No published definition found for {term!r}."
+            entries.append(
+                (
+                    CAVEAT_NO_DEFINITION_FOUND,
+                    f"The code has no separately published definition "
+                    f"titled {term!r}. That does not mean the term is "
+                    "undefined: it may be defined inline in a section, "
+                    "under a different form of the word (try the singular "
+                    "or a shorter phrase), or by state law. Next step: "
+                    f'search_code with "{term}" AND means, or '
+                    f'title:Definitions AND "{term}".',
+                )
+            )
+        else:
+            summary = (
+                f"{len(definitions)} definition(s) for {term!r}"
+                f" ({exact} exact match(es))."
+            )
+            if len(definitions) > 1:
+                entries.append(
+                    (
+                        CAVEAT_MULTIPLE_DEFINITIONS,
+                        "This term is defined in more than one place. Each "
+                        "definition applies only within the chapter or "
+                        "title that contains it -- use the one for the "
+                        "area of law the question concerns, cite its "
+                        "section, and call get_section on `defined_in` if "
+                        "the scope is unclear.",
+                    )
+                )
+        if len(hits) > len(shown) or (definitions and max_pages > 1):
+            of_total = (
+                total_count if total_count is not None else "an unknown number"
+            )
+            entries.append(
+                (
+                    CAVEAT_MORE_DEFINITIONS,
+                    f"Showing {len(definitions)} definition(s); more may "
+                    "exist (only the first 20 title matches were "
+                    f"examined, of {of_total}). To see the rest, use "
+                    f'search_code with title:"{term}" and page through.',
+                )
+            )
+        if from_snippet:
+            entries.append(
+                (
+                    CAVEAT_DEFINITION_TEXT_FROM_SNIPPET,
+                    f"{from_snippet} definition(s) show only a search "
+                    "excerpt because the full text could not be fetched; "
+                    "read them in full with get_section before quoting.",
+                )
+            )
+
+        caveats, caveat_lines = self._caveats(entries)
+        text_out = "\n".join([summary, ""] + lines + caveat_lines).strip()
+        return text_out, {
+            "term": term,
+            "total_count": total_count,
+            "definitions": definitions,
+            "summary": summary,
             "caveats": caveats,
         }
 
