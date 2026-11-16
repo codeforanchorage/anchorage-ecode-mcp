@@ -1,0 +1,102 @@
+---
+name: CI
+
+# The Anchorage Municipal Code MCP server is deployed from main by hand
+# (scripts/deploy.sh). This workflow is the check that main is deployable:
+# lint, the full test suite, and an audit of what ships in the Lambda zip.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the requires-python floor; 3.14 is the Lambda runtime.
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the package with its dev extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check plugins/ tests/
+
+      - name: Validate config.yaml
+        run: >-
+          python -c "from core.validators import load_and_validate_config;
+          load_and_validate_config('config.yaml')"
+
+      # Run both ways: the serial run catches state leaking between tests
+      # in file order, the parallel run catches tests that only pass
+      # because an earlier test in the same process set something up.
+      - name: Tests, serial
+        run: python -m pytest tests/ -q -p no:xdist -p no:cacheprovider
+
+      - name: Tests, parallel, with coverage
+        run: >-
+          python -m pytest tests/ -q -n auto -p no:cacheprovider
+          --cov=plugins --cov-report=term-missing --cov-fail-under=80
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      # Audits requirements.txt only: that is exactly what scripts/deploy.sh
+      # installs into the Lambda package. opencontext-core is installed from
+      # a git tag, is not on PyPI, and is reported as skipped.
+      - name: pip-audit the Lambda dependencies
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit -r requirements.txt
+
+  go-client:
+    name: Go client
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: client/go.mod
+
+      - name: Vet and test
+        working-directory: client
+        run: |
+          go vet ./...
+          go test ./...
