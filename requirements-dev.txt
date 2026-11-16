@@ -16,3 +16,7 @@ pre-commit>=4.0.0
 # is invoked by API Gateway and never imports it, so it is kept out of
 # requirements.txt and therefore out of the deployment package.
 aiohttp>=3.8.0
+
+# CloudWatch log analysis from a dev machine (ad hoc scripts). Dev-only:
+# the Lambda runtime ships its own boto3 and the plugin never imports it.
+boto3>=1.40.0
