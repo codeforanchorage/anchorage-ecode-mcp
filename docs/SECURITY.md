@@ -21,7 +21,10 @@ should read this before changing anything in `plugins/ecode/`,
   (`api.ecode360.com`) for a single fixed library, Anchorage's
   (`customer_id: AN6998`). The content it returns is published municipal
   law — already public at `ecode360.com`. No write paths exist; every
-  upstream call is a `GET`.
+  upstream call is a `GET`. One tool, `read_attachment`, additionally
+  downloads PDF attachments of that same library from the public
+  eCode360 website (`live.ecode360.com` / `ecode360.com`) — see *Input
+  validation*.
 - **This deployment DOES hold a secret**, unlike the GIS server this
   repo was forked from: eCode360 is a licensed API and requires an
   `api-key` / `api-secret` pair. Protecting that pair is the main
@@ -84,12 +87,36 @@ should read this before changing anything in `plugins/ecode/`,
 
 ### Input validation
 
-The SSRF surface that dominated the GIS server's model **does not exist
-here**. `base_url` and `customer_id` are fixed in `config.yaml`; no tool
-argument can influence which host is contacted or which library is
-read. Every path is built from `_cust_path()` around the configured
-customer id, and caller-supplied path segments are `quote(..., safe="")`
-encoded.
+For the API, the SSRF surface that dominated the GIS server's model
+**does not exist**. `base_url` and `customer_id` are fixed in
+`config.yaml`; no tool argument can influence which API host is
+contacted or which library is read. Every API path is built from
+`_cust_path()` around the configured customer id, and caller-supplied
+path segments are `quote(..., safe="")` encoded.
+
+**The one exception is `read_attachment`**, which fetches a URL the
+caller supplies. It is the only SSRF-relevant code in the plugin, and it
+is deliberately narrow (`plugins/ecode/plugin.py::_attachment_url_arg`
+and `_download_attachment`):
+
+- The URL is validated **before any request**: scheme `https`; host
+  exactly `live.ecode360.com` or `ecode360.com` (`ATTACHMENT_HOSTS`); no
+  port, userinfo or query string; no `..` segment (checked after
+  percent-decoding); and a path that is either `/attachment/<digits>/
+  <file>.pdf` or `/documents/<configured customer_id>/…/<file>.pdf`.
+  Another library's documents are refused.
+- **Redirects are not followed** — a 3xx is an error — so an allowed
+  URL cannot bounce the request to another host.
+- The download uses a **separate HTTP client with no API credentials**.
+  The `api-key` / `api-secret` headers never leave `api.ecode360.com`.
+- The body is capped at 20 MB while streaming, must start with a PDF
+  header, and is parsed by `pypdf` (pure Python) inside the call's time
+  budget. Extracted text is capped per response.
+
+Do not widen the host list or the path patterns, and do not turn on
+redirect following, without a security review. `tests/
+test_ecode_chapters_and_attachments.py::TestAttachmentUrl` pins the
+refusals.
 
 - **`guid`** must be alphanumeric, or the literal `ROOT`
   (`plugins/ecode/plugin.py::_guid_arg`). This also catches the common
@@ -146,12 +173,13 @@ Enforced by code today; do not relax without explicit discussion.
    config validation (`core/validators.py`) and at runtime
    (`PluginManager.load_plugins()`). Multiple enabled plugins is a hard
    error.
-2. **No write paths.** Every eCode360 call is a `GET`; all seven tools
+2. **No write paths.** Every eCode360 call is a `GET`; all eight tools
    are annotated `readOnlyHint: true`. A tool that writes would be a
    security-review-required change.
-3. **The upstream host and library are fixed by config, never by a tool
-   argument.** This is what keeps the server from being usable as a
-   general proxy.
+3. **The API host and library are fixed by config, never by a tool
+   argument, and the only caller-supplied URL (`read_attachment`) is
+   confined to this library's PDFs on two fixed eCode360 hosts.** This
+   is what keeps the server from being usable as a general proxy.
 4. **A declared `outputSchema` is binding.** The spec requires
    structured results to conform. Do not add a constraint real eCode360
    data can violate, and do not add an early-return branch that skips
