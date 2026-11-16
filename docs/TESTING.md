@@ -1,23 +1,37 @@
-# Testing Guide
+# Testing
 
-This guide covers three ways to test your OpenContext server locally.
+## Unit tests
 
-## Prerequisites
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -n auto                       # all tests, in parallel
+pytest tests/test_ecode_plugin.py -v        # one file
+pytest tests/ --cov=plugins --cov-report=term-missing
+```
 
-Before testing:
+The tests do not call eCode360 and need no credentials. Coverage of
+`plugins/` must stay at 80% or more.
 
-1. Create `config.yaml` from `config-example.yaml` and enable exactly one plugin
-2. Install dependencies: `pip install -r requirements.txt` (this also installs
-   the `opencontext-core` package, which provides `core/` and `server/`)
-3. Start the server: `python3 scripts/local_server.py`
+Lint with ruff, on the 0.15 line that pre-commit and CI use:
 
-The server runs at `http://localhost:8000/mcp`. Keep it running while you test.
+```bash
+ruff check plugins/ tests/
+```
+
+CI (`.github/workflows/ci.yml`) runs the lint, the tests on Python 3.11 and
+3.14, a dependency audit and the Go client tests on every push to `main` and on
+pull requests.
 
 ---
 
-## Method 1: Terminal (cURL)
+## Testing a local server
 
-Use the terminal to send requests directly to the server.
+1. Supply the eCode360 credentials (see [Getting Started](GETTING_STARTED.md))
+2. Start the server: `python scripts/local_server.py`
+
+It runs at `http://localhost:8000/mcp`. Keep it running while you test.
+
+### Method 1: Terminal (cURL)
 
 **Ping:**
 
@@ -40,94 +54,65 @@ curl -X POST http://localhost:8000/mcp \
 ```bash
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ckan__search_datasets","arguments":{"query":"housing","limit":3}}}'
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ecode__search_code","arguments":{"query":"\"snow\" AND \"sidewalk\""}}}'
 ```
 
-For a full test (initialize, list tools, call tool), run:
+For the full sequence (initialize, list tools, call a tool), run:
 
 ```bash
 ./scripts/test_streamable_http.sh
 ```
 
----
+It needs `jq`.
 
-## Method 2: Claude (Connectors)
+### Method 2: Claude Desktop
 
-1. Connect via Claude Connectors (see [Getting Started](GETTING_STARTED.md))
-2. Add a custom connector with URL: `http://localhost:8000/mcp`
-3. Enable the connector in your conversation (click "+" → Connectors → toggle on)
-4. Ask Claude to search your data or list available tools
+1. Add a custom connector with the URL `http://localhost:8000/mcp`
+2. Enable it in a conversation ("+" → Connectors → toggle on)
+3. Ask a question about the Anchorage code
 
-**Note:** Localhost only works with Claude Desktop. For Claude.ai (web), use MCP Inspector or deploy first.
+Localhost only works with Claude Desktop, because the connection runs from
+your machine. Claude.ai on the web cannot reach it.
 
----
+### Method 3: MCP Inspector
 
-## Method 3: MCP Inspector
-
-MCP Inspector is a web-based tool for testing MCP servers.
-
-1. With the server running, open a new terminal
-2. Run: `npx @modelcontextprotocol/inspector`
-3. The Inspector UI opens in your browser (typically `http://localhost:6274`)
-4. In the Inspector, select **streamable-http** as the transport
-5. Enter the URL: `http://localhost:8000/mcp`
-6. Use the Tools tab to list and call tools
+1. With the server running, run `npx @modelcontextprotocol/inspector`
+2. In the Inspector, select **streamable-http** as the transport
+3. Enter the URL `http://localhost:8000/mcp`
+4. Use the Tools tab to list and call tools
 
 ---
 
-## Quick Checks
-
-Optional checks before starting the server.
+## Quick checks
 
 **Config validation:**
 
 ```bash
-python3 -c "
-import yaml
+python -c "
 from core.validators import load_and_validate_config
 config = load_and_validate_config('config.yaml')
 print('Config valid:', config['server_name'])
 "
 ```
 
-**Plugin loading:**
-
-```bash
-python3 -c "
-import asyncio, yaml
-from core.plugin_manager import PluginManager
-async def t():
-    with open('config.yaml') as f: config = yaml.safe_load(f)
-    pm = PluginManager(config)
-    await pm.load_plugins()
-    print('Tools:', [t['name'] for t in pm.get_all_tools()])
-    await pm.shutdown()
-asyncio.run(t())
-"
-```
-
 ---
 
-## Unit Tests
+## Testing production
+
+The smoke test exercises the deployed server end to end: transport rules, the
+protocol handshake, the tools, and the refusals. Run it after each deploy:
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
-pytest
-pytest tests/test_ecode_plugin.py -v
-pytest --cov=plugins
+python scripts/smoke_prod.py                              # production
+python scripts/smoke_prod.py http://localhost:8000/mcp    # a local server
 ```
 
----
+It prints one line per check and a summary, and makes real calls to eCode360.
 
-## Testing Against Production
-
-To test a deployed server, use the Lambda URL or API Gateway URL:
+A single request by hand:
 
 ```bash
-LAMBDA_URL="https://your-lambda-url.lambda-url.us-east-1.on.aws"
-curl -X POST $LAMBDA_URL/mcp \
+curl -X POST https://anchorage-ecode.codeforanchorage.org/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
-
-See [Deployment](DEPLOYMENT.md) for how to get the URL.

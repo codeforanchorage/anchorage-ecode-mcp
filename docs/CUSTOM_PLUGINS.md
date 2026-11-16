@@ -318,11 +318,12 @@ def __init__(self, config: Dict[str, Any]) -> None:
 ## Reference
 
 - [Plugin Template](../custom_plugins/template/plugin_template.py)
-- [CKAN Plugin](https://github.com/CityOfBoston/OpenContext/tree/main/plugins/ckan/plugin.py) - Example implementation
-- [Core Interfaces](../core/interfaces.py) - API reference
+- [eCode plugin](../plugins/ecode/plugin.py) - The plugin this repo runs
+- [CKAN plugin](https://github.com/CityOfBoston/OpenContext/tree/main/plugins/ckan/plugin.py) - A `DataPlugin` example, in upstream OpenContext
+- [Core interfaces](https://github.com/codeforanchorage/opencontext-core/blob/main/core/interfaces.py) - API reference, in the `opencontext-core` package
 
 ## Getting Help
 
 - [FAQ](FAQ.md)
-- [GitHub Issues](https://github.com/thealphacubicle/OpenContext/issues)
+- [GitHub Issues](https://github.com/codeforanchorage/anchorage-ecode-mcp/issues)
 - [Architecture Guide](ARCHITECTURE.md)

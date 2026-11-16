@@ -1,113 +1,108 @@
 # Getting Started
 
-Get your OpenContext server running in under 10 minutes.
+This guide is for running the Anchorage Municipal Code MCP server yourself:
+locally for development, or as your own deployment on AWS.
 
-OpenContext uses the Model Context Protocol (MCP), which connects AI assistants to external data. Your server exposes tools that AI assistants can call to search and query your open data.
+If you only want to use the hosted server from Claude, follow the
+[Quick Start](QUICKSTART.md) instead.
+
+The server uses the Model Context Protocol (MCP), which connects AI assistants
+to external data. It exposes eight read-only tools for searching and reading
+the Municipality of Anchorage municipal code published on eCode360.
 
 ## Prerequisites
 
-- Python 3.11+
-- Terraform >= 1.0 (for deployment)
-- AWS CLI configured (for deployment)
+- Python 3.11+ (the Lambda runs 3.14)
+- eCode360 API credentials (a key and secret from General Code). The API is
+  licensed; the key this project uses is scoped to the Anchorage library,
+  `AN6998`.
+- For deployment only: Terraform >= 1.0 and the AWS CLI, configured
 
-## Quick Path: Local Testing
+## Run locally
 
-Test the server locally before deploying.
-
-### 1. Configure Your Plugin
-
-Create `config.yaml` from the template and enable **exactly one** plugin:
+### 1. Install
 
 ```bash
-cp config-example.yaml config.yaml
+python -m venv venv
+venv/bin/pip install -r requirements-dev.txt     # Windows: venv\Scripts\pip
 ```
 
-Edit `config.yaml`. For CKAN:
+`requirements-dev.txt` includes `requirements.txt`, which installs the
+`opencontext-core` package that provides `core/` and `server/`.
 
-```yaml
-plugins:
-  ckan:
-    enabled: true
-    base_url: "https://data.boston.gov"
-    portal_url: "https://data.boston.gov"
-    city_name: "Boston"
-    timeout: 120
-```
+### 2. Provide the credentials
 
-Each deployment connects to one data source. To connect another source, deploy a separate server. See [Architecture](ARCHITECTURE.md) for details.
-
-### 2. Start the Local Server
+The plugin reads `ECODE_API_KEY` and `ECODE_API_SECRET` from the environment.
+Either export them, or copy `.ecode.env.example` to `.ecode.env` (gitignored),
+fill it in, and load it:
 
 ```bash
-pip install aiohttp
-python3 scripts/local_server.py
+set -a && . ./.ecode.env && set +a
 ```
 
-The server runs at `http://localhost:8000/mcp`. Keep this terminal open.
+Never put the key or secret in `config.yaml`. That file is packaged into the
+Lambda zip, and it does not expand `${ENV_VAR}` references.
 
-### 3. Connect via Claude Connectors
+### 3. Start the server
 
-Connect using **Claude Connectors** (same steps on both Claude.ai and Claude Desktop):
+`config.yaml` in the repo root is already this server's configuration, with
+the `ecode` plugin enabled. Start the local server:
 
-1. Go to **Settings** → **Connectors** (or **Customize** → **Connectors** on claude.ai)
-2. Click **Add custom connector**
-3. Enter a name (e.g. "OpenContext Local") and URL: `http://localhost:8000/mcp`
+```bash
+python scripts/local_server.py
+```
 
-**Note:** Local servers (`localhost`) only work with Claude Desktop, since the connection runs from your machine. For Claude.ai (web), use the MCP Inspector or deploy to production first (see below).
+The server runs at `http://localhost:8000/mcp`. It goes through the same HTTP
+handler as the Lambda, so the Origin allowlist and protocol checks match
+production.
 
 ### 4. Verify
 
 ```bash
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ecode__get_customer_info","arguments":{}}}'
 ```
 
-You can also test with Claude by asking it to search your data, or use [Testing](TESTING.md) for more options (MCP Inspector, full test script).
+See [Testing](TESTING.md) for more ways to test, including Claude Desktop and
+MCP Inspector.
 
 ---
 
-## Production Deployment
+## Deploy your own copy
 
-### 1. Fork & Configure
+The hosted server is deployed from this repo to AWS Lambda behind API Gateway.
+To deploy a copy:
 
-1. Fork the [OpenContext repository](https://github.com/thealphacubicle/OpenContext)
-2. Clone your fork
-3. Create config: `cp config-example.yaml config.yaml`
-4. Edit `config.yaml` with **exactly one** plugin enabled
-
-### 2. Deploy to AWS
+1. Fork [codeforanchorage/anchorage-ecode-mcp](https://github.com/codeforanchorage/anchorage-ecode-mcp) and clone it.
+2. Edit `config.yaml`: `customer_id`, `city_name`, the `aws` block, and the
+   `instructions` text, which names Anchorage throughout. Keep
+   `config-ecode.yaml` identical to it.
+3. Edit `terraform/aws/prod.tfvars`: Lambda name, region, custom domain and
+   rate limits.
+4. Put the credentials in `terraform/aws/secrets.auto.tfvars` (gitignored;
+   copy `secrets.auto.tfvars.example`). Terraform injects them as Lambda
+   environment variables.
+5. Deploy:
 
 ```bash
-./scripts/deploy.sh
+./scripts/deploy.sh --environment prod
 ```
 
-The script validates config, packages code, and deploys to AWS Lambda. You'll receive:
-- **Lambda Function URL** – for testing (no auth)
-- **API Gateway URL** – for production (API key, rate limiting)
+The script validates the config, builds the Lambda package, shows the
+Terraform plan and asks for confirmation before applying. See
+[Deployment](DEPLOYMENT.md) for the details, including the Terraform
+workspaces and the state bucket.
 
-AWS creates: Lambda function, Function URL, API Gateway, IAM role, CloudWatch Log Group. Cost is roughly $1/month for 100K requests. See [Deployment](DEPLOYMENT.md) for details.
-
-### 3. Connect via Claude Connectors (Production)
-
-Connect using **Claude Connectors** (same steps on both Claude.ai and Claude Desktop):
-
-1. Go to **Settings** → **Connectors** (or **Customize** → **Connectors** on claude.ai)
-2. Click **Add custom connector**
-3. Enter a name (e.g. "Boston OpenData") and your API Gateway URL
-
-Get the URL:
+Then add the URL to Claude as a custom connector, as in the
+[Quick Start](QUICKSTART.md). Get the URL with:
 
 ```bash
 cd terraform/aws
 terraform output -raw api_gateway_url
 ```
 
-The output already includes `/mcp`. Use this URL for production (rate limiting, API key). For testing without auth, use the Lambda URL from `terraform output -raw lambda_url` instead.
-
-### 4. Updating
-
-To update config or code: edit `config.yaml` or your code, then run `./scripts/deploy.sh` again.
+The output already ends in `/mcp`.
 
 ---
 
@@ -115,22 +110,23 @@ To update config or code: edit `config.yaml` or your code, then run `./scripts/d
 
 | Issue | Solution |
 |-------|----------|
-| `ModuleNotFoundError: aiohttp` | `pip install aiohttp` |
-| "Multiple Plugins Enabled" | Enable only one plugin in `config.yaml` |
-| Claude can't connect | Verify URL includes `/mcp`, check connector is enabled in the chat |
-| Lambda 500 error | Check CloudWatch logs, validate config |
-| Plugin init fails | Check API URLs, keys, and network connectivity |
+| `ModuleNotFoundError: aiohttp` | Install `requirements-dev.txt`, not only `requirements.txt` |
+| `ModuleNotFoundError: core` | `opencontext-core` is not installed; run the install step from the repo root |
+| Tool errors that mention credentials | `ECODE_API_KEY` / `ECODE_API_SECRET` are missing or wrong |
+| 403 from eCode360 for another city | The key is scoped to one library; other cities need their own key |
+| Claude can't connect | Check the URL ends in `/mcp` and the connector is enabled in the chat |
+| Lambda 5xx | Check the CloudWatch logs and validate the config |
 
 ---
 
-## Next Steps
+## Next steps
 
-- [Architecture](ARCHITECTURE.md) – System design, built-in plugins, custom plugins
-- [Deployment](DEPLOYMENT.md) – AWS details, monitoring, cost
-- [Testing](TESTING.md) – Local testing (Terminal, Claude, MCP Inspector)
-
----
+- [Architecture](ARCHITECTURE.md): how the pieces fit
+- [The eCode plugin](BUILT_IN_PLUGINS.md): tools, configuration and limits
+- [Deployment](DEPLOYMENT.md): AWS details and monitoring
+- [Testing](TESTING.md): local testing and the production smoke test
+- [Security](SECURITY.md): threat model
 
 ## Support
 
-[GitHub Issues](https://github.com/thealphacubicle/OpenContext/issues)
+[GitHub Issues](https://github.com/codeforanchorage/anchorage-ecode-mcp/issues)

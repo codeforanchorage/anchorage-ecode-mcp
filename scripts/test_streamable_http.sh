@@ -114,17 +114,16 @@ TOOL_COUNT=$(echo "$LIST_RESPONSE" | jq '.result.tools | length')
 echo -e "${GREEN}Found $TOOL_COUNT tools${NC}"
 echo ""
 
-# Step 3: Call a tool (ckan__search_datasets)
-echo -e "${BLUE}Step 3: Call tool (ckan__search_datasets)${NC}"
+# Step 3: Call a tool (ecode__search_code)
+echo -e "${BLUE}Step 3: Call tool (ecode__search_code)${NC}"
 CALL_REQUEST='{
   "jsonrpc": "2.0",
   "id": 3,
   "method": "tools/call",
   "params": {
-    "name": "ckan__search_datasets",
+    "name": "ecode__search_code",
     "arguments": {
-      "query": "traffic",
-      "limit": 5
+      "query": "\"snow\" AND \"sidewalk\""
     }
   }
 }'

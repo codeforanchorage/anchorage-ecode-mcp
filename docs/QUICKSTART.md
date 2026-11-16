@@ -1,137 +1,68 @@
-# Quick Start Guide
+# Quick Start
 
-Get your OpenContext MCP server running in 5 minutes.
+Use the Anchorage Municipal Code MCP server from Claude in about two minutes.
+Nothing needs to be installed or deployed: the server is already hosted.
 
-## Prerequisites
+To run or deploy your own copy instead, see [Getting Started](GETTING_STARTED.md).
 
-- Python 3.11+
-- Terraform >= 1.0
-- AWS CLI configured with credentials
-- GitHub account (to fork repository)
+## Step 1: Add the connector
 
-## Step 1: Fork Repository
-
-1. Go to [OpenContext repository](https://github.com/thealphacubicle/OpenContext)
-2. Click "Fork"
-3. Clone your fork locally
-
-```bash
-git clone https://github.com/your-org/opencontext.git
-cd opencontext
-```
-
-## Step 2: Configure Plugin
-
-Edit `config.yaml` and enable **ONE** plugin:
-
-### For CKAN (e.g., data.boston.gov):
-
-```yaml
-server_name: "Boston OpenData"
-plugins:
-  ckan:
-    enabled: true
-    base_url: "https://data.boston.gov"
-    portal_url: "https://data.boston.gov"
-    city_name: "Boston"
-    timeout: 120
-```
-
-**Important:** Enable only ONE plugin. The deploy script will reject multiple plugins.
-
-## Step 3: Deploy
-
-Run the deployment script:
-
-```bash
-./scripts/deploy.sh
-```
-
-The script will:
-
-1. Validate configuration (ensures ONE plugin enabled)
-2. Package Lambda code
-3. Deploy to AWS Lambda
-4. Output Lambda URL
-
-You'll see output like:
-
-```
-✅ Deployment complete!
-
-API Gateway URL (use for Claude Connectors):
-https://xxx.execute-api.us-east-1.amazonaws.com/staging/mcp
-```
-
-## Step 4: Connect via Claude Connectors
-
-Connect using **Claude Connectors** (same steps on both Claude.ai and Claude Desktop):
+The steps are the same on Claude.ai and Claude Desktop:
 
 1. Go to **Settings** → **Connectors** (or **Customize** → **Connectors** on claude.ai)
 2. Click **Add custom connector**
-3. Enter a name (e.g. "Boston OpenData") and your API Gateway URL
+3. Enter a name, for example "Anchorage Municipal Code"
+4. Enter the URL: `https://anchorage-ecode.codeforanchorage.org/mcp`
 
-Get the URL from the deploy output, or run:
+No account or API key is needed. The server is public and read-only.
 
-```bash
-cd terraform/aws
-terraform output -raw api_gateway_url
-```
+## Step 2: Turn it on in a chat
 
-## Step 5: Test
+In a conversation, click "+" → Connectors and toggle the connector on.
 
-**Test locally first (optional):**
-
-```bash
-# Start local server
-python3 scripts/local_server.py
-
-# In another terminal, test with curl
-curl -X POST http://localhost:8000 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
-```
-
-**Test in Claude:**
-
-Enable your connector in the chat (click "+" → Connectors → toggle on), then ask:
+## Step 3: Ask a question
 
 ```
-Search for datasets about housing in Boston
+Who is responsible for clearing snow from the sidewalk in front of a house in Anchorage?
 ```
 
-Claude will use your MCP server to search the CKAN portal.
+```
+How does the Anchorage code define "chronic animal noise"?
+```
+
+```
+What uses are allowed in the R-1 zoning district?
+```
+
+Claude searches the code, reads the sections it finds, and answers with the
+section number and an `https://ecode360.com/<guid>` link so you can check the
+source. The third question is answered from a PDF table (Table 21.05-1), which
+Claude reads with the `read_attachment` tool.
+
+The answers are the published code text, not legal advice.
 
 ## Troubleshooting
 
-### Deploy Script Fails: "Multiple Plugins Enabled"
+### Claude does not use the connector
 
-**Solution:** Enable only ONE plugin in `config.yaml`. Disable all others.
+1. Check the URL ends in `/mcp`
+2. Check the connector is added in Settings → Connectors
+3. Check it is enabled for the conversation ("+" → Connectors → toggle on)
 
-### Lambda URL Not Working
+### Some tools are missing
 
-**Check:**
+The server has eight tools (see the [README](../README.md#tools)). If the
+connector was added before a tool was released, disconnect and reconnect it in
+Settings → Connectors to refresh the tool list.
 
-1. Lambda function exists in AWS Console
-2. Function URL is enabled
-3. Configuration is correct
+### Claude asks for approval on every call
 
-### Claude Can't Connect
+Every tool is read-only. In the connector's settings you can set the tools to
+always allow.
 
-**Check:**
+## Next steps
 
-1. API Gateway or Lambda URL is correct (includes `/mcp`)
-2. Connector is added in Settings → Connectors
-3. Connector is enabled for the conversation (click "+" → Connectors → toggle on)
-
-## Next Steps
-
-- Read [Architecture Guide](ARCHITECTURE.md)
-- Create [Custom Plugin](CUSTOM_PLUGINS.md)
-- See [Examples](../examples/)
-
-## Getting Help
-
+- [The eCode plugin](BUILT_IN_PLUGINS.md): what each tool does
+- [Getting Started](GETTING_STARTED.md): run the server locally or deploy a copy
 - [FAQ](FAQ.md)
-- [GitHub Issues](https://github.com/thealphacubicle/OpenContext/issues)
-- [Documentation](.)
+- [GitHub Issues](https://github.com/codeforanchorage/anchorage-ecode-mcp/issues)

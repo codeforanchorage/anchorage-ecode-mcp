@@ -27,7 +27,7 @@ show_usage() {
     echo ""
     echo "Options:"
     echo "  --environment, -e   Deployment environment: staging or prod (required)"
-    echo "  --tfworkspace, -w   Terraform workspace name (default: boston-staging or boston-prod)"
+    echo "  --tfworkspace, -w   Terraform workspace name (default: anchorage-ecode-staging or anchorage-ecode-prod)"
     echo "  --help, -h          Show this help message"
 }
 
@@ -151,7 +151,7 @@ if [ $EXIT_CODE -eq 1 ]; then
     echo "You must enable exactly ONE plugin in config.yaml."
     echo ""
     echo "To enable a plugin, set 'enabled: true' for:"
-    echo "  • ckan"
+    echo "  • ecode"
     echo "  • A custom plugin in custom_plugins/"
     echo ""
     echo "See docs/GETTING_STARTED.md for setup instructions."

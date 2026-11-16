@@ -2,214 +2,175 @@
 
 ## General
 
-### What is OpenContext?
+### What is this?
 
-OpenContext is an extensible MCP framework template that governments can fork to deploy MCP servers for their civic data platforms. Each fork deploys exactly ONE MCP server with ONE plugin enabled.
+An MCP server that gives AI assistants read-only access to the Municipality of
+Anchorage municipal code, as published on eCode360. It lets an assistant
+search the code, read sections, look up definitions and read the PDF tables,
+and cite what it found.
 
-### Why "One Fork = One MCP Server"?
+### Is this legal advice?
 
-This architecture keeps deployments simple, independently scalable, and easy to maintain. See [Architecture Guide](ARCHITECTURE.md) for details.
+No. The server returns the published code text. It does not interpret it, and
+it does not cover state or federal law. Every result carries the section number
+and an `ecode360.com` link so the source can be checked.
 
-### Can I deploy multiple plugins?
+### How current is the text?
 
-No. Each fork must deploy exactly ONE plugin. To deploy multiple plugins, fork the repository multiple times (one fork per plugin).
+It is whatever eCode360 currently publishes. The `get_customer_info` tool
+returns the library's last-updated date. Ordinances adopted but not yet
+codified by the publisher may not be included.
 
 ### What is MCP?
 
-MCP (Model Context Protocol) is a protocol for connecting AI assistants to external data sources. Learn more at [modelcontextprotocol.io](https://modelcontextprotocol.io).
+The Model Context Protocol connects AI assistants to external data sources.
+See [modelcontextprotocol.io](https://modelcontextprotocol.io).
+
+### What is OpenContext?
+
+The framework this repo is forked from: a template for deploying one MCP
+server with one plugin. This fork runs the `ecode` plugin. See
+[Architecture](ARCHITECTURE.md).
+
+## Using it
+
+### How do I connect from Claude?
+
+Add `https://anchorage-ecode.codeforanchorage.org/mcp` as a custom connector.
+The [Quick Start](QUICKSTART.md) has the steps.
+
+### Do I need an account or an API key?
+
+No. The hosted server is public and read-only.
+
+### I don't see the newer tools
+
+A connector keeps the tool list from when it connected. Disconnect and
+reconnect it in Settings → Connectors. The server has eight tools; see the
+[README](../README.md#tools).
+
+### Can it read the zoning use tables?
+
+Yes. Tables published only as PDF attachments, such as Table 21.05-1, are read
+with the `read_attachment` tool. Text extracted from a PDF can lose some table
+alignment, and a scanned PDF with no text layer cannot be read.
+
+### Can I use it without Claude?
+
+Yes. Any MCP client that supports Streamable HTTP can connect. You can also
+POST JSON-RPC directly:
+
+```bash
+curl -X POST https://anchorage-ecode.codeforanchorage.org/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+### Are there rate limits?
+
+Yes: a per-IP limit, a gateway throttle and a daily quota. Requests over a
+limit get a 429. The values are in [Deployment](DEPLOYMENT.md).
+
+## Other cities
+
+### Can this serve another municipality's code?
+
+The plugin works with any eCode360 library: set `customer_id` and `city_name`
+in `config.yaml`. The API is licensed, though, and a key is scoped to the
+libraries General Code grants it. The key this project uses only grants
+Anchorage (`AN6998`); other libraries return 403. Another city needs its own
+key and its own deployment.
+
+### Can one deployment serve several cities or several plugins?
+
+No. Each deployment runs exactly one plugin for one library. Deploy another
+copy for each.
 
 ## Configuration
 
-### How do I enable a plugin?
-
-Edit `config.yaml` and set `enabled: true` for ONE plugin:
-
-```yaml
-plugins:
-  ckan:
-    enabled: true # Only ONE plugin should be enabled
-```
-
 ### Can I use environment variables in config.yaml?
 
-Yes, but they must be resolved before deployment. Terraform will set the final config as a Lambda environment variable.
+No. `config.yaml` is loaded as plain YAML and `${VAR}` is not expanded, so it
+would reach the plugin as that literal string. Secrets are read from the
+environment by the plugin itself: `ECODE_API_KEY` and `ECODE_API_SECRET`.
 
-### What if I need to change configuration after deployment?
+### Why can't the API key go in config.yaml?
 
-Edit `config.yaml` and run `./scripts/deploy.sh` again. Terraform will update the Lambda environment variable.
+`config.yaml` is packaged into the Lambda zip. Terraform injects the
+credentials as Lambda environment variables instead.
 
-## Plugins
+### How do I change configuration after deployment?
 
-### What plugins are available?
-
-Built-in plugins:
-
-- **CKAN** - For CKAN-based portals (data.boston.gov, data.gov, data.gov.uk)
-
-You can also create custom plugins in `custom_plugins/`.
-
-### How do I create a custom plugin?
-
-See [Custom Plugins Guide](CUSTOM_PLUGINS.md) for detailed instructions.
-
-### Can I modify built-in plugins?
-
-No. Built-in plugins are part of the core framework. Create a custom plugin instead.
+Edit `config.yaml` and run `./scripts/deploy.sh --environment prod` again.
+Keep `config-ecode.yaml` identical to it.
 
 ## Deployment
 
 ### What AWS resources are created?
 
-- Lambda function
-- Lambda Function URL
-- IAM role and policies
-- CloudWatch Log Group
-
-### How much does it cost?
-
-Typical costs: ~$1/month for 100K requests. See [Deployment Guide](DEPLOYMENT.md) for details.
-
-### Can I deploy to a different cloud provider?
-
-The current implementation is AWS-specific. Contributions for other providers are welcome!
+A Lambda function, an API Gateway REST API with a custom domain and
+certificate, an IAM role, CloudWatch log groups and alarms, and a WAF
+association.
 
 ### How do I update an existing deployment?
 
-Run `./scripts/deploy.sh` again. Terraform will update the Lambda function.
+Run `./scripts/deploy.sh --environment prod` again and review the plan. See
+[Deployment](DEPLOYMENT.md).
 
-## Usage
+### Does CI deploy?
 
-### How do I connect to it with Claude?
-
-Connect via **Claude Connectors** (same steps on both Claude.ai and Claude Desktop):
-
-1. Go to **Settings** → **Connectors** (or **Customize** → **Connectors** on claude.ai)
-2. Click **Add custom connector**
-3. Enter a name and your API Gateway URL (from `terraform output -raw api_gateway_url`)
-
-Enable the connector in your conversation by clicking "+" → Connectors → toggle it on.
-
-### Can I use it without Claude Desktop?
-
-Yes! Call the Lambda URL directly via HTTP POST with MCP JSON-RPC format.
-
-### How do I test my deployment?
-
-```bash
-curl -X POST https://your-lambda-url \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-```
-
-## Troubleshooting
-
-### Deploy script fails: "Multiple Plugins Enabled"
-
-**Solution:** Enable only ONE plugin in `config.yaml`. Disable all others.
-
-### Lambda returns 500 error
-
-**Check:**
-
-1. CloudWatch logs for errors
-2. Configuration is valid
-3. Plugin initialization succeeded
-
-### Claude can't connect
-
-**Check:**
-
-1. API Gateway or Lambda URL is correct (includes `/mcp`)
-2. Connector is added in Settings → Connectors
-3. Connector is enabled for the conversation (click "+" → Connectors → toggle on)
-
-### Plugin initialization fails
-
-**Check:**
-
-1. API URLs are correct
-2. API keys are valid (if required)
-3. Network connectivity from Lambda
-4. CloudWatch logs for specific errors
+No. CI runs lint, tests and a dependency audit. Deploys are manual.
 
 ## Development
 
 ### How do I test locally?
 
-**Option 1: Use the local server**
+See [Testing](TESTING.md): unit tests, a local server at
+`http://localhost:8000/mcp`, and the smoke test.
 
-```bash
-# Install aiohttp if needed
-pip install aiohttp
+### How do I change protocol or transport behaviour?
 
-# Start local server
-python3 scripts/local_server.py
+That code is in the
+[`opencontext-core`](https://github.com/codeforanchorage/opencontext-core)
+package, not in this repo. Change it there, tag a release, and move the pin in
+`requirements.txt` and `pyproject.toml`.
 
-# In another terminal, test with curl
-curl -X POST http://localhost:8000 \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-```
+### How do I add a plugin for a different data source?
 
-**Option 2: Test plugins directly**
-
-Create a test script that imports and initializes your plugin:
-
-```python
-import asyncio
-from plugins.ckan.plugin import CKANPlugin
-
-async def test():
-    plugin = CKANPlugin({
-        "base_url": "https://data.boston.gov",
-        "portal_url": "https://data.boston.gov",
-        "city_name": "Boston",
-        "timeout": 120,
-    })
-    await plugin.initialize()
-    tools = plugin.get_tools()
-    print(f"Tools: {[t.name for t in tools]}")
-    await plugin.shutdown()
-
-asyncio.run(test())
-```
-
-**Option 3: Run unit tests**
-
-```bash
-pip install pytest pytest-asyncio
-pytest tests/
-```
+See [Custom Plugins](CUSTOM_PLUGINS.md). Remember that a deployment runs only
+one plugin.
 
 ### Can I contribute?
 
-Yes! Contributions are welcome. Please open an issue or pull request.
+Yes. Open an issue or a pull request.
 
-### Where is the code?
+## Troubleshooting
 
-[GitHub Repository](https://github.com/thealphacubicle/OpenContext)
+### Claude can't connect
+
+1. Check the URL ends in `/mcp`
+2. Check the connector is added in Settings → Connectors
+3. Check it is enabled for the conversation ("+" → Connectors → toggle on)
+
+### A tool returns an error about credentials
+
+The server's eCode360 key or secret is missing, wrong or expired. On a local
+server, check the environment variables; on Lambda, check the Terraform
+secrets and redeploy.
+
+### A search returns nothing
+
+The code does not contain that text. The rule may be state law, repealed, or
+worded differently. Try fewer terms, synonyms joined with `OR`, or browse the
+table of contents.
+
+### A search returns hundreds of results
+
+Terms side by side are matched with OR. Quote phrases and join required terms
+with `AND`.
 
 ## Support
 
-### Where can I get help?
-
-- [GitHub Issues](https://github.com/thealphacubicle/OpenContext/issues)
-- [Documentation](.)
-- [FAQ](FAQ.md) (this page)
-
-### How do I report a bug?
-
-Open an issue on GitHub with:
-
-- Description of the problem
-- Steps to reproduce
-- Error messages/logs
-- Configuration (redact secrets)
-
-### How do I request a feature?
-
-Open an issue on GitHub with:
-
-- Description of the feature
-- Use case
-- Proposed implementation (if you have one)
+- [GitHub Issues](https://github.com/codeforanchorage/anchorage-ecode-mcp/issues)
+- Report a bug with the steps to reproduce, the error message, and the
+  question or tool call that caused it. Do not include API keys.
