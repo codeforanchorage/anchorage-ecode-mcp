@@ -44,8 +44,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      # Pinned to the 0.15 line, the one .pre-commit-config.yaml uses. The
+      # dev extra only says ruff>=0.1.0, and a newer ruff enables more rules
+      # by default and fails code that 0.15 passes.
       - name: Ruff lint
-        run: ruff check plugins/ tests/
+        run: |
+          python -m pip install "ruff>=0.15,<0.16"
+          ruff --version
+          ruff check plugins/ tests/
 
       - name: Validate config.yaml
         run: >-
