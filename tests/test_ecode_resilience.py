@@ -381,22 +381,39 @@ class TestStaticCache:
         toc = {"guid": "ROOT", "title": "Code", "children": []}
         p = _plugin(ecode_config, [_json(toc), _json(toc)])
         await p.execute_tool("get_table_of_contents", {})
-        for path, (_exp, data) in list(p._static_cache.items()):
-            p._static_cache[path] = (time.monotonic() - 1, data)
+        for key, (_exp, data) in list(ecode_mod._STATIC_CACHE.items()):
+            ecode_mod._STATIC_CACHE[key] = (time.monotonic() - 1, data)
         await p.execute_tool("get_table_of_contents", {})
 
         assert p.client.get.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_cache_is_per_instance(self, ecode_config):
+    async def test_cache_survives_a_new_plugin_instance(self, ecode_config):
+        """The Lambda adapter builds a new plugin per invocation; a cache
+        held on the instance never saw a second request in prod."""
         toc = {"guid": "ROOT", "title": "Code", "children": []}
         a = _plugin(ecode_config, [_json(toc)])
         b = _plugin(ecode_config, [_json(toc)])
         await a.execute_tool("get_table_of_contents", {})
-        await b.execute_tool("get_table_of_contents", {})
+        result = await b.execute_tool("get_table_of_contents", {})
 
+        assert result.success is True
         assert a.client.get.await_count == 1
-        assert b.client.get.await_count == 1
+        assert b.client.get.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_cache_is_not_shared_across_libraries(self, ecode_config):
+        toc = {"guid": "ROOT", "title": "Code", "children": []}
+        a = _plugin(ecode_config, [_json(toc)])
+        b = _plugin({**ecode_config, "customer_id": "VA4680"}, [_json(toc)])
+        c = _plugin(
+            {**ecode_config, "base_url": "https://other.example"},
+            [_json(toc)],
+        )
+        for p in (a, b, c):
+            await p.execute_tool("get_table_of_contents", {})
+
+        assert [p.client.get.await_count for p in (a, b, c)] == [1, 1, 1]
 
     @pytest.mark.asyncio
     async def test_fallback_marker_does_not_pollute_the_cache(
@@ -410,6 +427,7 @@ class TestStaticCache:
         data = await p._get_toc()
 
         assert data["_fallback"]
-        cached = [d for _e, d in p._static_cache.values()]
+        cached = [d for _e, d in ecode_mod._STATIC_CACHE.values()]
+        assert cached
         assert all("_fallback" not in d for d in cached)
 

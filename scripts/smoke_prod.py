@@ -241,6 +241,8 @@ try:
           set(tools) == {
               "ecode__search_code",
               "ecode__get_section",
+              "ecode__get_sections",
+              "ecode__find_definition",
               "ecode__browse_structure",
               "ecode__get_table_of_contents",
               "ecode__get_customer_info",
@@ -422,6 +424,78 @@ try:
 except Exception as e:
     check("customer info: structuredContent present and conforming", False,
           repr(e))
+
+
+# ── 7b. batch read: several sections, one of them missing ─────────────────
+
+try:
+    r = call_tool(
+        "get_sections",
+        {"sections": ["21.05.010", "49422044", "99.99.999"]},
+    )
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__get_sections", sc)
+    rows = sc.get("sections") or []
+    check(
+        "get_sections: found sections returned, missing one reported in place",
+        ok
+        and not r["result"].get("isError")
+        and [s.get("found") for s in rows] == [True, True, False]
+        and rows[0].get("guid") == "49422044"
+        and bool(rows[0].get("text"))
+        and bool(rows[2].get("error")),
+        why or f"found={[s.get('found') for s in rows]}",
+    )
+except Exception as e:
+    check(
+        "get_sections: found sections returned, missing one reported in place",
+        False, repr(e))
+
+try:
+    r = call_tool("get_sections", {"sections": []})
+    check("get_sections: empty list is a tool error, not a crash",
+          bool(r.get("result", {}).get("isError")), text_of(r)[:80])
+except Exception as e:
+    check("get_sections: empty list is a tool error, not a crash", False,
+          repr(e))
+
+
+# ── 7c. definitions: a defined term, and a term with no definition ────────
+
+try:
+    r = call_tool("find_definition", {"term": "minor offense"})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__find_definition", sc)
+    defs = sc.get("definitions") or []
+    check(
+        "find_definition: 'minor offense' returns its published definition",
+        ok
+        and bool(defs)
+        and defs[0].get("exact_match") is True
+        and "means" in (defs[0].get("text") or "")
+        and bool(defs[0].get("defined_in")),
+        why or f"{len(defs)} definition(s)",
+    )
+except Exception as e:
+    check("find_definition: 'minor offense' returns its published definition",
+          False, repr(e))
+
+try:
+    r = call_tool("find_definition", {"term": "zzqx nonexistent term"})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__find_definition", sc)
+    codes = [c.get("code") for c in sc.get("caveats") or []]
+    check(
+        "find_definition: unknown term is an empty, explained success",
+        ok
+        and not r["result"].get("isError")
+        and sc.get("definitions") == []
+        and "no_definition_found" in codes,
+        why or f"caveats={codes}",
+    )
+except Exception as e:
+    check("find_definition: unknown term is an empty, explained success",
+          False, repr(e))
 
 
 # ── 8. modern era (MCP 2026-07-28, stateless, per-request _meta) ──────────
