@@ -4,7 +4,7 @@ aws_region  = "us-west-2"
 config_file = "config.yaml"
 # Memory also sets the CPU share: read_attachment's PDF text extraction is
 # CPU-bound. config.yaml's aws.lambda_memory wins over this value.
-lambda_memory   = 512
+lambda_memory   = 1024
 lambda_timeout  = 28
 api_quota_limit = 3000
 # These two feed BOTH the usage plan and the stage-wide method settings
