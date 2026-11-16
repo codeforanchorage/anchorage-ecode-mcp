@@ -4,7 +4,7 @@ aws_region  = "us-west-2"
 config_file = "config.yaml"
 # 512 MB is ample: the eCode plugin is a thin async HTTP proxy to the eCode360
 # API (no in-memory geometry work), so it needs little memory or CPU.
-lambda_memory   = 512
+lambda_memory   = 1024
 lambda_timeout  = 28
 api_quota_limit = 3000
 # These two feed BOTH the usage plan and the stage-wide method settings

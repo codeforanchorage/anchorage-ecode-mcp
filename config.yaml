@@ -80,7 +80,7 @@ plugins:
 aws:
   region: "us-west-2"
   lambda_name: "anchorage-ecode-mcp"
-  lambda_memory: 512
+  lambda_memory: 1024
   # MUST stay under the API Gateway integration timeout (29s, a hard REST
   # limit that is not adjustable -- see terraform/aws/api_gateway.tf). Above
   # it the gateway returns 504 while the Lambda keeps running, billing
