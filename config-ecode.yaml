@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.4.1"
+server_version: "1.5.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -31,9 +31,16 @@ instructions: |
   2. get_section(guid) to read the FULL text of a section before quoting or
      summarizing it. A known section number (e.g. "21.05.010") also works
      in place of the guid. Quote the controlling language; don't paraphrase legal
-     requirements loosely.
+     requirements loosely. When you need more than one section, call
+     get_sections([...]) once (up to 10 guids or numbers) instead of
+     get_section repeatedly.
   3. To orient within the code's structure, use get_table_of_contents, then
      browse_structure(guid) to walk chapters/articles → sections.
+  4. For "what does X mean" / "how is X defined", use find_definition(term)
+     rather than searching. A term is often defined separately in several
+     titles and each definition applies only within its own chapter or
+     title: use the one for the area of law in question and cite its
+     section.
 
   Always report the section number and the https://ecode360.com/<guid> link so
   the user can verify. If a section points to a PDF or attachment, say so. If
