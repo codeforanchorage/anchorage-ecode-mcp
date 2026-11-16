@@ -82,8 +82,10 @@ See [Getting Started](docs/GETTING_STARTED.md) for full setup.
 
 ## Examples
 
-- **Boston OpenData (CKAN):** [examples/boston-opendata/config.yaml](examples/boston-opendata/config.yaml)
-- **Custom plugin:** [examples/custom-plugin/](examples/custom-plugin/)
+- **This server's configuration:** [config.yaml](config.yaml) (the `ecode` plugin, its settings and the instructions sent to clients)
+- **This server's plugin:** [plugins/ecode/plugin.py](plugins/ecode/plugin.py)
+- **Writing your own plugin:** [docs/CUSTOM_PLUGINS.md](docs/CUSTOM_PLUGINS.md)
+- **Generic CKAN, ArcGIS and Socrata plugins:** not in this fork; see upstream [CityOfBoston/OpenContext](https://github.com/CityOfBoston/OpenContext)
 
 ---
 
@@ -104,4 +106,6 @@ Hooks: Ruff, yamllint, gofmt. Run manually: `pre-commit run --all-files`.
 
 MIT — see [LICENSE](LICENSE).
 
-**Author:** Srihari Raman, City of Boston Department of Innovation and Technology
+**OpenContext author:** Srihari Raman, City of Boston Department of Innovation and Technology
+
+**This fork** (the Anchorage Municipal Code MCP server and its `ecode` plugin) is maintained by [Code for Anchorage](https://github.com/codeforanchorage).
