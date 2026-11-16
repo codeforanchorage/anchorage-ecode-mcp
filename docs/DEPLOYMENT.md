@@ -1,123 +1,158 @@
-# Deployment Guide
+# Deployment
 
-Deploy OpenContext to AWS Lambda. See [Getting Started](GETTING_STARTED.md) for the quick path.
+The server runs on AWS Lambda behind API Gateway, deployed with Terraform by
+`scripts/deploy.sh`. Deploys are manual; CI checks the code but does not
+deploy. See [Getting Started](GETTING_STARTED.md) for the short version.
 
 ## Prerequisites
 
-- AWS account, AWS CLI configured
+- AWS account and the AWS CLI, configured
 - Terraform >= 1.0
 - Python 3.11+
+- eCode360 API credentials
 
-## AWS Permissions
+## AWS permissions
 
-- Lambda (create, update functions)
-- IAM (roles, policies)
-- CloudWatch Logs
-- API Gateway / Lambda Function URLs
+The deploying identity needs to manage Lambda, IAM roles and policies,
+CloudWatch Logs and alarms, API Gateway, ACM certificates and WAF
+associations, and to read and write the Terraform state bucket.
 
-## Deployment
-
-```bash
-# Configure AWS
-aws configure
-
-# Create config from template (if needed)
-cp config-example.yaml config.yaml
-# Edit config.yaml - enable exactly ONE plugin
-
-# Deploy (validates config, packages, deploys)
-./scripts/deploy.sh
-```
-
-### Manual Terraform
-
-First-time: bootstrap the S3 backend (run once). See [terraform/bootstrap/README.md](../terraform/bootstrap/README.md):
+## Deploying
 
 ```bash
-cd terraform/bootstrap
-terraform init && terraform apply
+./scripts/deploy.sh --environment prod
 ```
 
-Then deploy:
+The script:
+
+1. Validates `config.yaml` (exactly one plugin enabled)
+2. Builds the Lambda package: `plugins/`, `config.yaml` and the dependencies
+   in `requirements.txt`, including `opencontext-core`
+3. Selects the Terraform workspace (`anchorage-ecode-prod`)
+4. Runs `terraform plan` with `prod.tfvars` and saves the plan
+5. Asks for confirmation, then applies the saved plan
+
+Read the plan before confirming. A code-only change shows one in-place update
+of the Lambda function with a new `source_code_hash`.
+
+After a deploy, run the smoke test against production:
 
 ```bash
-cd terraform/aws
-terraform init
-terraform plan -var="config_file=config.yaml"
-terraform apply
+python scripts/smoke_prod.py
 ```
 
-The deploy script copies `config.yaml` into `terraform/aws/` before running Terraform. For manual runs, ensure `config.yaml` exists in the project root or pass the correct path.
+### Always go through the script
 
-## Endpoints
+`terraform/aws/config.yaml` is a build artifact. The script copies the
+repo-root `config.yaml` over it while packaging. A bare `terraform plan` run
+inside `terraform/aws/` reads the stale copy, so a config change can appear to
+apply while changing nothing.
 
-| Endpoint | Use Case | Auth |
-|----------|----------|------|
-| **API Gateway** | Production | Rate limiting, daily quota |
-| **Lambda Function URL** | Testing | None |
+### Workspaces and state
 
-### Get URLs
+State lives in a shared S3 bucket, `anchorage-gis-opencontext-tfstate`, used by
+several MCP servers. Deployments are isolated by Terraform **workspace**, not
+by bucket. Before any manual Terraform command, check the workspace:
 
 ```bash
 cd terraform/aws
-terraform output -raw api_gateway_url   # Production (includes /mcp)
-terraform output -raw lambda_url      # Testing
+terraform workspace show     # must print anchorage-ecode-prod
 ```
 
-### API Gateway
+Applying in the wrong workspace changes a different server. Do not rename the
+bucket: that would orphan every workspace's state.
 
-- **Rate limit:** 100 burst, 50 sustained req/s (configurable via Terraform variables)
-- **Daily quota:** 1000 requests/day (configurable via `api_quota_limit`)
-- **Stage name:** Default is `staging`; URL format: `https://...execute-api.region.amazonaws.com/staging/mcp`
-- **429** when exceeded
-- Use for production; Lambda URL has no auth
+For a deployment in a new AWS account, create a state bucket first (see
+[terraform/bootstrap/README.md](../terraform/bootstrap/README.md)) and point
+`terraform/aws/backend.tf` at it.
 
-## Configuration
+### Environments
 
-Config is passed via `OPENCONTEXT_CONFIG` env var. Create `config.yaml` from `config-example.yaml`, edit it, and run `./scripts/deploy.sh` to update.
+Only `prod` is defined: the script reads `terraform/aws/<environment>.tfvars`,
+and `prod.tfvars` is the only one in the repo. To add a staging environment,
+create `staging.tfvars`; the script would use the `anchorage-ecode-staging`
+workspace for it.
 
-### Lambda Settings (in config.yaml)
+## Credentials
 
-```yaml
-aws:
-  region: "us-east-1"
-  lambda_name: "my-mcp-server"   # Optional; defaults from server_name
-  lambda_memory: 512             # 128–10240 MB
-  lambda_timeout: 120            # 1–900 seconds
+The eCode360 key and secret reach the Lambda as environment variables set by
+Terraform. Put them in `terraform/aws/secrets.auto.tfvars` (gitignored; copy
+`secrets.auto.tfvars.example`), or export `TF_VAR_ecode_api_key` and
+`TF_VAR_ecode_api_secret`.
+
+Never put them in `config.yaml`. That file is packaged into the Lambda zip.
+
+## Endpoint
+
+```bash
+cd terraform/aws
+terraform output -raw api_gateway_url   # ends in /mcp
 ```
+
+Production is also served on the custom domain,
+`https://anchorage-ecode.codeforanchorage.org/mcp`. There is no Lambda
+Function URL.
+
+## Limits in production
+
+| Setting | Value | Where |
+| --- | --- | --- |
+| Lambda memory | 1024 MB | `config.yaml` (`aws.lambda_memory`) |
+| Lambda timeout | 28 s | `config.yaml` (`aws.lambda_timeout`) |
+| Lambda reserved concurrency | 30 | `prod.tfvars` |
+| API Gateway throttle | 15 req/s sustained, 30 burst | `prod.tfvars` |
+| API Gateway daily quota | 3,000 | `prod.tfvars` |
+| WAF per-IP limit | 2,000 requests per 5 minutes | shared WAF |
+
+Requests over a limit get a 429.
+
+`lambda_memory` and `lambda_timeout` are read from `config.yaml` in preference
+to `prod.tfvars`. Changing them in the tfvars alone does nothing. Keep the two
+files in step.
+
+The Lambda timeout must stay below the API Gateway integration timeout of
+29 s, which is a hard limit, and above the plugin's 20 s HTTP timeout. See
+[Architecture](ARCHITECTURE.md#timeouts).
+
+Memory also sets the CPU share. PDF text extraction in `read_attachment` is
+CPU-bound, which is why the function runs at 1024 MB while using about 150 MB.
 
 ## Monitoring
 
-- **CloudWatch Logs:** `/aws/lambda/<function-name>`, 14-day retention
-- **Tail logs:** `aws logs tail /aws/lambda/my-mcp-server --follow`
+- **Lambda logs:** `/aws/lambda/anchorage-ecode-mcp-prod`, structured JSON,
+  14-day retention
+- **API Gateway access logs:** a separate log group, 30-day retention
+- **Alarms:** Lambda errors, Lambda throttles, Lambda duration near the
+  timeout, and API Gateway 5xx
 
-## Updating & Cleanup
-
-**Update:** Change code/config, run `./scripts/deploy.sh` again.
-
-**Destroy:**
 ```bash
-cd terraform/aws
-terraform destroy -var="config_file=config.yaml"
+aws logs tail /aws/lambda/anchorage-ecode-mcp-prod --follow
 ```
 
-## Cost (us-east-1)
+The logs include client IP addresses and the queries users searched for.
+Treat downloaded logs as sensitive.
 
-- Lambda: ~$0.20/1M requests, ~$0.0000166667/GB-second
-- Function URL: Free
-- Example: 100K req/month, 512 MB, 1s avg ≈ **$1/month**
+## Updating and removing
+
+**Update:** change the code or config, then run the deploy script again.
+Clients that connected before a new tool was added may need to reconnect to
+see it.
+
+**Destroy:**
+
+```bash
+cd terraform/aws
+terraform workspace show
+terraform destroy -var-file=prod.tfvars
+```
 
 ## Troubleshooting
 
 | Issue | Solution |
-|-------|----------|
-| Multiple plugins | Enable only ONE in `config.yaml` |
-| Lambda timeout | Increase `lambda_timeout` |
-| 500 error | Check CloudWatch logs, validate config |
-| High cost | Reduce `lambda_memory`, review usage |
-
-## Security
-
-- Use API Gateway for production (rate limiting, quota)
-- Lambda URL is public—testing only
-- Store secrets in env vars, not code
+| --- | --- |
+| "Multiple Plugins Enabled" | Enable only one plugin in `config.yaml` |
+| Plan shows no change after a config edit | Terraform was run directly; use the deploy script |
+| Plan touches unexpected resources | Wrong workspace; check `terraform workspace show` |
+| Tool errors that mention credentials | The Lambda's `ECODE_API_KEY` / `ECODE_API_SECRET` are missing or wrong |
+| 504 from the gateway | The Lambda outlived 29 s; check the timeout ordering |
+| 5xx | Check the CloudWatch logs |

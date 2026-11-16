@@ -18,7 +18,7 @@ Deployment script that validates configuration and deploys the MCP server to AWS
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
 | `--environment` | `-e` | Yes | `staging` or `prod` |
-| `--tfworkspace` | `-w` | No | Terraform workspace name (default: `boston-staging` or `boston-prod`) |
+| `--tfworkspace` | `-w` | No | Terraform workspace name (default: `anchorage-ecode-staging` or `anchorage-ecode-prod`) |
 | `--help` | `-h` | No | Show help |
 
 **Examples:**
@@ -26,7 +26,7 @@ Deployment script that validates configuration and deploys the MCP server to AWS
 ./scripts/deploy.sh --environment staging
 ./scripts/deploy.sh -e prod
 ./scripts/deploy.sh --environment staging --tfworkspace my-workspace
-./scripts/deploy.sh -e prod -w boston-prod-v2
+./scripts/deploy.sh -e prod -w anchorage-ecode-prod-v2
 ```
 
 **What it does:**
@@ -34,13 +34,13 @@ Deployment script that validates configuration and deploys the MCP server to AWS
 - Packages the code for Lambda deployment
 - Selects (or creates) the specified Terraform workspace
 - Deploys to AWS using Terraform
-- Outputs the API Gateway URL and Lambda Function URL
+- Shows the plan, asks for confirmation, applies it, and prints the API Gateway URL
 
 **Requirements:**
 - Python 3.11+
 - AWS CLI configured
 - Terraform installed
-- Valid `config.yaml` in project root (create from `config-example.yaml`)
+- Valid `config.yaml` in project root
 
 ### `local_server.py`
 
@@ -59,8 +59,9 @@ python3 scripts/local_server.py
 
 **Requirements:**
 - Python 3.11+
-- `aiohttp` package (`pip install aiohttp`)
-- Valid `config.yaml` in project root (create from `config-example.yaml`)
+- `aiohttp` package (in `requirements-dev.txt`)
+- `ECODE_API_KEY` and `ECODE_API_SECRET` in the environment
+- Valid `config.yaml` in project root
 
 **Testing:**
 ```bash
@@ -87,7 +88,7 @@ Test script for Streamable HTTP transport. Tests the full MCP lifecycle.
 **What it tests:**
 1. Initialize connection and extract session ID
 2. List available tools
-3. Call a tool (`ckan__search_datasets`)
+3. Call a tool (`ecode__search_code`)
 
 **Requirements:**
 - `jq` installed (`brew install jq` on macOS)
@@ -98,8 +99,8 @@ Test script for Streamable HTTP transport. Tests the full MCP lifecycle.
 # Test local server
 ./scripts/test_streamable_http.sh
 
-# Test deployed Lambda
-./scripts/test_streamable_http.sh https://your-lambda-url.lambda-url.us-east-1.on.aws/mcp
+# Test the deployed server
+./scripts/test_streamable_http.sh https://anchorage-ecode.codeforanchorage.org/mcp
 ```
 
 ## Notes

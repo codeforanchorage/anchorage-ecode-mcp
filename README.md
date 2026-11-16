@@ -71,11 +71,14 @@ See [Getting Started](docs/GETTING_STARTED.md) for full setup.
 
 | Doc                                        | Description                                     |
 | ------------------------------------------ | ----------------------------------------------- |
-| [Getting Started](docs/GETTING_STARTED.md) | Setup and usage                                 |
+| [Quick Start](docs/QUICKSTART.md)          | Use the hosted server from Claude               |
+| [Getting Started](docs/GETTING_STARTED.md) | Run it locally or deploy a copy                 |
+| [The eCode plugin](docs/BUILT_IN_PLUGINS.md) | Tools, configuration and limits               |
 | [Architecture](docs/ARCHITECTURE.md)       | System design and plugins                       |
 | [Deployment](docs/DEPLOYMENT.md)           | AWS, Terraform, monitoring                      |
 | [Testing](docs/TESTING.md)                 | Local testing (Terminal, Claude, MCP Inspector) |
 | [Security](docs/SECURITY.md)               | Threat model and the attachment fetch limits    |
+| [FAQ](docs/FAQ.md)                         | Common questions                                |
 
 
 ---

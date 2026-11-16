@@ -1,74 +1,65 @@
-# OpenContext Configuration Template
-# ====================================
+# Configuration template
+# ======================
 #
-# Copy this file to config.yaml and customize it for your deployment:
+# This repo's live configuration is config.yaml (the Anchorage Municipal Code
+# MCP server). Use this template when deploying a copy for a different
+# eCode360 library:
 #   cp config-example.yaml config.yaml
 #
-# ⚠️  IMPORTANT: Enable ONLY ONE plugin per fork/deployment
+# IMPORTANT: enable ONLY ONE plugin per fork/deployment.
+# OpenContext enforces: One Fork = One MCP Server.
+# To deploy another MCP server, fork the repository again.
 #
-# OpenContext enforces: One Fork = One MCP Server
+# Values are NOT expanded: "${ENV_VAR}" reaches the plugin as that literal
+# string. Never put a secret in this file; it is packaged into the Lambda zip.
 #
-# This keeps deployments:
-#   ✓ Simple and focused
-#   ✓ Independently scalable
-#   ✓ Easy to maintain
-#
-# To deploy multiple MCP servers:
-#   1. Fork this repository again
-#   2. Configure ONE plugin per fork
-#   3. Deploy each fork separately
-#
-# See docs/ARCHITECTURE.md for details.
+# See docs/GETTING_STARTED.md and docs/BUILT_IN_PLUGINS.md.
 
 ---
 # Server metadata
-server_name: "Your Organization OpenData MCP" # e.g., "Boston OpenData MCP"
-description: "Your organization's open data MCP server - Safe, conversational access to your open data"
-organization: "Your Organization Name" # e.g., "City of Boston"
+server_name: "Your Municipality Municipal Code MCP"
+server_version: "1.0.0"
+description: "Read-only access to your municipality's code on eCode360: search, browse, and read sections."
+organization: "Your Municipality"
 
-# Plugin configuration
-# ====================
-#
-# IMPORTANT: Enable ONLY ONE plugin below
-# For additional MCP servers, fork this repository again
-#
+# Optional guidance returned to MCP clients when they connect. See config.yaml
+# for a full example that steers the model to cite sections.
+# instructions: |
+#   You are connected to the municipal code of ...
+
 plugins:
-  # Built-in: CKAN (for CKAN-based open data portals)
-  # Examples: data.boston.gov, data.gov, data.gov.uk
-  ckan:
-    enabled: false # Set to true to use
-    base_url: "https://data.example.gov/" # CKAN API base URL
-    portal_url: "https://data.example.gov/" # Public portal URL
-    city_name: "Your City" # City/organization name
-    timeout: 120 # HTTP timeout in seconds
-    # api_key: "${CKAN_API_KEY}"  # Optional: CKAN API key for authenticated requests
-
-  # Built-in: ArcGIS Hub (for ArcGIS Hub open data portals)
-  # Examples: hub.arcgis.com, data-boston.hub.arcgis.com
-  arcgis:
-    enabled: false # Set to true to use
-    portal_url: "https://hub.arcgis.com"
-    city_name: "Your City"
-    timeout: 120
-    # token: "${ARCGIS_TOKEN}"  # Optional: Bearer token for private items
+  # eCode360 municipal code (General Code)
+  ecode:
+    enabled: true
+    base_url: "https://api.ecode360.com"
+    customer_id: "XX0000" # your eCode360 library ID, e.g. "AN6998"
+    city_name: "Your Municipality"
+    # Per-upstream-request HTTP timeout, seconds. Keep below lambda_timeout.
+    timeout: 20
+    # NAMES of the environment variables holding the credentials, not values.
+    api_key_env: "ECODE_API_KEY"
+    api_secret_env: "ECODE_API_SECRET"
+    # Local dev only: a gitignored KEY=VALUE file loaded at startup.
+    # secrets_file: ".ecode.env"
 
   # yamllint disable rule:comments-indentation
-  # Custom: Add your own plugins here
-  # Example:
+  # Custom: add your own plugin here (see docs/CUSTOM_PLUGINS.md) and disable
+  # the one above.
   # my_custom_plugin:
   #   enabled: false
-  #   custom_config_key: "value"
   #   api_endpoint: "https://api.example.com"
   # yamllint enable rule:comments-indentation
 
 # AWS deployment settings
 aws:
-  region: "us-east-1" # AWS region for Lambda
-  lambda_name: "your-opendata-mcp" # Lambda function name (will be auto-generated if not set)
-  lambda_memory: 512 # Lambda memory in MB (128-10240)
-  lambda_timeout: 120 # Lambda timeout in seconds (max 900)
+  region: "us-west-2"
+  lambda_name: "your-ecode-mcp"
+  # Memory also sets the CPU share; PDF text extraction is CPU-bound.
+  lambda_memory: 1024
+  # Must stay under the 29s API Gateway integration timeout.
+  lambda_timeout: 28
 
 # Logging configuration
 logging:
-  level: "INFO" # Log level: DEBUG, INFO, WARNING, ERROR
-  format: "json" # Log format: json or text
+  level: "INFO" # DEBUG, INFO, WARNING, ERROR
+  format: "json" # json or text
