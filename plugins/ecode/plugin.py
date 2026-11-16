@@ -12,12 +12,13 @@ every request; all endpoints are GET under ``/v1`` and return JSON.
 
 import asyncio
 import contextvars
+import io
 import logging
 import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -55,6 +56,33 @@ CALLER_ERROR_STATUSES = frozenset({400, 404})
 SECTION_REF_RE = re.compile(
     r"^(?:§\s*)?(?=.*\d)([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)$"
 )
+
+# A reference as people write it, with an optional word saying what KIND of
+# node is meant: "Chapter 17.05", "Ch. 17.05", "Title 21", "Section 17.05",
+# "Charter Section 17.05", "AMC 21.05.010", "§ 21.05.010". Group 1 is the
+# kind word (may be absent), group 2 the number. A kind WORD must be
+# followed by whitespace, or "CHA-CT.010" would parse as "ch" + "A-CT.010".
+REF_WITH_KIND_RE = re.compile(
+    r"^(charter\s+(?:(?:section|sec\.?)\s+|§\s*)"
+    r"|(?:title|ttl\.?|chapter|ch\.?|section|sec\.?|amc)\s+"
+    r"|§+\s*)?"
+    r"([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)$",
+    re.IGNORECASE,
+)
+KIND_TITLE = "title"
+KIND_CHAPTER = "chapter"
+KIND_SECTION = "section"
+# What the table of contents calls each kind (its `label`), lowercased.
+_TOC_LABEL_KINDS = {
+    "title": KIND_TITLE,
+    "chapter": KIND_CHAPTER,
+    "regulation": KIND_CHAPTER,
+    "section": KIND_SECTION,
+}
+# The Charter's index number in the table of contents. Charter sections are
+# numbered like code CHAPTERS ("Section 17.05" vs "Ch 17.05"), which is why
+# a bare two-part number can be ambiguous.
+CHARTER_INDEX_NUM = "ttl cha"
 
 # ── Upstream resilience ─────────────────────────────────────────────────
 #
@@ -115,6 +143,39 @@ BATCH_SECTION_CHARS = 8000
 DEFINITION_NUMBER_RE = re.compile(r"^(.*)\{\d+\}$")
 MAX_DEFINITIONS = 8
 MAX_TERM_CHARS = 100
+
+# A whole chapter or title can be read by guid or number ("Title 21" is
+# 1.9 million characters, 3.5 MB of JSON -- measured 2026-11-15), and a
+# Lambda response tops out at 6 MB. The structured body is therefore capped
+# too, far above any real SECTION (the largest seen is 61,000 characters),
+# so only containers ever hit it -- and the caveat sends the caller to the
+# outline instead.
+MAX_STRUCTURED_CHARS = 200_000
+BATCH_STRUCTURED_CHARS = 100_000
+
+# ── PDF attachments ─────────────────────────────────────────────────────
+#
+# Tables the code publishes as PDFs (the Title 21 use tables above all) are
+# served from the public website, not the API. This is the ONLY place the
+# server fetches a URL a caller supplied, so the URL is checked against a
+# fixed host list and path shape before any request is made, redirects are
+# not followed, and the API credentials are never sent (a separate client).
+ATTACHMENT_HOSTS = frozenset({"live.ecode360.com", "ecode360.com"})
+ATTACHMENT_PATH_RE = re.compile(
+    r"^/attachment/\d+/[^/\\]+\.pdf$", re.IGNORECASE
+)
+# {customer} is replaced with the configured library id (re.escape'd).
+DOCUMENT_PATH_TEMPLATE = r"^/documents/{customer}/(?:[^/\\]+/)*[^/\\]+\.pdf$"
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+# Rendered text per call. Layout mode pads columns with spaces, so one page
+# of a wide table runs ~16,000 characters.
+ATTACHMENT_TEXT_CHARS = 40_000
+# Stop extracting pages when less than this is left of the call budget.
+ATTACHMENT_TIME_RESERVE_S = 3.0
+# url -> PDF bytes, for paging through one document in a warm container
+# without downloading it again. Tiny on purpose: this is not a store.
+_ATTACHMENT_CACHE: Dict[str, bytes] = {}
+ATTACHMENT_CACHE_ENTRIES = 2
 _QUOTE_CHARS_RE = re.compile('["“”]')
 
 # ── Structured output ───────────────────────────────────────────────────
@@ -151,6 +212,11 @@ CAVEAT_NO_DEFINITION_FOUND = "no_definition_found"
 CAVEAT_MULTIPLE_DEFINITIONS = "multiple_definitions"
 CAVEAT_MORE_DEFINITIONS = "more_definitions_available"
 CAVEAT_DEFINITION_TEXT_FROM_SNIPPET = "definition_text_from_snippet"
+CAVEAT_NODE_TOO_LARGE = "node_too_large"
+CAVEAT_PDF_TEXT_EXTRACTION = "pdf_text_extraction"
+CAVEAT_MORE_ATTACHMENT_PAGES = "more_attachment_pages"
+CAVEAT_ATTACHMENT_PAGE_TRUNCATED = "attachment_page_truncated"
+CAVEAT_NO_TEXT_LAYER = "no_text_layer"
 
 # ── Search-syntax guidance ──────────────────────────────────────────────
 #
@@ -245,6 +311,20 @@ _NODE_SCHEMA = {
     "required": ["guid"],
 }
 
+# Files published alongside a node (mostly PDF tables). `url` goes to
+# read_attachment.
+_ATTACHMENTS_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "url": {"type": "string"},
+        },
+        "required": ["name", "url"],
+    },
+}
+
 SEARCH_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -281,8 +361,9 @@ SEARCH_OUTPUT_SCHEMA = {
                     "is_pdf": {
                         "type": "boolean",
                         "description": (
-                            "The hit is a PDF document, so get_section will "
-                            "return an attachment rather than code text."
+                            "The hit is a PDF document, not a code section: "
+                            "pass its `url` to read_attachment to read it. "
+                            "get_section cannot open it."
                         ),
                     },
                 },
@@ -305,12 +386,15 @@ SECTION_OUTPUT_SCHEMA = {
             "type": "string",
             "description": (
                 "The full section body, including nested subsections. NOT "
-                "clipped: the markdown block caps its rendering for "
-                "readability, but truncating the machine-readable half would "
-                "defeat its purpose."
+                "clipped for any real section: the markdown block caps its "
+                "rendering for readability, but truncating the "
+                "machine-readable half would defeat its purpose. Only a "
+                "whole chapter or title larger than 200,000 characters is "
+                "cut, and then a `node_too_large` caveat says so."
             ),
         },
         "has_attachment": {"type": "boolean"},
+        "attachments": _ATTACHMENTS_SCHEMA,
         "is_pdf": {"type": "boolean"},
         "caveats": _CAVEAT_SCHEMA,
     },
@@ -352,6 +436,7 @@ SECTIONS_OUTPUT_SCHEMA = {
                         "description": "Full section body, NOT clipped.",
                     },
                     "has_attachment": {"type": "boolean"},
+                    "attachments": _ATTACHMENTS_SCHEMA,
                     "is_pdf": {"type": "boolean"},
                     "caveats": _CAVEAT_SCHEMA,
                 },
@@ -414,6 +499,52 @@ DEFINITION_OUTPUT_SCHEMA = {
         "caveats": _CAVEAT_SCHEMA,
     },
     "required": ["term", "total_count", "definitions", "summary", "caveats"],
+}
+
+ATTACHMENT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "url": {"type": "string"},
+        "filename": {"type": "string"},
+        "page_count": {"type": "integer"},
+        "layout": {
+            "type": "boolean",
+            "description": (
+                "true: columns are kept aligned with spaces (for tables). "
+                "false: plain reading-order text."
+            ),
+        },
+        "pages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "page": {"type": "integer", "description": "1-indexed"},
+                    "text": {"type": "string"},
+                },
+                "required": ["page", "text"],
+            },
+        },
+        "next_page": {
+            "type": ["integer", "null"],
+            "description": (
+                "Pass as `page` to continue; null when the last page of "
+                "the document has been returned."
+            ),
+        },
+        "summary": {"type": "string"},
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": [
+        "url",
+        "filename",
+        "page_count",
+        "layout",
+        "pages",
+        "next_page",
+        "summary",
+        "caveats",
+    ],
 }
 
 # The outline tools return a tree, not a table. Forcing chapters ->
@@ -528,6 +659,11 @@ class EcodePlugin(MCPPlugin):
         super().__init__(config)
         self.plugin_config: Optional[EcodePluginConfig] = None
         self.client: Optional[httpx.AsyncClient] = None
+        # Serialises the first fetch of a cached document so a batch of
+        # chapter numbers triggers one table-of-contents download, not ten.
+        self._static_lock = asyncio.Lock()
+        # Test seam for the attachment download client.
+        self._attachment_transport: Optional[httpx.AsyncBaseTransport] = None
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -606,6 +742,7 @@ class EcodePlugin(MCPPlugin):
         "get_section": "Get Section",
         "get_sections": "Get Sections (Batch)",
         "find_definition": "Find Definition",
+        "read_attachment": "Read Attachment (PDF)",
         "get_customer_info": "Customer Info",
     }
 
@@ -711,8 +848,13 @@ class EcodePlugin(MCPPlugin):
                     "subsections) by guid. The guid comes from search_code, "
                     "get_table_of_contents, or browse_structure. A section "
                     "NUMBER such as '21.05.010' or '§ 21.05.010' is also "
-                    "accepted and resolved to its guid. Also surfaces any "
-                    "images/attachments and the public ecode360.com link."
+                    "accepted and resolved to its guid, and so is a whole "
+                    "chapter or title written as such ('Chapter 17.05', "
+                    "'Title 21', 'Charter Section 17.05'). A chapter or "
+                    "title can be very long -- prefer browse_structure to "
+                    "list its sections and read the ones you need. Also "
+                    "lists any PDF attachments (with a url for "
+                    "read_attachment) and the public ecode360.com link."
                 ),
                 input_schema={
                     "type": "object",
@@ -720,8 +862,9 @@ class EcodePlugin(MCPPlugin):
                         "guid": {
                             "type": "string",
                             "description": (
-                                "Section/node guid (e.g. '49422044'), or a "
-                                "section number (e.g. '21.05.010')"
+                                "Section/node guid (e.g. '49422044'), a "
+                                "section number (e.g. '21.05.010'), or "
+                                "'Chapter 17.05' / 'Title 21'"
                             ),
                         },
                     },
@@ -795,6 +938,56 @@ class EcodePlugin(MCPPlugin):
                     "required": ["term"],
                 },
                 output_schema=DEFINITION_OUTPUT_SCHEMA,
+                annotations=read_only,
+            ),
+            ToolDefinition(
+                name="read_attachment",
+                description=(
+                    "Read the text of a PDF the code publishes as an "
+                    "attachment -- chiefly tables that are not in the "
+                    "section text, such as Table 21.05-1 (Table of Allowed "
+                    "Uses by zoning district) and the other tables of "
+                    "Title 21. Pass the `url` of a search_code result that "
+                    "has is_pdf=true, or an attachment url listed by "
+                    "get_section (get_section 'Title 21' lists that "
+                    "title's tables). Returns the text page by page; if "
+                    "next_page is set, call again with page=next_page. "
+                    "With layout=true (the default) columns are kept "
+                    "aligned with spaces: to read a table cell, line the "
+                    "mark up with the column headers at the top of the "
+                    "page, and tell the user to confirm against the PDF. "
+                    "Only eCode360 attachment urls for this code are "
+                    "accepted."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": (
+                                "The attachment's https url on "
+                                "ecode360.com / live.ecode360.com, exactly "
+                                "as a tool result gave it"
+                            ),
+                        },
+                        "page": {
+                            "type": "integer",
+                            "description": "1-indexed page to start from",
+                            "default": 1,
+                            "minimum": 1,
+                        },
+                        "layout": {
+                            "type": "boolean",
+                            "description": (
+                                "Keep table columns aligned (default). "
+                                "Set false for plain running text."
+                            ),
+                            "default": True,
+                        },
+                    },
+                    "required": ["url"],
+                },
+                output_schema=ATTACHMENT_OUTPUT_SCHEMA,
                 annotations=read_only,
             ),
             ToolDefinition(
@@ -892,6 +1085,27 @@ class EcodePlugin(MCPPlugin):
                     *self._format_definitions(term, data, hits, bodies)
                 )
 
+            if tool_name == "read_attachment":
+                url = self._attachment_url_arg(arguments)
+                page = self._int_arg(arguments, "page", 1)
+                if page < 1:
+                    raise ToolInputError(
+                        f"page must be 1 or greater (got {page}); pages "
+                        "are 1-indexed."
+                    )
+                layout = arguments.get("layout", True)
+                if not isinstance(layout, bool):
+                    raise ToolInputError(
+                        f"layout must be true or false (got {layout!r})."
+                    )
+                pdf = await self._download_attachment(url)
+                extracted = await asyncio.to_thread(
+                    self._extract_pdf, pdf, page, layout, _call_deadline.get()
+                )
+                return self._ok(
+                    *self._format_attachment(url, layout, extracted)
+                )
+
             if tool_name == "get_customer_info":
                 data = await self._get_static_json(self._cust_path(""))
                 return self._ok(*self._format_customer(data))
@@ -970,6 +1184,16 @@ class EcodePlugin(MCPPlugin):
                 if looks_like_reference
                 else ""
             )
+            if ".pdf" in guid.lower() or "attachment" in guid.lower():
+                # A search hit for a PDF attachment carries its file name
+                # where a guid would be; models pass it on (seen in prod
+                # for Table 21.05-1) and used to be told it "looks like a
+                # section number".
+                raise ToolInputError(
+                    f"{name} {guid!r} is a PDF attachment, not a code "
+                    "section, so it has no guid. Pass the `url` of that "
+                    "search result to read_attachment instead."
+                )
             raise ToolInputError(
                 f"{name} must be an alphanumeric node id such as '49401992' "
                 f"(got {guid!r})." + hint + " Use search_code to find the "
@@ -1041,15 +1265,23 @@ class EcodePlugin(MCPPlugin):
 
         `raw` is a guid or a section number, as get_section accepts.
         """
-        ref = self._section_ref(raw)
-        if ref:
-            guid = await self._resolve_section_number(ref)
+        parsed = self._parse_ref(raw)
+        if parsed:
+            kind, number, charter_only = parsed
+            shown = " ".join(str(raw).split())
+            guid = await self._resolve_reference(
+                kind, number, charter_only, shown
+            )
+            resolved_from: Optional[str] = (
+                number if kind is None and not charter_only else shown
+            )
         else:
             guid = self._guid_arg({"guid": raw})
+            resolved_from = None
         data = await self._get_json(
             self._cust_path(f"/code/content/{quote(guid, safe='')}")
         )
-        return data, ref
+        return data, resolved_from
 
     async def _fetch_sections(self, requested: List[str]) -> List[Any]:
         """One outcome per request, in order: a (data, ref) pair or the
@@ -1158,6 +1390,156 @@ class EcodePlugin(MCPPlugin):
     @staticmethod
     def _norm_ref(ref: Optional[str]) -> str:
         return re.sub(r"[\s§]", "", ref or "").lower()
+
+    @staticmethod
+    def _parse_ref(raw: Any) -> Optional[Tuple[Optional[str], str, bool]]:
+        """(kind or None, number, charter_only) if `raw` is a reference.
+
+        None means "treat it as a guid". A bare number needs a dot and a
+        digit to count (as _section_ref always required), so a numeric guid
+        is never mistaken for one; with a kind word in front ("Title 21")
+        the number may be a single token.
+        """
+        if not isinstance(raw, str):
+            return None
+        match = REF_WITH_KIND_RE.match(raw.strip())
+        if not match:
+            return None
+        word = " ".join((match.group(1) or "").lower().split()).rstrip(".")
+        number = match.group(2)
+        charter_only = word.startswith("charter")
+        if charter_only or word in ("section", "sec"):
+            kind: Optional[str] = KIND_SECTION
+        elif word in ("title", "ttl"):
+            kind = KIND_TITLE
+        elif word in ("chapter", "ch"):
+            kind = KIND_CHAPTER
+        else:  # no word, "AMC", or "§" -- a plain number, as always
+            kind = None
+        if kind in (None, KIND_SECTION):
+            if "." not in number or not any(c.isdigit() for c in number):
+                return None
+        return kind, number, charter_only
+
+    async def _resolve_reference(
+        self,
+        kind: Optional[str],
+        number: str,
+        charter_only: bool,
+        shown: str,
+    ) -> str:
+        """Turn a parsed reference into a guid.
+
+        Sections (three or more parts) are found by search, as before.
+        Titles, chapters and Charter sections go to the table of contents:
+        search knows a chapter only as "Ch 17.05", and a bare "17.05" is
+        BOTH Chapter 17.05 of the code and Section 17.05 of the Charter --
+        only the complete outline can say whether a number is unique.
+        """
+        explicit = kind in (KIND_TITLE, KIND_CHAPTER) or charter_only
+        if not explicit and number.count(".") != 1:
+            return await self._resolve_section_number(number)
+
+        try:
+            matches = self._outline_matches(
+                await self._get_toc(), kind, number, charter_only
+            )
+        except EcodeAPIError:
+            if explicit:
+                raise
+            # The outline is an optimisation for a bare number; search can
+            # still answer when it is down.
+            return await self._resolve_section_number(number)
+
+        if len(matches) == 1:
+            return matches[0]["guid"]
+        if not matches:
+            if explicit:
+                what = "Charter section" if charter_only else kind
+                raise ToolInputError(
+                    f"No {what} numbered {number!r} was found in the "
+                    f"published code (looked up from {shown!r}). Use "
+                    "get_table_of_contents or browse_structure to see the "
+                    "titles and chapters that exist."
+                )
+            return await self._resolve_section_number(number)
+        listed = "; ".join(
+            f"{m['display']} (guid {m['guid']})" for m in matches
+        )
+        raise ToolInputError(
+            f"{shown!r} matches {len(matches)} different entries: {listed}. "
+            "Call again with one of those guids, or say which you mean -- "
+            f"e.g. 'Chapter {number}' or 'Charter Section {number}'."
+        )
+
+    @staticmethod
+    def _norm_number(number: Optional[str]) -> str:
+        """A node's number as the outline index keys it: no §, no
+        'Section' word, no whitespace, lowercase."""
+        text = re.sub(r"[\s§]", "", number or "").lower()
+        return re.sub(r"^section", "", text)
+
+    def _outline_matches(
+        self,
+        toc: Dict[str, Any],
+        kind: Optional[str],
+        number: str,
+        charter_only: bool,
+    ) -> List[Dict[str, Any]]:
+        """Titles / chapters / sections in the outline with this number."""
+        want = self._norm_number(number)
+        out: List[Dict[str, Any]] = []
+        seen = set()
+
+        def walk(node: Any, in_charter: bool) -> None:
+            if not isinstance(node, dict):
+                return
+            index_num = (node.get("indexNum") or "").strip().lower()
+            in_charter = in_charter or index_num == CHARTER_INDEX_NUM
+            label = (node.get("label") or "").strip()
+            node_kind = _TOC_LABEL_KINDS.get(label.lower())
+            guid = str(node.get("guid") or "")
+            if (
+                node_kind
+                and guid
+                and guid not in seen
+                # A "Section" label on a non-section node is a part of the
+                # building codes ("Ch 23.10 § 101"), not a code section.
+                and (
+                    node_kind != KIND_SECTION
+                    or node.get("type") == "section"
+                )
+                and self._norm_number(node.get("number")) == want
+                and (kind is None or node_kind == kind)
+                # A bare number never means a whole title.
+                and (kind is not None or node_kind != KIND_TITLE)
+                and (not charter_only or in_charter)
+            ):
+                seen.add(guid)
+                bare = re.sub(
+                    r"^(?:§|section)\s*",
+                    "",
+                    (node.get("number") or "").strip(),
+                    flags=re.IGNORECASE,
+                )
+                words = (
+                    "Charter Section"
+                    if in_charter and node_kind == KIND_SECTION
+                    else label
+                )
+                title = (node.get("title") or "").strip()
+                out.append(
+                    {
+                        "guid": guid,
+                        "kind": node_kind,
+                        "display": f"{words} {bare} {title}".strip(),
+                    }
+                )
+            for child in node.get("children") or []:
+                walk(child, in_charter)
+
+        walk(toc, False)
+        return out
 
     async def _resolve_section_number(self, ref: str) -> str:
         """Turn a section NUMBER into its guid via search.
@@ -1331,13 +1713,21 @@ class EcodePlugin(MCPPlugin):
         failures are never cached.
         """
         key = (self.plugin_config.base_url, path)
-        now = time.monotonic()
         hit = _STATIC_CACHE.get(key)
-        if hit and hit[0] > now:
+        if hit and hit[0] > time.monotonic():
             return hit[1]
-        data = await self._get_json(path)
-        _STATIC_CACHE[key] = (now + STATIC_CACHE_TTL_S, data)
-        return data
+        async with self._static_lock:
+            # Re-check: a concurrent request in the same batch may have
+            # filled it while this one waited.
+            hit = _STATIC_CACHE.get(key)
+            if hit and hit[0] > time.monotonic():
+                return hit[1]
+            data = await self._get_json(path)
+            _STATIC_CACHE[key] = (
+                time.monotonic() + STATIC_CACHE_TTL_S,
+                data,
+            )
+            return data
 
     async def _search(self, query: str, page: int) -> Dict[str, Any]:
         return await self._get_json(
@@ -1520,7 +1910,10 @@ class EcodePlugin(MCPPlugin):
             lines.append(f"{i}. {heading}")
             lines.append(f"   guid: {guid or '(unknown)'}   type: {r.get('type', '')}")
             if is_pdf:
-                lines.append("   (PDF document — the body is a PDF, not code text)")
+                lines.append(
+                    "   (PDF document — not code text; pass the link below "
+                    "to read_attachment)"
+                )
             if snippet:
                 lines.append(f"   …{snippet}…")
             if url:
@@ -1865,6 +2258,7 @@ class EcodePlugin(MCPPlugin):
         data: Dict[str, Any],
         resolved_from: Optional[str] = None,
         max_chars: int = MAX_CONTENT_CHARS,
+        max_structured_chars: int = MAX_STRUCTURED_CHARS,
     ) -> tuple:
         guid = str(data.get("id") or data.get("guid", "") or "")
         ref = (data.get("number") or "").strip() or None
@@ -1875,6 +2269,9 @@ class EcodePlugin(MCPPlugin):
         attachments = data.get("attachments") or {}
         is_pdf = bool(data.get("pdf"))
         has_attachment = bool(attachments) or bool(images)
+        attachment_list = self._attachment_list(attachments)
+        total_chars = self._content_chars(data)
+        too_large = total_chars > max_structured_chars
 
         # Render twice: once capped for the human block, once uncapped for
         # structuredContent.
@@ -1882,7 +2279,9 @@ class EcodePlugin(MCPPlugin):
             data, depth=0, budget=[max_chars]
         )
         full_body = self._render_content_node(
-            data, depth=0, budget=[self._UNCAPPED]
+            data,
+            depth=0,
+            budget=[max_structured_chars if too_large else self._UNCAPPED],
         )
 
         entries: List[tuple] = []
@@ -1893,7 +2292,7 @@ class EcodePlugin(MCPPlugin):
             entries.append(
                 (
                     CAVEAT_RESOLVED_FROM_SECTION_NUMBER,
-                    f"Section number {resolved_from!r} was resolved to guid "
+                    f"Reference {resolved_from!r} was resolved to guid "
                     f"{guid} by exact match on its number.",
                 )
             )
@@ -1919,7 +2318,20 @@ class EcodePlugin(MCPPlugin):
                     "than text; read it at the ecode360.com link.",
                 )
             )
-        if len(full_body) > len(display_body):
+        if too_large:
+            entries.append(
+                (
+                    CAVEAT_NODE_TOO_LARGE,
+                    f"This node is a whole chapter or title of about "
+                    f"{total_chars:,} characters -- too large to return "
+                    f"in one piece. The text below is cut at "
+                    f"{max_chars:,} characters and structuredContent.text "
+                    f"at {max_structured_chars:,}. Call browse_structure "
+                    f"with guid {guid} to list its sections, then read "
+                    "the ones you need with get_sections.",
+                )
+            )
+        elif len(full_body) > len(display_body):
             entries.append(
                 (
                     CAVEAT_RENDERED_TEXT_TRUNCATED,
@@ -1940,8 +2352,12 @@ class EcodePlugin(MCPPlugin):
         ]
         if images:
             head.append(f"images: {len(images)} (relative links on ecode360.com)")
-        if attachments:
-            head.append(f"attachments: {', '.join(attachments.keys())}")
+        for item in attachment_list:
+            head.append(f"attachment: {item['name']} — {item['url']}")
+        if attachment_list:
+            head.append(
+                "(attachments are PDFs; read one with read_attachment(url))"
+            )
         head.append("")
 
         text = "\n".join(
@@ -1955,7 +2371,291 @@ class EcodePlugin(MCPPlugin):
             "url": url,
             "text": full_body,
             "has_attachment": has_attachment,
+            "attachments": attachment_list,
             "is_pdf": is_pdf,
+            "caveats": caveats,
+        }
+
+    @staticmethod
+    def _attachment_list(attachments: Any) -> List[Dict[str, str]]:
+        """[{name, url}] from the API's {name: url} mapping, urls absolute."""
+        if not isinstance(attachments, dict):
+            return []
+        out: List[Dict[str, str]] = []
+        for name, url in attachments.items():
+            if not isinstance(url, str) or not url.strip():
+                continue
+            url = url.strip()
+            if url.startswith("/"):
+                url = "https://ecode360.com" + url
+            out.append({"name": str(name), "url": url})
+        return out
+
+    def _content_chars(self, node: Any) -> int:
+        """Characters of body text under a node, without rendering it."""
+        if not isinstance(node, dict):
+            return 0
+        return len(node.get("content") or "") + sum(
+            self._content_chars(child) for child in node.get("children") or []
+        )
+
+    # ── PDF attachments ─────────────────────────────────────────────────
+
+    def _attachment_url_arg(self, args: Dict[str, Any]) -> str:
+        """Validate a caller-supplied attachment URL; return it canonical.
+
+        The one caller-controlled URL this server fetches. Everything that
+        is not an eCode360 PDF for THIS library is refused before any
+        request: scheme, host, port, credentials, query, path shape.
+        """
+        raw = args.get("url")
+        if not isinstance(raw, str) or not raw.strip():
+            raise ToolInputError(
+                "url is required -- pass the `url` of a search_code result "
+                "with is_pdf=true, or an attachment url from get_section."
+            )
+        refuse = (
+            "url must be an eCode360 PDF attachment for this code, e.g. "
+            "https://live.ecode360.com/attachment/<id>/<name>.pdf or "
+            "https://ecode360.com/documents/"
+            f"{self.plugin_config.customer_id}/<name>.pdf (got {raw.strip()!r}). "
+            "Use the url exactly as search_code or get_section returned it."
+        )
+        try:
+            parts = urlsplit(raw.strip())
+            port = parts.port
+        except ValueError as exc:
+            raise ToolInputError(refuse) from exc
+        host = (parts.hostname or "").lower()
+        path = unquote(parts.path)
+        document_re = re.compile(
+            DOCUMENT_PATH_TEMPLATE.format(
+                customer=re.escape(self.plugin_config.customer_id)
+            ),
+            re.IGNORECASE,
+        )
+        if (
+            parts.scheme != "https"
+            or host not in ATTACHMENT_HOSTS
+            or port is not None
+            or parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or ".." in path.split("/")
+            or any(ord(c) < 32 for c in path)
+            or not (ATTACHMENT_PATH_RE.match(path) or document_re.match(path))
+        ):
+            raise ToolInputError(refuse)
+        return f"https://{host}{quote(path)}"
+
+    async def _download_attachment(self, url: str) -> bytes:
+        """Fetch a validated attachment URL. No API credentials are sent,
+        and a redirect is an error rather than something to follow."""
+        cached = _ATTACHMENT_CACHE.get(url)
+        if cached is not None:
+            return cached
+        timeout = self._request_timeout() or self.plugin_config.timeout
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=False,
+                transport=self._attachment_transport,
+            ) as client:
+                async with client.stream(
+                    "GET", url, headers={"Accept": "application/pdf"}
+                ) as resp:
+                    status = resp.status_code
+                    if status in (404, 410):
+                        raise ToolInputError(
+                            f"No attachment exists at {url} (HTTP {status}). "
+                            "Take the url from a current search_code or "
+                            "get_section result."
+                        )
+                    if status != 200:
+                        raise EcodeAPIError(
+                            f"eCode360 answered HTTP {status} for the "
+                            f"attachment {url}.",
+                            status,
+                        )
+                    chunks: List[bytes] = []
+                    size = 0
+                    async for chunk in resp.aiter_bytes():
+                        size += len(chunk)
+                        if size > MAX_ATTACHMENT_BYTES:
+                            raise EcodeAPIError(
+                                f"The attachment at {url} is larger than "
+                                f"{MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB "
+                                "and cannot be read here; open the link.",
+                                413,
+                            )
+                        chunks.append(chunk)
+        except httpx.TimeoutException as e:
+            raise EcodeAPIError(
+                f"eCode360 did not deliver the attachment within "
+                f"{timeout:.0f}s ({type(e).__name__}). Try again shortly.",
+                504,
+            ) from e
+        except httpx.TransportError as e:
+            raise EcodeAPIError(
+                f"Could not reach eCode360 for the attachment: "
+                f"{type(e).__name__}{': ' + str(e) if str(e) else ''}",
+                503,
+            ) from e
+        data = b"".join(chunks)
+        if not data.lstrip()[:5].startswith(b"%PDF-"):
+            raise EcodeAPIError(
+                f"The attachment at {url} is not a PDF (it does not start "
+                "with a PDF header), so its text cannot be extracted.",
+                502,
+            )
+        while len(_ATTACHMENT_CACHE) >= ATTACHMENT_CACHE_ENTRIES:
+            _ATTACHMENT_CACHE.pop(next(iter(_ATTACHMENT_CACHE)))
+        _ATTACHMENT_CACHE[url] = data
+        return data
+
+    @staticmethod
+    def _extract_pdf(
+        data: bytes, start_page: int, layout: bool, deadline: Optional[float]
+    ) -> Dict[str, Any]:
+        """Text of consecutive pages from `start_page` (1-indexed).
+
+        Synchronous and CPU-bound; called through asyncio.to_thread. Stops
+        at the character budget or when the call's time budget is nearly
+        spent, always after at least one page.
+        """
+        # Imported here: only this tool needs it, and it should not slow
+        # the cold start of every other request.
+        from pypdf import PdfReader
+
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            if reader.is_encrypted:
+                reader.decrypt("")
+            page_count = len(reader.pages)
+        except Exception as e:
+            raise EcodeAPIError(
+                f"The attachment could not be opened as a PDF "
+                f"({type(e).__name__}); read it at its link instead.",
+                502,
+            ) from e
+        if start_page > page_count:
+            raise ToolInputError(
+                f"page {start_page} is past the end: this document has "
+                f"{page_count} page(s). Pages are 1-indexed."
+            )
+
+        pages: List[Dict[str, Any]] = []
+        used = 0
+        truncated_page: Optional[int] = None
+        number = start_page
+        while number <= page_count:
+            if pages and deadline is not None and (
+                deadline - time.monotonic() < ATTACHMENT_TIME_RESERVE_S
+            ):
+                break
+            page = reader.pages[number - 1]
+            try:
+                text = (
+                    page.extract_text(extraction_mode="layout")
+                    if layout
+                    else page.extract_text()
+                )
+            except Exception:
+                # Layout mode is the newer code path; plain extraction of
+                # the same page is better than failing the whole call.
+                try:
+                    text = page.extract_text()
+                except Exception:
+                    text = ""
+            text = "\n".join(
+                line.rstrip() for line in (text or "").splitlines()
+            )
+            text = re.sub(r"\n{3,}", "\n\n", text).strip("\n")
+            if pages and used + len(text) > ATTACHMENT_TEXT_CHARS:
+                break
+            if len(text) > ATTACHMENT_TEXT_CHARS:
+                text = text[:ATTACHMENT_TEXT_CHARS]
+                truncated_page = number
+            pages.append({"page": number, "text": text})
+            used += len(text)
+            number += 1
+        return {
+            "page_count": page_count,
+            "pages": pages,
+            "next_page": number if number <= page_count else None,
+            "truncated_page": truncated_page,
+        }
+
+    def _format_attachment(
+        self, url: str, layout: bool, extracted: Dict[str, Any]
+    ) -> tuple:
+        pages = extracted["pages"]
+        page_count = extracted["page_count"]
+        next_page = extracted["next_page"]
+        filename = unquote(url.rsplit("/", 1)[-1])
+        first, last = pages[0]["page"], pages[-1]["page"]
+        span = f"page {first}" if first == last else f"pages {first}-{last}"
+
+        entries: List[tuple] = [
+            (
+                CAVEAT_PDF_TEXT_EXTRACTION,
+                "This text was extracted from a PDF. In a table, which "
+                "column a mark belongs to is shown only by its horizontal "
+                "position under the header row"
+                + (
+                    ""
+                    if layout
+                    else " -- and layout=false discards that position, so "
+                    "do not read table cells from this output"
+                )
+                + ". Treat cell readings as provisional and tell the user "
+                f"to confirm them in the PDF: {url}",
+            )
+        ]
+        if next_page:
+            entries.append(
+                (
+                    CAVEAT_MORE_ATTACHMENT_PAGES,
+                    f"Showing {span} of {page_count}. Call read_attachment "
+                    f"again with page={next_page} to continue.",
+                )
+            )
+        if extracted["truncated_page"]:
+            entries.append(
+                (
+                    CAVEAT_ATTACHMENT_PAGE_TRUNCATED,
+                    f"Page {extracted['truncated_page']} is longer than "
+                    f"{ATTACHMENT_TEXT_CHARS:,} characters and was cut; "
+                    "read the rest in the PDF"
+                    + (" or retry with layout=false." if layout else "."),
+                )
+            )
+        empty = [pg["page"] for pg in pages if not pg["text"].strip()]
+        if empty:
+            entries.append(
+                (
+                    CAVEAT_NO_TEXT_LAYER,
+                    f"No text could be extracted from page(s) "
+                    f"{', '.join(map(str, empty))} -- they are probably "
+                    "scanned images or drawings. Read them in the PDF.",
+                )
+            )
+
+        summary = f"{filename}: {span} of {page_count}."
+        caveats, caveat_lines = self._caveats(entries)
+        lines = [summary, f"link: {url}"] + caveat_lines
+        for pg in pages:
+            lines.append("")
+            lines.append(f"--- page {pg['page']} of {page_count} ---")
+            lines.append(pg["text"] or "(no extractable text)")
+        return "\n".join(lines), {
+            "url": url,
+            "filename": filename,
+            "page_count": page_count,
+            "layout": layout,
+            "pages": pages,
+            "next_page": next_page,
+            "summary": summary,
             "caveats": caveats,
         }
 
@@ -2008,6 +2708,7 @@ class EcodePlugin(MCPPlugin):
                         "url": None,
                         "text": None,
                         "has_attachment": False,
+                        "attachments": [],
                         "is_pdf": False,
                         "caveats": [],
                     }
@@ -2018,6 +2719,7 @@ class EcodePlugin(MCPPlugin):
                 data,
                 resolved_from=resolved_from,
                 max_chars=BATCH_SECTION_CHARS,
+                max_structured_chars=BATCH_STRUCTURED_CHARS,
             )
             blocks.append(f"=== {raw} ===\n{text}")
             sections.append(

@@ -243,6 +243,7 @@ try:
               "ecode__get_section",
               "ecode__get_sections",
               "ecode__find_definition",
+              "ecode__read_attachment",
               "ecode__browse_structure",
               "ecode__get_table_of_contents",
               "ecode__get_customer_info",
@@ -458,6 +459,63 @@ try:
 except Exception as e:
     check("get_sections: empty list is a tool error, not a crash", False,
           repr(e))
+
+
+# ── 7d. chapter / title references ────────────────────────────────────────
+
+try:
+    r = call_tool("get_section", {"guid": "Chapter 17.05"})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__get_section", sc)
+    check("chapter reference resolves ('Chapter 17.05')",
+          ok and sc.get("guid") == "49401712", why or f"guid={sc.get('guid')}")
+except Exception as e:
+    check("chapter reference resolves ('Chapter 17.05')", False, repr(e))
+
+try:
+    r = call_tool("get_section", {"guid": "17.05"})
+    txt = text_of(r)
+    check(
+        "bare '17.05' is reported as ambiguous (chapter vs Charter section)",
+        bool(r["result"].get("isError"))
+        and "49401712" in txt and "48977514" in txt,
+        txt[:90],
+    )
+except Exception as e:
+    check("bare '17.05' is reported as ambiguous (chapter vs Charter section)",
+          False, repr(e))
+
+
+# ── 7e. PDF attachment: find the use table by search, then read it ────────
+
+try:
+    r = call_tool("search_code", {"query": '"Table 21.05-1"'})
+    pdf_rows = [row for row in (structured_of(r) or {}).get("rows", [])
+                if row.get("is_pdf")]
+    pdf_url = pdf_rows[0]["url"] if pdf_rows else ""
+    r = call_tool("read_attachment", {"url": pdf_url})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__read_attachment", sc)
+    first = (sc.get("pages") or [{}])[0].get("text", "")
+    check(
+        "read_attachment: Table 21.05-1 PDF found by search and read",
+        ok
+        and sc.get("page_count", 0) >= 1
+        and "TABLE OF ALLOWED USES" in first.upper()
+        and "R-1" in first,
+        why or f"pages={sc.get('page_count')} url={pdf_url[:60]}",
+    )
+except Exception as e:
+    check("read_attachment: Table 21.05-1 PDF found by search and read",
+          False, repr(e))
+
+try:
+    r = call_tool("read_attachment",
+                  {"url": "https://example.com/attachment/1/a.pdf"})
+    check("read_attachment: a non-eCode360 url is refused",
+          bool(r["result"].get("isError")), text_of(r)[:80])
+except Exception as e:
+    check("read_attachment: a non-eCode360 url is refused", False, repr(e))
 
 
 # ── 7c. definitions: a defined term, and a term with no definition ────────
