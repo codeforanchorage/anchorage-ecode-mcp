@@ -493,6 +493,31 @@ except Exception as e:
 # ── 7d. chapter / title references ────────────────────────────────────────
 
 try:
+    # A node longer than one response must say how to read on, and the
+    # offset it gives must work and return different text.
+    import re as _re
+
+    r = call_tool("get_section", {"guid": "Chapter 9.28"})
+    first = text_of(r)
+    found = _re.search(r"INCOMPLETE.*?offset=(\d+)", first, _re.S)
+    more = ""
+    if found:
+        more = text_of(
+            call_tool(
+                "get_section",
+                {"guid": "Chapter 9.28", "offset": int(found.group(1))},
+            )
+        )
+    check(
+        "long node is marked INCOMPLETE and continues from its offset",
+        bool(found) and "characters" in more and more[-200:] != first[-200:],
+        f"offset={found.group(1) if found else None} next={len(more)} chars",
+    )
+except Exception as e:
+    check("long node is marked INCOMPLETE and continues from its offset",
+          False, repr(e))
+
+try:
     r = call_tool("get_section", {"guid": "Chapter 17.05"})
     sc = structured_of(r) or {}
     ok, why = conforms("ecode__get_section", sc)
