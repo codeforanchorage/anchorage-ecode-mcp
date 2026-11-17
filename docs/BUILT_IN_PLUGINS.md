@@ -80,7 +80,7 @@ no body text.
 One node of the hierarchy and its immediate children. Start at `ROOT` and walk
 down by child guid.
 
-### `get_section(guid)`
+### `get_section(guid, offset=0)`
 
 The full text of a section with its nested subsections, the public
 `ecode360.com` link, and a list of any attachments. The `guid` argument accepts:
@@ -93,11 +93,21 @@ A bare two-part number such as `17.05` can be ambiguous, because the Charter
 has a Section 17.05 and the code has a Chapter 17.05. In that case the tool
 returns an error naming both, and the caller picks one.
 
+The text block holds up to 40,000 characters. A longer section is marked
+`INCOMPLETE` with a `rendered_text_truncated` caveat that gives the character
+range shown and the `offset` to pass on the next call; each part ends on a
+line break and the next one starts exactly there. `structuredContent.text`
+always carries the whole section.
+
 ### `get_sections(sections)`
 
 Up to 10 sections in one call, each given as a guid or a number. A section that
 cannot be fetched is reported in its place with a `section_unavailable` caveat,
 and the rest are still returned.
+
+The sections of a batch share 80,000 characters of text evenly, with at least
+8,000 each. One that is cut short names the `get_section` offset to read on
+from.
 
 ### `find_definition(term)`
 
@@ -129,7 +139,7 @@ URL. The last-updated date says how current the published text is.
 
 Every tool returns two forms of the same result:
 
-- a text block for the model to read, capped for readability (14,000
+- a text block for the model to read, capped for readability (40,000
   characters for a section)
 - `structuredContent`, validated against the tool's declared `outputSchema`,
   which carries the complete text
@@ -140,7 +150,7 @@ code and a message. The ones seen most often:
 | Caveat | Meaning |
 | --- | --- |
 | `resolved_from_section_number` | The reference was a number and was resolved to a guid |
-| `rendered_text_truncated` | The text block was capped; the full text is in `structuredContent` |
+| `rendered_text_truncated` | The text block shows part of the section; the caveat gives the `offset` for the next part, and the full text is in `structuredContent` |
 | `node_too_large` | A whole chapter or title exceeded 200,000 characters and was cut; read its parts individually |
 | `title_field_is_heading` | A search used `title:` with a number; `title:` matches headings, and `within` is the way to limit a search to a Title |
 | `scope_scan_partial` | A `within` search checked 200 hits and the query has more; the in-scope count is not complete |
