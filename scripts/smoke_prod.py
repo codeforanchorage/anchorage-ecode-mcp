@@ -336,6 +336,35 @@ except Exception as e:
     check("OR-flooded search carries terms_or_combined", False, repr(e))
 
 try:
+    # `within` filters server-side (eCode360 has no scoped search). Capability,
+    # not content: whatever matches, every row must sit in the named title.
+    r = call_tool(
+        "search_code", {"query": '"emergency vehicle"', "within": "Title 9"}
+    )
+    sc = structured_of(r)
+    valid, why = conforms("ecode__search_code", sc) if sc else (False, "no structured")
+    rows = (sc or {}).get("rows", [])
+    refs = [(row.get("ref") or "").replace("§", "").strip() for row in rows]
+    scope = (sc or {}).get("within") or {}
+    check(
+        "search within Title 9 returns only Title 9 rows",
+        bool(valid and rows) and all(
+            ref.startswith(("9.", "Ch 9.", "Ttl 9")) for ref in refs
+        ) and scope.get("query_total", 0) > len(rows),
+        why or f"{len(rows)} rows of {scope.get('query_total')} hits",
+    )
+except Exception as e:
+    check("search within Title 9 returns only Title 9 rows", False, repr(e))
+
+try:
+    r = call_tool("search_code", {"query": "dog", "within": "17.05"})
+    msg = text_of(r)
+    check("ambiguous within is refused, naming both candidates",
+          "Chapter 17.05" in msg and "Charter Section 17.05" in msg, msg[:120])
+except Exception as e:
+    check("ambiguous within is refused, naming both candidates", False, repr(e))
+
+try:
     r = call_tool("search_code", {"query": "dog license", "page": 999})
     sc = structured_of(r)
     # A page past the end must not report a complete count of zero for a
