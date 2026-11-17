@@ -125,6 +125,7 @@ code and a message. The ones seen most often:
 | `resolved_from_section_number` | The reference was a number and was resolved to a guid |
 | `rendered_text_truncated` | The text block was capped; the full text is in `structuredContent` |
 | `node_too_large` | A whole chapter or title exceeded 200,000 characters and was cut; read its parts individually |
+| `title_field_is_heading` | A search used `title:` with a number; `title:` matches headings and is not a Title filter |
 | `section_unavailable` | One section of a batch could not be fetched |
 | `multiple_definitions` | The term is defined in more than one place |
 | `no_definition_found` | No definition node matched the term |

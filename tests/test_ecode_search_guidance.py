@@ -23,6 +23,7 @@ from plugins.ecode.plugin import (
     CAVEAT_PAGE_PAST_END,
     CAVEAT_STATE_LAW_NAMED,
     CAVEAT_TERMS_OR_COMBINED,
+    CAVEAT_TITLE_FIELD_IS_HEADING,
     OR_CAVEAT_MIN_TOTAL,
     SEARCH_OUTPUT_SCHEMA,
     EcodePlugin,
@@ -285,3 +286,47 @@ class TestNoMatchInCode:
         sc, _ = await _search(plugin, "x", 3, payload=payload)
         assert sc["total_count"] is None
         assert CAVEAT_NO_MATCH_IN_CODE not in _codes(sc)
+
+
+# --------------------------------------------------------------------------
+# title:<number> is not a Title filter (prod, 2026-11-15/16)
+# --------------------------------------------------------------------------
+
+
+class TestTitleFieldIsHeading:
+    @pytest.mark.parametrize(
+        "query",
+        [
+            '"emergency vehicle" AND stationary AND title:9*',
+            '"hazard lights" OR "tow truck" AND title:9',
+            '"28.15" AND Title:"21"',
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_empty_result_explains_title_field(self, plugin, query):
+        sc, text = await _search(plugin, query, 0)
+        assert _codes(sc) == [
+            CAVEAT_NO_MATCH_IN_CODE,
+            CAVEAT_TITLE_FIELD_IS_HEADING,
+        ]
+        assert sc["caveats"][1]["message"] in text
+
+    @pytest.mark.asyncio
+    async def test_reported_when_results_exist_too(self, plugin):
+        sc, text = await _search(plugin, "title:9", 4)
+        assert _codes(sc) == [CAVEAT_TITLE_FIELD_IS_HEADING]
+        assert sc["caveats"][0]["message"] in text
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "title:penalty AND violation",
+            'title:"notice of claim"',
+            '"Title 9" AND parking',
+            "subtitle:9",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_not_reported_for_heading_words(self, plugin, query):
+        sc, _ = await _search(plugin, query, 4)
+        assert CAVEAT_TITLE_FIELD_IS_HEADING not in _codes(sc)

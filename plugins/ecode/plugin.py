@@ -206,6 +206,7 @@ CAVEAT_RESOLVED_FROM_SECTION_NUMBER = "resolved_from_section_number"
 CAVEAT_TERMS_OR_COMBINED = "terms_or_combined"
 CAVEAT_NO_MATCH_IN_CODE = "no_match_in_code"
 CAVEAT_STATE_LAW_NAMED = "state_law_named"
+CAVEAT_TITLE_FIELD_IS_HEADING = "title_field_is_heading"
 CAVEAT_SECTION_UNAVAILABLE = "section_unavailable"
 CAVEAT_DUPLICATE_REQUESTS = "duplicate_requests_merged"
 CAVEAT_NO_DEFINITION_FOUND = "no_definition_found"
@@ -257,6 +258,11 @@ STATE_LAW_RE = re.compile(
     r"\bAS\s?\d|(?i:\bAlaska\s+Statute"
     r"|\bPublic\s+Employment\s+Relations\s+Act\b)"
 )
+# title:<digit> -- a caller trying to limit a search to a numbered Title
+# of the code. title: searches headings, so title:9 matches the four
+# headings containing "9" and `x AND title:9*` matches nothing (seen three
+# times from attorney sessions, 2026-11-15/16). There is no Title filter.
+TITLE_NUMBER_RE = re.compile(r'(?i)\btitle:"?\d')
 # Named state acts whose citation is known, so the hint can be concrete.
 STATE_LAW_CITATIONS = {
     "public employment relations act": "AS 23.40",
@@ -653,7 +659,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.4.0"
+    plugin_version = "1.4.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -759,7 +765,8 @@ class EcodePlugin(MCPPlugin):
                     "to 20 matching sections per page, each with its title, "
                     "section number, a highlighted snippet and a guid; pass "
                     "the guid to get_section to read the full text. Page "
-                    "through results with `page` (0-indexed).\n\n"
+                    "through results with `page`: the first page is "
+                    "page=0 (the default), the next is page=1.\n\n"
                     "QUERY SYNTAX: terms written side by side are matched "
                     "with OR, so a list of words or phrases matches every "
                     "section containing ANY of them -- often hundreds or "
@@ -769,7 +776,10 @@ class EcodePlugin(MCPPlugin):
                     "exclude one. Parentheses group, e.g. "
                     '("notice of claim" OR "claim for damages") AND '
                     "municipality; a trailing * is a wildcard (liab*); "
-                    "title:word matches section titles. Proximity search "
+                    "title:word matches words in a section's heading "
+                    "(title:penalty) -- it is NOT a filter on Title number, "
+                    "and none exists: title:9 does not mean Title 9. "
+                    "Proximity search "
                     '("a b"~3) is NOT supported -- the ~N is ignored and '
                     "the phrase must match exactly.\n\n"
                     'Example: "snow" AND "sidewalk" AND "occupant" returns '
@@ -797,7 +807,10 @@ class EcodePlugin(MCPPlugin):
                         },
                         "page": {
                             "type": "integer",
-                            "description": "0-indexed result page (20 results/page)",
+                            "description": (
+                                "0-indexed result page, 20 results/page: "
+                                "0 is the first page, 1 the second"
+                            ),
                             "default": 0,
                             "minimum": 0,
                         },
@@ -1855,6 +1868,9 @@ class EcodePlugin(MCPPlugin):
                 # nothing. Say what that does and does not mean; models (and
                 # their users) otherwise read it as "no such law exists".
                 entries.extend(self._no_match_caveats(query))
+        title_caveat = self._title_number_caveat(query)
+        if title_caveat:
+            entries.append(title_caveat)
 
         caveats, caveat_lines = self._caveats(entries)
         return "\n".join([summary] + caveat_lines), {
@@ -1970,6 +1986,9 @@ class EcodePlugin(MCPPlugin):
         or_caveat = self._or_flood_caveat(query, total_count)
         if or_caveat:
             entries.append(or_caveat)
+        title_caveat = self._title_number_caveat(query)
+        if title_caveat:
+            entries.append(title_caveat)
 
         caveats, caveat_lines = self._caveats(entries)
         lines.extend(caveat_lines)
@@ -2036,6 +2055,20 @@ class EcodePlugin(MCPPlugin):
                 else "."
             )
             + " This is guidance, not an error.",
+        )
+
+    @staticmethod
+    def _title_number_caveat(query: str) -> Optional[tuple]:
+        if not TITLE_NUMBER_RE.search(query or ""):
+            return None
+        return (
+            CAVEAT_TITLE_FIELD_IS_HEADING,
+            "title: matches words in a section's HEADING; it does not "
+            "limit a search to a numbered Title of the code, and no such "
+            "filter exists. Run the query again without the title: term "
+            "and tell Titles apart by section number (§ 9.x is Title 9), "
+            "or walk the Title with get_table_of_contents / "
+            "browse_structure.",
         )
 
     def _no_match_caveats(self, query: str) -> List[tuple]:
