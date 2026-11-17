@@ -241,7 +241,8 @@ class TestGetSections:
 
     @pytest.mark.asyncio
     async def test_long_body_is_capped_in_text_but_whole_in_structured(self):
-        body = "x" * (ecode_mod.BATCH_SECTION_CHARS + 500)
+        # One section in the batch gets the whole batch allowance.
+        body = "x" * (ecode_mod.BATCH_TOTAL_CHARS + 500)
         long = _section("111", "§\xa01.01.010", "Long.", content=body)
         result = await p_execute(long)
 
