@@ -45,9 +45,10 @@ No. The hosted server is public and read-only.
 
 ### I don't see the newer tools
 
-A connector keeps the tool list from when it connected. Disconnect and
-reconnect it in Settings → Connectors. The server has eight tools; see the
-[README](../README.md#tools).
+Start a new conversation: one already in progress may keep the tool list it
+began with. If the new tools or parameters still do not appear, disconnect and
+reconnect the connector in Settings → Connectors. The server has eight tools;
+see the [README](../README.md#tools).
 
 ### Can it read the zoning use tables?
 

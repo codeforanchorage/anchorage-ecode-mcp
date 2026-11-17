@@ -36,8 +36,14 @@ logger = logging.getLogger(__name__)
 # Public, human-facing URL for any node — its guid is the path segment.
 PUBLIC_URL = "https://ecode360.com/{guid}"
 
-# Cap rendered section text so a deeply nested chapter cannot blow up a response.
-MAX_CONTENT_CHARS = 14000
+# Cap on the rendered section text in one response. It was 14,000 until
+# 2026-11-17: prod logs showed 5 of 151 attorney calls cut short (the DUI
+# section § 9.28.020 is 27,585 characters, the fine schedule § 9.48.130
+# 18,745) with no follow-up read, and a client that shows the model only
+# the text block never sees structuredContent.text. 40,000 returns every
+# section seen cut in those logs whole; anything longer is read on with
+# get_section's `offset`.
+MAX_CONTENT_CHARS = 40_000
 
 # Node guids are opaque alphanumeric identifiers (in this library, all
 # numeric -- e.g. 49401992). ROOT is the reserved alias for the top of the
@@ -132,9 +138,11 @@ _STATIC_CACHE: Dict[Tuple[str, str], Tuple[float, Any]] = {}
 MAX_BATCH_SECTIONS = 10
 # Upstream requests in flight at once for one tool call.
 BATCH_CONCURRENCY = 5
-# Per-section cap on the rendered markdown in a batch. Lower than
-# MAX_CONTENT_CHARS because up to ten bodies share one response; the full
-# text is still in structuredContent.
+# Rendered text in a batch: the sections read share BATCH_TOTAL_CHARS
+# evenly, and none gets less than BATCH_SECTION_CHARS. Two sections get
+# 40,000 each, ten get 8,000 each. A section cut short names the
+# get_section offset to read on from; the full text is in structuredContent.
+BATCH_TOTAL_CHARS = 80_000
 BATCH_SECTION_CHARS = 8000
 
 # eCode360 publishes each defined term as its own node, numbered as the
@@ -704,7 +712,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.5.0"
+    plugin_version = "1.6.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -930,7 +938,11 @@ class EcodePlugin(MCPPlugin):
                     "title can be very long -- prefer browse_structure to "
                     "list its sections and read the ones you need. Also "
                     "lists any PDF attachments (with a url for "
-                    "read_attachment) and the public ecode360.com link."
+                    "read_attachment) and the public ecode360.com link. "
+                    f"Up to {MAX_CONTENT_CHARS:,} characters of text are "
+                    "returned per call; a longer section says so and "
+                    "gives the `offset` to call again with for the rest "
+                    "-- read it all before summarizing the section."
                 ),
                 input_schema={
                     "type": "object",
@@ -942,6 +954,17 @@ class EcodePlugin(MCPPlugin):
                                 "section number (e.g. '21.05.010'), or "
                                 "'Chapter 17.05' / 'Title 21'"
                             ),
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": (
+                                "Character position to continue reading "
+                                "from, for a section longer than one "
+                                "response. Use the value given in the "
+                                "rendered_text_truncated note."
+                            ),
+                            "default": 0,
+                            "minimum": 0,
                         },
                     },
                     "required": ["guid"],
@@ -1143,11 +1166,20 @@ class EcodePlugin(MCPPlugin):
                 return self._ok(*self._format_structure(node))
 
             if tool_name == "get_section":
+                offset = self._int_arg(arguments, "offset", 0)
+                if offset < 0:
+                    raise ToolInputError(
+                        f"offset must be 0 or greater (got {offset}); it is "
+                        "the character position to read on from, as given "
+                        "in a rendered_text_truncated note."
+                    )
                 data, resolved_from = await self._fetch_section(
                     arguments.get("guid")
                 )
                 return self._ok(
-                    *self._format_content(data, resolved_from=resolved_from)
+                    *self._format_content(
+                        data, resolved_from=resolved_from, offset=offset
+                    )
                 )
 
             if tool_name == "get_sections":
@@ -2681,6 +2713,7 @@ class EcodePlugin(MCPPlugin):
         resolved_from: Optional[str] = None,
         max_chars: int = MAX_CONTENT_CHARS,
         max_structured_chars: int = MAX_STRUCTURED_CHARS,
+        offset: int = 0,
     ) -> tuple:
         guid = str(data.get("id") or data.get("guid", "") or "")
         ref = (data.get("number") or "").strip() or None
@@ -2695,16 +2728,29 @@ class EcodePlugin(MCPPlugin):
         total_chars = self._content_chars(data)
         too_large = total_chars > max_structured_chars
 
-        # Render twice: once capped for the human block, once uncapped for
-        # structuredContent.
-        display_body = self._render_content_node(
-            data, depth=0, budget=[max_chars]
-        )
+        # Render once, whole, for structuredContent. The text block shows a
+        # window of that same rendering, so a caller can read on from the
+        # character where one response stopped (`offset`).
         full_body = self._render_content_node(
             data,
             depth=0,
             budget=[max_structured_chars if too_large else self._UNCAPPED],
         )
+        if offset and offset >= len(full_body):
+            raise ToolInputError(
+                f"offset {offset} is past the end of this section, which "
+                f"is {len(full_body):,} characters long. Use the offset "
+                "given in the rendered_text_truncated note, or leave it "
+                "out to read from the start."
+            )
+        shown_end = min(len(full_body), offset + max_chars)
+        if shown_end < len(full_body):
+            # End on a line break when one is near, so a subsection is not
+            # cut mid-sentence; the next call starts exactly there.
+            line_end = full_body.rfind("\n", offset + max_chars // 2, shown_end)
+            if line_end > offset:
+                shown_end = line_end + 1
+        display_body = full_body[offset:shown_end]
 
         entries: List[tuple] = []
 
@@ -2753,14 +2799,25 @@ class EcodePlugin(MCPPlugin):
                     "the ones you need with get_sections.",
                 )
             )
-        elif len(full_body) > len(display_body):
+        elif shown_end < len(full_body):
             entries.append(
                 (
                     CAVEAT_RENDERED_TEXT_TRUNCATED,
-                    f"The text below is capped at {max_chars:,} "
-                    f"characters ({len(full_body):,} in full). The complete "
-                    f"body is in structuredContent.text, or fetch child "
-                    f"guids individually with get_section.",
+                    f"INCOMPLETE: the text below is characters "
+                    f"{offset + 1:,}-{shown_end:,} of {len(full_body):,} "
+                    "in this section. To read on, call get_section with "
+                    f"guid {guid} and offset={shown_end}. (The complete "
+                    "body is also in structuredContent.text.)",
+                )
+            )
+        elif offset:
+            entries.append(
+                (
+                    CAVEAT_RENDERED_TEXT_TRUNCATED,
+                    f"The text below is characters {offset + 1:,}-"
+                    f"{shown_end:,} of {len(full_body):,}: the end of this "
+                    "section, continued from an earlier call. Its start is "
+                    "not repeated here.",
                 )
             )
 
@@ -3108,6 +3165,10 @@ class EcodePlugin(MCPPlugin):
         blocks: List[str] = []
         sections: List[Dict[str, Any]] = []
         entries: List[tuple] = []
+        per_section = max(
+            BATCH_SECTION_CHARS,
+            BATCH_TOTAL_CHARS // max(1, len(outcomes) - len(failures)),
+        )
         for raw, outcome in zip(requested, outcomes):
             if isinstance(outcome, BaseException):
                 message = str(outcome) or type(outcome).__name__
@@ -3140,7 +3201,7 @@ class EcodePlugin(MCPPlugin):
             text, structured = self._format_content(
                 data,
                 resolved_from=resolved_from,
-                max_chars=BATCH_SECTION_CHARS,
+                max_chars=per_section,
                 max_structured_chars=BATCH_STRUCTURED_CHARS,
             )
             blocks.append(f"=== {raw} ===\n{text}")
