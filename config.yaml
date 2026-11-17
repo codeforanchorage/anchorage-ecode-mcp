@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.6.1"
+server_version: "1.7.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -23,8 +23,11 @@ instructions: |
      terms that must all appear with AND (or +term), exclude with NOT.
      Parentheses group; proximity ("a b"~3) is NOT supported.
      title:word matches words in a section's heading; it is not a filter
-     on Title number (title:9 does not mean Title 9) and none exists --
-     tell Titles apart by section number (§ 9.x is Title 9).
+     on Title number (title:9 does not mean Title 9).
+     To search only one part of the code, pass within, e.g.
+     search_code(query, within="Title 9") or within="Chapter 9.28". It
+     checks up to 200 hits per call and says so when the query has more;
+     narrow the query with AND rather than paging where you can.
      Example: "snow" AND "sidewalk" AND "occupant" -> 4 sections, led by
      § 24.80.090; the same three terms without AND -> 254.
      If AND returns too few, drop the least essential term. If a search
