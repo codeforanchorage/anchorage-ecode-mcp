@@ -39,7 +39,7 @@ plugins:
 On the wire each tool name is prefixed with the plugin name, for example
 `ecode__search_code`.
 
-### `search_code(query, page=0)`
+### `search_code(query, page=0, within=None)`
 
 Full-text search. Returns up to 20 sections per page, each with its number,
 title, a highlighted snippet and a guid.
@@ -52,6 +52,23 @@ Proximity search (`"a b"~3`) is not supported.
 ```
 "snow" AND "sidewalk" AND "occupant"     → 4 sections, led by § 24.80.090
 ```
+
+`within` limits the results to one part of the code. It accepts what
+`get_section` accepts: `Title 9`, `Chapter 9.28`, a section number, or a guid
+from the table of contents. eCode360 has no scoped search, so the server does
+the filtering: it reads up to 200 hits for the query (10 upstream pages),
+places each one using the table of contents, and returns those under the
+requested node.
+
+- With `within`, `page` moves through the query's hits 200 at a time.
+- `total_count` is the number of hits inside the scope when every hit for the
+  query was checked, and `null` otherwise, with a `scope_scan_partial` caveat.
+- PDF documents have no place in the outline and are left out, with a
+  `scope_unplaced_hits` caveat.
+- A scope that matches more than one node (`17.05` is both a chapter and a
+  Charter section) is refused with the candidates listed.
+- `title:` in a query is a different thing: it matches words in a section's
+  heading and does not select a Title.
 
 ### `get_table_of_contents()`
 
@@ -125,7 +142,10 @@ code and a message. The ones seen most often:
 | `resolved_from_section_number` | The reference was a number and was resolved to a guid |
 | `rendered_text_truncated` | The text block was capped; the full text is in `structuredContent` |
 | `node_too_large` | A whole chapter or title exceeded 200,000 characters and was cut; read its parts individually |
-| `title_field_is_heading` | A search used `title:` with a number; `title:` matches headings and is not a Title filter |
+| `title_field_is_heading` | A search used `title:` with a number; `title:` matches headings, and `within` is the way to limit a search to a Title |
+| `scope_scan_partial` | A `within` search checked 200 hits and the query has more; the in-scope count is not complete |
+| `no_match_in_scope` | The query matches elsewhere in the code but not inside the `within` scope |
+| `scope_unplaced_hits` | PDF documents and nodes outside the outline were left out of a `within` search |
 | `section_unavailable` | One section of a batch could not be fetched |
 | `multiple_definitions` | The term is defined in more than one place |
 | `no_definition_found` | No definition node matched the term |
