@@ -207,6 +207,9 @@ CAVEAT_TERMS_OR_COMBINED = "terms_or_combined"
 CAVEAT_NO_MATCH_IN_CODE = "no_match_in_code"
 CAVEAT_STATE_LAW_NAMED = "state_law_named"
 CAVEAT_TITLE_FIELD_IS_HEADING = "title_field_is_heading"
+CAVEAT_SCOPE_SCAN_PARTIAL = "scope_scan_partial"
+CAVEAT_NO_MATCH_IN_SCOPE = "no_match_in_scope"
+CAVEAT_SCOPE_UNPLACED_HITS = "scope_unplaced_hits"
 CAVEAT_SECTION_UNAVAILABLE = "section_unavailable"
 CAVEAT_DUPLICATE_REQUESTS = "duplicate_requests_merged"
 CAVEAT_NO_DEFINITION_FOUND = "no_definition_found"
@@ -263,6 +266,22 @@ STATE_LAW_RE = re.compile(
 # headings containing "9" and `x AND title:9*` matches nothing (seen three
 # times from attorney sessions, 2026-11-15/16). There is no Title filter.
 TITLE_NUMBER_RE = re.compile(r'(?i)\btitle:"?\d')
+
+# ── Scoped search (`within`) ────────────────────────────────────────────
+#
+# eCode360 search cannot be limited to a title or chapter: verified live
+# 2026-11-17, the endpoint ignores every scoping and page-size parameter
+# and has no query field for a node's number or parent. So the server
+# filters. It reads up to SCOPE_SCAN_PAGES upstream pages (20 hits each)
+# per call and keeps the hits that sit under the requested node. Nine
+# pages fetched concurrently measured 0.6-1.0 s.
+#
+# A hit is placed by its guid in the cached table of contents (about 92%
+# of hits measured), else by the section its number extends -- definition
+# and subsection nodes such as 9.04.010B{43} are not in the outline but
+# belong to § 9.04.010. PDF documents have no place and are left out.
+SCOPE_SCAN_PAGES = 10
+SEARCH_PAGE_SIZE = 20
 # Named state acts whose citation is known, so the hint can be concrete.
 STATE_LAW_CITATIONS = {
     "public employment relations act": "AS 23.40",
@@ -377,6 +396,32 @@ SEARCH_OUTPUT_SCHEMA = {
             },
         },
         "caveats": _CAVEAT_SCHEMA,
+        "within": {
+            "type": "object",
+            "description": (
+                "Present only for a search limited with `within`: the "
+                "title, chapter or section the rows were filtered to. "
+                "total_count then counts hits inside it, and is null when "
+                "the query has more hits than one call checks (see the "
+                "scope_scan_partial caveat)."
+            ),
+            "properties": {
+                "guid": {"type": "string"},
+                "display": {"type": "string"},
+                "hits_checked": {
+                    "type": "integer",
+                    "description": "Hits for the query examined by this call",
+                },
+                "query_total": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        "Hits for the query in the whole code, in or out "
+                        "of the scope"
+                    ),
+                },
+            },
+            "required": ["guid", "display", "hits_checked", "query_total"],
+        },
     },
     "required": ["query", "page", "total_count", "summary", "rows", "caveats"],
 }
@@ -659,7 +704,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.4.1"
+    plugin_version = "1.5.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -777,9 +822,9 @@ class EcodePlugin(MCPPlugin):
                     '("notice of claim" OR "claim for damages") AND '
                     "municipality; a trailing * is a wildcard (liab*); "
                     "title:word matches words in a section's heading "
-                    "(title:penalty) -- it is NOT a filter on Title number, "
-                    "and none exists: title:9 does not mean Title 9. "
-                    "Proximity search "
+                    "(title:penalty) -- it is NOT a filter on Title number: "
+                    "title:9 does not mean Title 9 (use `within` for "
+                    "that). Proximity search "
                     '("a b"~3) is NOT supported -- the ~N is ignored and '
                     "the phrase must match exactly.\n\n"
                     'Example: "snow" AND "sidewalk" AND "occupant" returns '
@@ -788,6 +833,14 @@ class EcodePlugin(MCPPlugin):
                     "returns hundreds. If AND returns too few, drop the "
                     "least essential term rather than reverting to a bag of "
                     "words.\n\n"
+                    "LIMIT TO PART OF THE CODE: pass `within` (e.g. "
+                    "'Title 9', 'Chapter 9.28', or a guid) to keep only "
+                    "hits under that title, chapter or section. The server "
+                    "checks up to 200 hits for the query per call and "
+                    "returns those inside the scope; if the query has "
+                    "more, a scope_scan_partial note says so and `page` "
+                    "moves to the next 200. PDF documents are left out of "
+                    "a scoped search.\n\n"
                     "No results means this code does not contain that "
                     "text, which can itself be the answer (the rule may be "
                     "state law, repealed, or worded differently); broaden "
@@ -813,6 +866,16 @@ class EcodePlugin(MCPPlugin):
                             ),
                             "default": 0,
                             "minimum": 0,
+                        },
+                        "within": {
+                            "type": "string",
+                            "description": (
+                                "Optional. Limit results to one title, "
+                                "chapter or section: 'Title 9', 'Chapter "
+                                "9.28', '9.28.020', or its guid. With "
+                                "`within`, each page checks 200 hits for "
+                                "the query instead of returning 20."
+                            ),
                         },
                     },
                     "required": ["query"],
@@ -1055,6 +1118,13 @@ class EcodePlugin(MCPPlugin):
                     raise ToolInputError(
                         f"page must be 0 or greater (got {page}); results are "
                         "0-indexed, 20 per page."
+                    )
+                within = arguments.get("within")
+                if within is not None and str(within).strip():
+                    return self._ok(
+                        *await self._scoped_search(
+                            query, page, str(within).strip()
+                        )
                     )
                 data = await self._search(query, page)
                 return self._ok(*self._format_search(data, query, page))
@@ -1554,6 +1624,316 @@ class EcodePlugin(MCPPlugin):
         walk(toc, False)
         return out
 
+    # ── Scoped search ───────────────────────────────────────────────────
+
+    async def _resolve_scope(self, within: str) -> Dict[str, Any]:
+        """The outline node `within` names, with what is needed to tell
+        whether a search hit sits under it.
+
+        Resolved from the table of contents only -- never by search -- so
+        an ambiguous or unknown scope is an error rather than a guess.
+        """
+        hint = (
+            " Write the title or chapter as it is cited, e.g. 'Title 9' or "
+            "'Chapter 9.28', or pass the guid of a title, chapter or "
+            "section from get_table_of_contents / browse_structure."
+        )
+        toc = await self._get_toc()
+        if not isinstance(toc, dict) or toc.get("_fallback"):
+            raise ToolInputError(
+                "within cannot be used right now: the full outline of the "
+                "code could not be loaded, so hits cannot be placed. "
+                "Search without `within` and read each result's section "
+                "number instead."
+            )
+
+        parsed = self._parse_ref(within)
+        if parsed is None and within.isdigit() and len(within) <= 3:
+            # "9" for Title 9. Guids are far longer, so this cannot hide one.
+            parsed = (KIND_TITLE, within, False)
+        display = ""
+        if parsed is not None:
+            kind, number, charter_only = parsed
+            matches = self._outline_matches(toc, kind, number, charter_only)
+            if not matches:
+                raise ToolInputError(
+                    f"within {within!r} does not name a title, chapter or "
+                    "section in the published code." + hint
+                )
+            if len(matches) > 1:
+                listed = "; ".join(
+                    f"{m['display']} (guid {m['guid']})" for m in matches
+                )
+                raise ToolInputError(
+                    f"within {within!r} matches {len(matches)} different "
+                    f"entries: {listed}. Pass one of those guids, or say "
+                    f"which you mean -- e.g. 'Chapter {number}' or "
+                    f"'Charter Section {number}'."
+                )
+            guid = matches[0]["guid"]
+            display = matches[0]["display"]
+        elif GUID_RE.match(within) and within.upper() != "ROOT":
+            guid = within
+        else:
+            raise ToolInputError(
+                f"within {within!r} is not a title, chapter, section or "
+                "guid." + hint
+            )
+
+        in_scope: set = set()
+        all_guids: set = set()
+        by_number: Dict[str, set] = {}
+        found: List[Dict[str, Any]] = []
+
+        def walk(node: Any, inside: bool) -> None:
+            if not isinstance(node, dict):
+                return
+            node_guid = str(node.get("guid") or "")
+            if node_guid == guid and not found:
+                found.append(node)
+                inside = True
+            if node_guid:
+                all_guids.add(node_guid)
+                if inside:
+                    in_scope.add(node_guid)
+                if node.get("type") == "section":
+                    number = self._norm_number(node.get("number"))
+                    if number:
+                        by_number.setdefault(number, set()).add(node_guid)
+            for child in node.get("children") or []:
+                walk(child, inside)
+
+        walk(toc, False)
+        if not found:
+            raise ToolInputError(
+                f"within {within!r} is not in the outline of the published "
+                "code (a definition or subsection cannot be a scope)." + hint
+            )
+        if found[0] is toc:
+            raise ToolInputError(
+                "within names the whole code; leave `within` out to search "
+                "all of it."
+            )
+        if not display:
+            node = found[0]
+            display = " ".join(
+                part
+                for part in (
+                    (node.get("label") or "").strip(),
+                    (node.get("number") or "").strip(),
+                    (node.get("title") or "").strip(),
+                )
+                if part
+            ) or f"guid {guid}"
+        return {
+            "guid": guid,
+            "display": display,
+            "in_scope": in_scope,
+            "all_guids": all_guids,
+            "by_number": by_number,
+        }
+
+    def _hit_in_scope(
+        self, hit: Dict[str, Any], scope: Dict[str, Any]
+    ) -> Optional[bool]:
+        """True / False when the hit can be placed, None when it cannot
+        (a PDF document, or a node unknown to the outline)."""
+        if hit.get("pdf") or hit.get("type") == "doc":
+            return None
+        guid = str(hit.get("id") or self._guid_from_url(hit.get("url", "")))
+        if guid in scope["all_guids"]:
+            return guid in scope["in_scope"]
+        # Not an outline node: a definition or subsection, numbered as an
+        # extension of its section (9.04.010B{43} -> § 9.04.010). Take the
+        # LONGEST section number that prefixes it, from the whole outline,
+        # so a hit is never credited to a shorter look-alike in scope.
+        number = self._norm_number(hit.get("number")).split("{")[0]
+        while number:
+            owners = scope["by_number"].get(number)
+            if owners:
+                return bool(owners & scope["in_scope"])
+            number = number[:-1]
+        return None
+
+    async def _scoped_search(
+        self, query: str, page: int, within: str
+    ) -> tuple:
+        """search_code limited to one title / chapter / section.
+
+        `page` counts scan windows of SCOPE_SCAN_PAGES upstream pages, not
+        single upstream pages. The query sent upstream is the caller's,
+        unmodified, as everywhere else.
+        """
+        scope = await self._resolve_scope(within)
+        first_page = page * SCOPE_SCAN_PAGES
+        first = await self._search(query, first_page)
+        max_pages = self._as_int(first.get("maxPages", 1), default=1)
+        raw_total = first.get("totalResultCount")
+        query_total = None if raw_total is None else self._as_int(raw_total)
+
+        gate = asyncio.Semaphore(BATCH_CONCURRENCY)
+
+        async def one(upstream_page: int) -> Dict[str, Any]:
+            async with gate:
+                return await self._search(query, upstream_page)
+
+        stop = min(max_pages, first_page + SCOPE_SCAN_PAGES)
+        rest = await asyncio.gather(
+            *(one(p) for p in range(first_page + 1, stop))
+        )
+        hits: List[Dict[str, Any]] = []
+        for data in [first, *rest]:
+            hits.extend(data.get("results") or [])
+        return self._format_scoped_search(
+            query, page, scope, hits, query_total, max_pages
+        )
+
+    def _format_scoped_search(
+        self,
+        query: str,
+        page: int,
+        scope: Dict[str, Any],
+        hits: List[Dict[str, Any]],
+        query_total: Optional[int],
+        max_pages: int,
+    ) -> tuple:
+        display = scope["display"]
+        kept: List[Dict[str, Any]] = []
+        documents = 0
+        unknown = 0
+        for hit in hits:
+            placed = self._hit_in_scope(hit, scope)
+            if placed is None:
+                if hit.get("pdf") or hit.get("type") == "doc":
+                    documents += 1
+                else:
+                    unknown += 1
+            elif placed:
+                kept.append(hit)
+
+        window = SCOPE_SCAN_PAGES * SEARCH_PAGE_SIZE
+        first_hit = page * window + 1
+        last_hit = page * window + len(hits)
+        more_after = (page + 1) * SCOPE_SCAN_PAGES < max_pages
+        # Only a scan of every hit for the query gives a complete count.
+        complete = page == 0 and not more_after
+        total_count: Optional[int] = len(kept) if complete else None
+        of_total = (
+            f" of {query_total}" if query_total is not None else ""
+        )
+
+        entries: List[tuple] = []
+        if kept:
+            checked = (
+                f"all {len(hits)} hit(s) for the query were checked"
+                if complete
+                else f"hits {first_hit}-{last_hit}{of_total} were checked"
+            )
+            summary = (
+                f"{len(kept)} result(s) for {query!r} within {display}; "
+                f"{checked}."
+            )
+        elif query_total == 0:
+            summary = f"No results for query {query!r}."
+            entries.extend(self._no_match_caveats(query))
+        elif not hits:
+            summary = (
+                f"No results on page {page + 1} for query {query!r} "
+                f"within {display}."
+            )
+            last_window = max(0, -(-max_pages // SCOPE_SCAN_PAGES) - 1)
+            entries.append(
+                (
+                    CAVEAT_PAGE_PAST_END,
+                    f"Page {page + 1} is past the end: the query has "
+                    f"{query_total if query_total is not None else 'fewer'} "
+                    f"hit(s), and with `within` each page checks {window} "
+                    f"of them. Re-request a page between 0 and "
+                    f"{last_window}.",
+                )
+            )
+        else:
+            summary = f"No results for query {query!r} within {display}."
+            entries.append(
+                (
+                    CAVEAT_NO_MATCH_IN_SCOPE,
+                    f"None of the {len(hits)} hit(s) checked for this "
+                    f"query is in {display}. The query does match "
+                    "elsewhere in the code -- search again without "
+                    "`within` to see where -- so this says only that "
+                    f"{display} does not contain it"
+                    + (
+                        "."
+                        if not more_after
+                        else " among the hits checked so far."
+                    ),
+                )
+            )
+
+        if more_after and hits:
+            entries.append(
+                (
+                    CAVEAT_SCOPE_SCAN_PARTIAL,
+                    f"Only hits {first_hit}-{last_hit}{of_total} for this "
+                    f"query were checked, so matches in {display} beyond "
+                    "them are not shown and the count is not complete. "
+                    "Call search_code again with the same query and "
+                    f"within, and page={page + 1}, to check the next "
+                    f"{window}; or narrow the query with AND so every hit "
+                    "is checked in one call.",
+                )
+            )
+        if documents or unknown:
+            what = " and ".join(
+                part
+                for part in (
+                    f"{documents} PDF document hit(s)" if documents else "",
+                    f"{unknown} hit(s) with no place in the outline"
+                    if unknown
+                    else "",
+                )
+                if part
+            )
+            entries.append(
+                (
+                    CAVEAT_SCOPE_UNPLACED_HITS,
+                    f"{what} cannot be assigned to a title or chapter and "
+                    "were left out. Search without `within` to see them.",
+                )
+            )
+        title_caveat = self._title_number_caveat(query)
+        if title_caveat:
+            entries.append(title_caveat)
+
+        lines = [summary, ""] if kept else [summary]
+        hit_lines, rows = self._render_hits(kept, 1)
+        lines.extend(hit_lines)
+        distinct = len({row["guid"] for row in rows})
+        if distinct and distinct != len(rows):
+            entries.append(
+                (
+                    CAVEAT_DUPLICATE_SECTIONS,
+                    f"{len(rows)} hits cover {distinct} distinct "
+                    "section(s); count sections, not hits.",
+                )
+            )
+        caveats, caveat_lines = self._caveats(entries)
+        lines.extend(caveat_lines)
+        return "\n".join(lines), {
+            "query": query,
+            "page": page,
+            "total_count": total_count,
+            "summary": summary,
+            "rows": rows,
+            "caveats": caveats,
+            "within": {
+                "guid": scope["guid"],
+                "display": display,
+                "hits_checked": len(hits),
+                "query_total": query_total,
+            },
+        }
+
     async def _resolve_section_number(self, ref: str) -> str:
         """Turn a section NUMBER into its guid via search.
 
@@ -1882,35 +2262,15 @@ class EcodePlugin(MCPPlugin):
             "caveats": caveats,
         }
 
-    def _format_search(
-        self, data: Dict[str, Any], query: str = "", page: int = 0
-    ) -> tuple:
-        results = data.get("results", []) or []
-        query = data.get("query") or query
-        page = self._as_int(data.get("page", page))
-        max_pages = self._as_int(data.get("maxPages", 1), default=1)
-
-        # `totalResultCount` absent is NOT the same as zero. Only a search
-        # that ran and matched nothing is a known count of 0.
-        raw_total = data.get("totalResultCount")
-        if raw_total is not None:
-            total_count = self._as_int(raw_total)
-        else:
-            total_count = 0 if not results else None
-
-        if not results:
-            return self._empty_search_result(
-                query, page, total_count, max_pages
-            )
-
+    def _render_hits(
+        self, results: List[Any], first_index: int
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        """(rendered lines, structured rows) for search hits, numbered
+        from `first_index`. Shared by plain and scoped search so a hit
+        reads the same in both."""
+        lines: List[str] = []
         rows: List[Dict[str, Any]] = []
-        lines = [
-            f"{total_count if total_count is not None else len(results)} "
-            f"result(s) for {query!r} "
-            f"(page {page + 1} of {max_pages}, 20/page):",
-            "",
-        ]
-        for i, r in enumerate(results, 1 + page * 20):
+        for i, r in enumerate(results, first_index):
             # Search results key the node id as `id`; the snippet as `text`;
             # and both title and snippet may contain <em> highlight markup.
             # guid and ref are taken as the API returned them and never
@@ -1953,6 +2313,37 @@ class EcodePlugin(MCPPlugin):
                         "is_pdf": is_pdf,
                     }
                 )
+        return lines, rows
+
+    def _format_search(
+        self, data: Dict[str, Any], query: str = "", page: int = 0
+    ) -> tuple:
+        results = data.get("results", []) or []
+        query = data.get("query") or query
+        page = self._as_int(data.get("page", page))
+        max_pages = self._as_int(data.get("maxPages", 1), default=1)
+
+        # `totalResultCount` absent is NOT the same as zero. Only a search
+        # that ran and matched nothing is a known count of 0.
+        raw_total = data.get("totalResultCount")
+        if raw_total is not None:
+            total_count = self._as_int(raw_total)
+        else:
+            total_count = 0 if not results else None
+
+        if not results:
+            return self._empty_search_result(
+                query, page, total_count, max_pages
+            )
+
+        lines = [
+            f"{total_count if total_count is not None else len(results)} "
+            f"result(s) for {query!r} "
+            f"(page {page + 1} of {max_pages}, 20/page):",
+            "",
+        ]
+        hit_lines, rows = self._render_hits(results, 1 + page * 20)
+        lines.extend(hit_lines)
 
         entries: List[tuple] = []
         if page + 1 < max_pages:
@@ -2064,11 +2455,9 @@ class EcodePlugin(MCPPlugin):
         return (
             CAVEAT_TITLE_FIELD_IS_HEADING,
             "title: matches words in a section's HEADING; it does not "
-            "limit a search to a numbered Title of the code, and no such "
-            "filter exists. Run the query again without the title: term "
-            "and tell Titles apart by section number (§ 9.x is Title 9), "
-            "or walk the Title with get_table_of_contents / "
-            "browse_structure.",
+            "limit a search to a numbered Title of the code. Run the query "
+            "again without the title: term and pass the `within` argument "
+            "instead, e.g. within='Title 9' or within='Chapter 9.28'.",
         )
 
     def _no_match_caveats(self, query: str) -> List[tuple]:
