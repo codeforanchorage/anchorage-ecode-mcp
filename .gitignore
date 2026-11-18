@@ -212,6 +212,9 @@ lambda-deployment.zip
 terraform/*/.terraform/
 terraform/*/.terraform.lock.hcl
 terraform/*/lambda-deployment.zip
+# Saved plans embed sensitive variables (the API key and secret) in plaintext.
+tfplan
+*.tfplan
 
 # Terraform state (contains secrets, ignore across all folders)
 **/*.tfstate
