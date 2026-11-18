@@ -210,7 +210,7 @@ Enforced by code today; do not relax without explicit discussion.
 | 4 | Response bodies are written to CloudWatch with name-key redaction only — no value-pattern scrub | low risk here: the payload is published law, and the credentials are outbound-only |
 | 5 | Access-log `sourceIp` is raw; not hashed | open |
 | 6 | No request-body size cap at API Gateway itself | mitigated 2026-11-18: the shared WAF blocks oversized bodies with 403 (a 70 KB POST was refused at the edge, verified live), and behind it the handler refuses bodies over 64 KB (`server_max_body_bytes`) |
-| 7 | One client under the WAF per-IP limit (2000 / 5 min) can hold most of the 30 concurrency slots with slow calls, and each call can fan out to ~10 eCode360 requests | open — the limit is high because Claude.ai users share Anthropic's egress IPs |
+| 7 | One client under the WAF per-IP limit (2000 / 5 min) can hold most of the 30 concurrency slots with slow calls, and each call can fan out to ~10 eCode360 requests | open; repeated requests are absorbed by a five-minute response cache (2026-11-18), distinct ones are not — the limit is high because Claude.ai users share Anthropic's egress IPs |
 
 ## Verifying a change
 

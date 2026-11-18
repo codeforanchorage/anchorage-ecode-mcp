@@ -180,7 +180,14 @@ The plugin calls the eCode360 API at `api.ecode360.com` with an `api-key` /
 downloads PDFs from the public eCode360 website, without the API credentials.
 
 The table of contents and library metadata are cached in the Lambda process
-between requests. Section text is always fetched fresh.
+between requests for an hour. Search pages, section text and structure
+nodes are cached for five minutes, so a repeated search or a re-read of a
+section in the same conversation usually costs no upstream request; an
+amended section can read stale for up to five minutes.
+`get_customer_info` reports the date the published code was last updated,
+and `get_section` / `get_sections` repeat it on every result as
+`code_last_updated`. It is the date of the whole code, not of the section:
+eCode360 gives no per-section date.
 
 ## Writing a different plugin
 

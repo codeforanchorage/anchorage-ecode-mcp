@@ -36,10 +36,30 @@ def clear_ecode_static_cache():
     from plugins.ecode import plugin as ecode_plugin
 
     ecode_plugin._STATIC_CACHE.clear()
+    ecode_plugin._RECENT_CACHE.clear()
     try:
         yield
     finally:
         ecode_plugin._STATIC_CACHE.clear()
+        ecode_plugin._RECENT_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def no_code_date_lookup(request, monkeypatch):
+    """Stop get_section / get_sections from looking up the code's
+    last-updated date, unless the test is marked `code_date`.
+
+    The lookup is one more upstream call, which would otherwise have to be
+    supplied by every test that scripts the client's responses in order.
+    """
+    if request.node.get_closest_marker("code_date"):
+        return
+    from plugins.ecode.plugin import EcodePlugin
+
+    async def unknown(self):
+        return None
+
+    monkeypatch.setattr(EcodePlugin, "_code_last_updated", unknown)
 
 
 @pytest.fixture(autouse=True)
