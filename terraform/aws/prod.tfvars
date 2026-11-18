@@ -44,3 +44,8 @@ enable_gcc_route = false
 # so that rolling back (use_shared_waf = false) restores the original limit.
 # See mcp-stats/docs/waf-consolidation.md.
 use_shared_waf = true
+
+# SNS topic the CloudWatch alarms (cloudwatch_alarms.tf) notify. Created by
+# hand 2026-11-18 with an email subscription, like the other forks' topics;
+# without it the alarms change state and tell nobody.
+alarm_sns_topic_arn = "arn:aws:sns:us-west-2:420839047325:anchorage-ecode-mcp-prod-alarms"

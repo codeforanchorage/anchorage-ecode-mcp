@@ -1,8 +1,14 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.8.0"
+server_version: "1.8.1"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
+
+# Refuse a request body larger than this before parsing it (-32600).
+# The largest legitimate request is a get_sections call or a search
+# with client _meta: a few KB. Without a cap the only limit is
+# Lambda's 6 MB payload ceiling.
+server_max_body_bytes: 65536
 
 # Per-deployment guidance returned in the MCP `initialize` response. Steers the
 # model to ANSWER municipal-code questions from these tools (with citations)

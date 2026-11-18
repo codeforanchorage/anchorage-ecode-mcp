@@ -122,12 +122,27 @@ refusals.
   (`plugins/ecode/plugin.py::_guid_arg`). This also catches the common
   model mistake of passing a section *number*.
 - **`page`** is coerced through `_int_arg` and must be >= 0.
+- **`query`** is capped at 2,000 characters and **`within`** at 200
+  (`MAX_QUERY_CHARS`, `MAX_WITHIN_CHARS`); `find_definition`'s `term` at
+  100. Longer values are refused before any upstream call.
+- **Request bodies over 64 KB are refused** before parsing
+  (`server_max_body_bytes` in `config.yaml`, enforced by the core's HTTP
+  handler).
 - **`arguments`** must be a JSON object; a non-object is rejected at the
   JSON-RPC layer with -32602 and never reaches the plugin
   (`core/mcp_server.py::_handle_tools_call`).
 - There is **no SQL surface**: the eCode360 API takes a search string,
   not a query language, so nothing corresponding to `WhereValidator`
   is needed.
+
+### Alerting
+
+- The CloudWatch alarms in `terraform/aws/cloudwatch_alarms.tf` (Lambda
+  errors, Lambda throttles, duration near timeout, API Gateway 5XX)
+  notify the SNS topic `anchorage-ecode-mcp-prod-alarms`
+  (`alarm_sns_topic_arn` in `prod.tfvars`), which has an email
+  subscription. The topic was created by hand, like the other forks'.
+  Until 2026-11-18 the variable was unset and the alarms notified nobody.
 
 ### Logs
 
@@ -194,8 +209,8 @@ Enforced by code today; do not relax without explicit discussion.
 | 3 | Origin allowlist includes `localhost:6274` / `127.0.0.1:6274` (MCP Inspector) in prod | accepted; revisit when non-public tools land |
 | 4 | Response bodies are written to CloudWatch with name-key redaction only — no value-pattern scrub | low risk here: the payload is published law, and the credentials are outbound-only |
 | 5 | Access-log `sourceIp` is raw; not hashed | open |
-| 6 | No request-body size cap at API Gateway (Lambda's 6 MB ceiling applies) | open |
-| 7 | No CI; lint and tests are run locally | open — `.github/workflows/` does not exist in this fork despite CLAUDE.md's CI section |
+| 6 | No request-body size cap at API Gateway itself | mitigated 2026-11-18: the shared WAF blocks oversized bodies with 403 (a 70 KB POST was refused at the edge, verified live), and behind it the handler refuses bodies over 64 KB (`server_max_body_bytes`) |
+| 7 | One client under the WAF per-IP limit (2000 / 5 min) can hold most of the 30 concurrency slots with slow calls, and each call can fan out to ~10 eCode360 requests | open — the limit is high because Claude.ai users share Anthropic's egress IPs |
 
 ## Verifying a change
 
@@ -221,7 +236,7 @@ Before merging anything that touches `plugins/ecode/`, `server/`,
    state bucket also holds other MCPs' workspaces.
 5. `.venv/Scripts/python.exe scripts/smoke_prod.py` against deployed
    prod. This asserts capabilities, not the content of the code, so it
-   should stay at 27/27 across eCode360 republications.
+   should keep passing across eCode360 republications.
 
 ## Reporting issues
 

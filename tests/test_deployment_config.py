@@ -164,3 +164,23 @@ class TestCapacity:
         assert _tfvar_int("lambda_reserved_concurrency") >= _tfvar_int(
             "api_burst_limit"
         )
+
+
+class TestAbuseGuards:
+    """Settings that exist to limit and surface abuse of the public route."""
+
+    def test_request_body_is_capped(self):
+        """Without server_max_body_bytes the only limit on a request body is
+        Lambda's 6 MB payload ceiling. Real requests are a few KB."""
+        limit = _load(CONFIG).get("server_max_body_bytes")
+        assert isinstance(limit, int) and 0 < limit <= 1024 * 1024
+
+    def test_alarms_notify_a_topic(self):
+        """With alarm_sns_topic_arn unset the alarms are created with no
+        actions: they change state and nobody is told."""
+        text = PROD_TFVARS.read_text(encoding="utf-8")
+        assert re.search(
+            r'^alarm_sns_topic_arn\s*=\s*"arn:aws:sns:[^"]+"\s*$',
+            text,
+            re.MULTILINE,
+        )

@@ -151,6 +151,12 @@ BATCH_SECTION_CHARS = 8000
 DEFINITION_NUMBER_RE = re.compile(r"^(.*)\{\d+\}$")
 MAX_DEFINITIONS = 8
 MAX_TERM_CHARS = 100
+# Caps on the free-text search arguments. A real query is a phrase or a
+# few terms joined with AND; `within` is a short reference. The caps keep
+# a caller from pushing kilobytes of text through to the upstream API
+# (a scoped search sends the query up to SCOPE_SCAN_PAGES times).
+MAX_QUERY_CHARS = 2000
+MAX_WITHIN_CHARS = 200
 
 # A whole chapter or title can be read by guid or number ("Title 21" is
 # 1.9 million characters, 3.5 MB of JSON -- measured 2026-11-15), and a
@@ -712,7 +718,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.6.0"
+    plugin_version = "1.6.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -1136,6 +1142,12 @@ class EcodePlugin(MCPPlugin):
                         "query is required -- pass the words or phrase to search "
                         "the municipal code for (e.g. 'dog license')."
                     )
+                if len(query) > MAX_QUERY_CHARS:
+                    raise ToolInputError(
+                        f"query is too long (at most {MAX_QUERY_CHARS} "
+                        f"characters, got {len(query)}). Search for a "
+                        "phrase or a few terms joined with AND."
+                    )
                 page = self._int_arg(arguments, "page", 0)
                 if page < 0:
                     raise ToolInputError(
@@ -1144,6 +1156,12 @@ class EcodePlugin(MCPPlugin):
                     )
                 within = arguments.get("within")
                 if within is not None and str(within).strip():
+                    if len(str(within).strip()) > MAX_WITHIN_CHARS:
+                        raise ToolInputError(
+                            f"within is too long (at most {MAX_WITHIN_CHARS} "
+                            "characters). Pass a title, chapter or section "
+                            "reference such as 'Title 9' or 'Chapter 9.28'."
+                        )
                     return self._ok(
                         *await self._scoped_search(
                             query, page, str(within).strip()

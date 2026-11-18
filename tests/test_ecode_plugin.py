@@ -205,6 +205,32 @@ class TestExecuteTool:
         assert "query is required" in result.error_message
 
     @pytest.mark.asyncio
+    async def test_search_refuses_an_oversized_query(self, ecode_config):
+        """A query past the cap is refused before any upstream call."""
+        from plugins.ecode.plugin import MAX_QUERY_CHARS
+
+        plugin = _plugin_with_client(ecode_config, get_return=_mock_response({}))
+        result = await plugin.execute_tool(
+            "search_code", {"query": "a" * (MAX_QUERY_CHARS + 1)}
+        )
+        assert result.success is False
+        assert "query is too long" in result.error_message
+        plugin.client.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_refuses_an_oversized_within(self, ecode_config):
+        from plugins.ecode.plugin import MAX_WITHIN_CHARS
+
+        plugin = _plugin_with_client(ecode_config, get_return=_mock_response({}))
+        result = await plugin.execute_tool(
+            "search_code",
+            {"query": "dog", "within": "9" * (MAX_WITHIN_CHARS + 1)},
+        )
+        assert result.success is False
+        assert "within is too long" in result.error_message
+        plugin.client.get.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_search_code(self, ecode_config):
         # Shape mirrors the live API: guid in `id`, snippet in `text`, `page`
         # comes back as a string, and title/snippet carry <em> highlight markup.
