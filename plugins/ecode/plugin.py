@@ -13,6 +13,7 @@ every request; all endpoints are GET under ``/v1`` and return JSON.
 import asyncio
 import contextvars
 import io
+import json
 import logging
 import os
 import re
@@ -128,6 +129,27 @@ STATIC_CACHE_TTL_S = 3600.0
 # an event loop. The key carries base_url and the path carries the
 # customer id, so two differently-configured plugins cannot share entries.
 _STATIC_CACHE: Dict[Tuple[str, str], Tuple[float, Any]] = {}
+
+# Search pages, section text and structure nodes are cached for a few
+# minutes, also per container. A conversation re-reads the same things in
+# bursts: get_section after a search resolved its number, each `offset`
+# part of a long section (every part used to re-fetch the whole node), a
+# scoped search paged or repeated. Each hit is one fewer request on the
+# licensed upstream API. The TTL is short because nothing says when the
+# code is republished; five minutes bounds how long an amended section
+# can read stale.
+RECENT_CACHE_TTL_S = 300.0
+# Bounds, in characters of JSON. A whole title can be megabytes ("Title 21"
+# is 3.5 MB), so one large node is not kept, and the oldest entries go
+# first once the total is reached. 20M characters is a few tens of MB of
+# parsed objects against a 1024 MB function.
+RECENT_CACHE_ENTRY_CHARS = 1_000_000
+RECENT_CACHE_TOTAL_CHARS = 20_000_000
+# (base_url, path, params) -> (expires_at monotonic, json, chars), oldest
+# first. Entries are shared between calls: READ ONLY, never mutate one.
+_RECENT_CACHE: Dict[
+    Tuple[str, str, Tuple[Tuple[str, Any], ...]], Tuple[float, Any, int]
+] = {}
 
 # ── Batch reads and definitions ─────────────────────────────────────────
 #
@@ -439,6 +461,19 @@ SEARCH_OUTPUT_SCHEMA = {
     "required": ["query", "page", "total_count", "summary", "rows", "caveats"],
 }
 
+# The date on every section read. It is the publication date of the WHOLE
+# code, taken from the library record -- eCode360 gives no per-section
+# date -- so the wording must never suggest the section itself changed then.
+_CODE_LAST_UPDATED_SCHEMA = {
+    "type": ["string", "null"],
+    "description": (
+        "Date the published code as a whole was last updated on eCode360 "
+        "(YYYY-MM-DD as returned). NOT the date this section was last "
+        "amended. Ordinances adopted after this date may not be reflected "
+        "in the text. null when the date could not be read."
+    ),
+}
+
 SECTION_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -460,6 +495,7 @@ SECTION_OUTPUT_SCHEMA = {
         "has_attachment": {"type": "boolean"},
         "attachments": _ATTACHMENTS_SCHEMA,
         "is_pdf": {"type": "boolean"},
+        "code_last_updated": _CODE_LAST_UPDATED_SCHEMA,
         "caveats": _CAVEAT_SCHEMA,
     },
     "required": [
@@ -468,6 +504,7 @@ SECTION_OUTPUT_SCHEMA = {
         "text",
         "has_attachment",
         "is_pdf",
+        "code_last_updated",
         "caveats",
     ],
 }
@@ -508,9 +545,10 @@ SECTIONS_OUTPUT_SCHEMA = {
             },
         },
         "summary": {"type": "string"},
+        "code_last_updated": _CODE_LAST_UPDATED_SCHEMA,
         "caveats": _CAVEAT_SCHEMA,
     },
-    "required": ["sections", "summary", "caveats"],
+    "required": ["sections", "summary", "code_last_updated", "caveats"],
 }
 
 DEFINITION_OUTPUT_SCHEMA = {
@@ -717,7 +755,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.6.1"
+    plugin_version = "1.7.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -1175,7 +1213,7 @@ class EcodePlugin(MCPPlugin):
 
             if tool_name == "browse_structure":
                 guid = self._guid_arg(arguments, default="ROOT")
-                data = await self._get_json(
+                data = await self._get_recent_json(
                     self._cust_path(f"/structure/{quote(guid, safe='')}")
                 )
                 # structure responses wrap the node in an {error, results} envelope
@@ -1190,20 +1228,28 @@ class EcodePlugin(MCPPlugin):
                         "the character position to read on from, as given "
                         "in a rendered_text_truncated note."
                     )
-                data, resolved_from = await self._fetch_section(
-                    arguments.get("guid")
+                (data, resolved_from), updated = await asyncio.gather(
+                    self._fetch_section(arguments.get("guid")),
+                    self._code_last_updated(),
+                )
+                text, structured = self._format_content(
+                    data, resolved_from=resolved_from, offset=offset
                 )
                 return self._ok(
-                    *self._format_content(
-                        data, resolved_from=resolved_from, offset=offset
-                    )
+                    *self._with_code_date(text, structured, updated)
                 )
 
             if tool_name == "get_sections":
                 requested, merged = self._sections_arg(arguments)
-                outcomes = await self._fetch_sections(requested)
+                outcomes, updated = await asyncio.gather(
+                    self._fetch_sections(requested),
+                    self._code_last_updated(),
+                )
+                text, structured = self._format_sections(
+                    requested, outcomes, merged
+                )
                 return self._ok(
-                    *self._format_sections(requested, outcomes, merged)
+                    *self._with_code_date(text, structured, updated)
                 )
 
             if tool_name == "find_definition":
@@ -1410,7 +1456,7 @@ class EcodePlugin(MCPPlugin):
         else:
             guid = self._guid_arg({"guid": raw})
             resolved_from = None
-        data = await self._get_json(
+        data = await self._get_recent_json(
             self._cust_path(f"/code/content/{quote(guid, safe='')}")
         )
         return data, resolved_from
@@ -1489,7 +1535,7 @@ class EcodePlugin(MCPPlugin):
         async def one(guid: str) -> Optional[str]:
             async with gate:
                 try:
-                    node = await self._get_json(
+                    node = await self._get_recent_json(
                         self._cust_path(
                             f"/code/content/{quote(guid, safe='')}"
                         )
@@ -2171,8 +2217,76 @@ class EcodePlugin(MCPPlugin):
             )
             return data
 
+    async def _get_recent_json(
+        self, path: str, params: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """_get_json through the short-lived _RECENT_CACHE.
+
+        Successes are kept for RECENT_CACHE_TTL_S; failures are never
+        cached. The result may be shared with other calls, so callers
+        must not mutate it.
+        """
+        key = (
+            self.plugin_config.base_url,
+            path,
+            tuple(sorted((params or {}).items())),
+        )
+        now = time.monotonic()
+        hit = _RECENT_CACHE.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+        data = await self._get_json(path, params)
+        chars = len(json.dumps(data, ensure_ascii=False))
+        if chars > RECENT_CACHE_ENTRY_CHARS:
+            return data
+        # Drop what has expired, then the oldest until this entry fits.
+        # Re-inserting moves a refreshed key to the end (newest).
+        _RECENT_CACHE.pop(key, None)
+        for old in [k for k, v in _RECENT_CACHE.items() if v[0] <= now]:
+            del _RECENT_CACHE[old]
+        total = sum(v[2] for v in _RECENT_CACHE.values())
+        while _RECENT_CACHE and total + chars > RECENT_CACHE_TOTAL_CHARS:
+            total -= _RECENT_CACHE.pop(next(iter(_RECENT_CACHE)))[2]
+        _RECENT_CACHE[key] = (now + RECENT_CACHE_TTL_S, data, chars)
+        return data
+
+    async def _code_last_updated(self) -> Optional[str]:
+        """The date the published code was last updated, or None.
+
+        Read from the library record (cached for STATIC_CACHE_TTL_S, so
+        this is an upstream call about once an hour per container). It
+        decorates a section read and must never fail one: any upstream
+        failure here is logged and reported as an unknown date.
+        """
+        try:
+            data = await self._get_static_json(self._cust_path(""))
+        except (EcodeAPIError, ToolInputError) as e:
+            # ToolInputError too: a 404 surfaces as EcodeNotFoundError,
+            # which is a caller-mistake type, and the caller made none.
+            logger.warning("could not read the code's updated date: %s", e)
+            return None
+        results = data.get("results", data) if isinstance(data, dict) else {}
+        if not isinstance(results, dict):
+            return None
+        value = results.get("updatedDate")
+        return str(value) if value not in (None, "") else None
+
+    @staticmethod
+    def _with_code_date(
+        text: str, structured: Dict[str, Any], updated: Optional[str]
+    ) -> tuple:
+        """Add the code's publication date to a section result."""
+        structured = {**structured, "code_last_updated": updated}
+        if updated:
+            text = (
+                f"{text}\n\nPublished code last updated {updated} (the "
+                "whole code, not this section; ordinances adopted since "
+                "may not be reflected)."
+            )
+        return text, structured
+
     async def _search(self, query: str, page: int) -> Dict[str, Any]:
-        return await self._get_json(
+        return await self._get_recent_json(
             self._cust_path("/search"), params={"query": query, "page": page}
         )
 

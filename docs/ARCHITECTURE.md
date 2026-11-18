@@ -90,7 +90,10 @@ limits. The main design points:
   probe would run on every request.
 - **Process-level cache.** The table of contents and library metadata are
   cached at module level, so they survive between invocations in a warm
-  Lambda. Section text is not cached.
+  Lambda for an hour. Search pages, section text and structure nodes are
+  cached the same way for five minutes (`RECENT_CACHE_TTL_S`), bounded in
+  size, so a section amended upstream can read stale for up to five
+  minutes in a warm container. Failures are never cached.
 - **References resolved from the outline.** Chapter and title references are
   looked up in the cached table of contents; three-part section numbers are
   resolved by search.
