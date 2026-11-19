@@ -692,3 +692,97 @@ class TestNamedScopes:
     )
     def test_roman(self, value, roman):
         assert EcodePlugin._roman(value) == roman
+
+
+# ── 1.16.1: the same names in the tools that take a guid or a reference ──
+
+
+def _reading_plugin(toc=NAMED_TOC):
+    """Answers /code/toc, /code/content/<guid> and /structure/<guid>."""
+    calls = []
+
+    async def fake_get(path, params=None, **_kw):
+        calls.append(path)
+        if path.endswith("/code/toc"):
+            return _json(toc)
+        guid = path.rsplit("/", 1)[-1]
+        if "/code/content/" in path:
+            return _json({"id": guid, "number": "", "title": f"node {guid}",
+                          "content": "Text.", "children": [],
+                          "attachments": {}, "images": []})
+        if "/structure/" in path:
+            return _json({"error": False, "results": {
+                "guid": guid, "title": f"node {guid}", "number": "",
+                "label": "Title", "children": []}})
+        return _json({"message": "unexpected"}, 404)
+
+    p = EcodePlugin(CONFIG)
+    p.plugin_config = EcodePluginConfig(**CONFIG)
+    p.client = MagicMock()
+    p.client.get = AsyncMock(side_effect=fake_get)
+    p.calls = calls
+    return p
+
+
+class TestNamedPartsInOtherTools:
+    """get_section('Charter') went upstream as a guid and came back as
+    'no such entry (HTTP 404)', while search_code accepted the name."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "ref, guid",
+        [
+            ("Charter", "cha"),
+            ("the Charter", "cha"),
+            ("Charter Article IV", "a4"),
+            ("Article IV, Charter", "a4"),
+            ("Article 13 of the Charter", "a13"),
+        ],
+    )
+    async def test_get_section(self, ref, guid):
+        p = _reading_plugin()
+        result = await p.execute_tool("get_section", {"guid": ref})
+
+        assert result.success, result.error_message
+        assert p.calls[-1].endswith(f"/code/content/{guid}")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "ref, guid",
+        [("Charter", "cha"), ("Charter Article IV", "a4"), ("Part III", "p3"),
+         ("Regulations", "p3")],
+    )
+    async def test_browse_structure(self, ref, guid):
+        p = _reading_plugin()
+        result = await p.execute_tool("browse_structure", {"guid": ref})
+
+        assert result.success, result.error_message
+        assert p.calls[-1].endswith(f"/structure/{guid}")
+
+    @pytest.mark.asyncio
+    async def test_get_sections_takes_them_in_a_batch(self):
+        p = _reading_plugin()
+        result = await p.execute_tool(
+            "get_sections", {"sections": ["Charter Article IV", "Charter"]}
+        )
+
+        assert result.success, result.error_message
+        fetched = [c.rsplit("/", 1)[-1] for c in p.calls if "/code/content/" in c]
+        assert sorted(fetched) == ["a4", "cha"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ref", ["49401992", "s928020", "ROOT"])
+    async def test_a_guid_costs_no_outline_lookup(self, ref):
+        p = _reading_plugin()
+        await p.execute_tool("browse_structure", {"guid": ref})
+
+        assert not any(c.endswith("/code/toc") for c in p.calls)
+
+    @pytest.mark.asyncio
+    async def test_unknown_article_is_still_refused(self):
+        p = _reading_plugin()
+        result = await p.execute_tool(
+            "get_section", {"guid": "Charter Article XXX"}
+        )
+        assert result.success is False
+        assert not any("/code/content/" in c for c in p.calls)
