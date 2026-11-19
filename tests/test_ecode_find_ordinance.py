@@ -558,3 +558,145 @@ class TestTableIsKeptLonger:
         await _find("2016-53", p)
 
         assert sum(1 for c in p.calls if c.endswith(CCT_GUID)) == 1
+
+
+# ── 1.16.0: ordinances the publisher holds as PDFs ───────────────────────
+
+from plugins.ecode.plugin import (  # noqa: E402
+    CAVEAT_ORDINANCE_PDF_AVAILABLE,
+    CAVEAT_ORDINANCES_NOT_YET_CODIFIED,
+    ORDINANCES_OUTPUT_SCHEMA,
+    PENDING_ORDINANCE_QUERY,
+)
+
+PDF_108 = "https://live.ecode360.com/AN6998/laws/LF2907762.pdf"
+PDF_98 = "https://live.ecode360.com/AN6998/laws/LF2907761.pdf"
+# As the live search returned them on 2026-11-19, plus hits that must be
+# ignored: another city's PDF, a code section, a table attachment.
+LAW_HITS = [
+    {"id": "LF2907762", "type": "law", "pdf": True, "url": PDF_108,
+     "title": 'AO No. <em class="highlight">2026-108</em>(S)', "text": "x"},
+    {"id": "LF2907761", "type": "law", "pdf": True, "url": PDF_98 + "?h=1",
+     "title": "AO No. 2026-98(S-1)", "text": "mentions AO 2026-47"},
+    {"id": "LF1", "type": "law", "pdf": True, "title": "AO No. 2026-1",
+     "url": "https://live.ecode360.com/VA4680/laws/LF1.pdf", "text": "x"},
+    {"id": "49672102", "type": "code", "pdf": False, "title": "AO No. 1",
+     "url": "https://ecode360.com/49672102", "text": "x"},
+    {"id": "7", "type": "doc", "pdf": True, "title": "AO No. table",
+     "url": "https://live.ecode360.com/documents/AN6998/t.pdf", "text": "x"},
+]
+
+
+def _plugin_with_pdfs(hits=LAW_HITS, search_status=200, **kwargs):
+    p = _plugin(**kwargs)
+    inner = p.client.get.side_effect
+    queries = []
+
+    async def fake_get(path, params=None, **kw):
+        if path.endswith("/search"):
+            p.calls.append(path)
+            queries.append(dict(params or {}))
+            if search_status != 200:
+                return httpx.Response(search_status, json={}, request=REQ)
+            return httpx.Response(200, request=REQ, json={
+                "results": hits if int(params["page"]) == 0 else [],
+                "page": str(params["page"]), "maxPages": 1,
+                "totalResultCount": len(hits)})
+        return await inner(path, params=params, **kw)
+
+    p.client.get = AsyncMock(side_effect=fake_get)
+    p.queries = queries
+    return p
+
+
+class TestOrdinanceItselfAsPdf:
+    """An ordinance too new for the table used to come back as 'not
+    listed' and nothing more, although the publisher holds its PDF and a
+    search finds it."""
+
+    @pytest.mark.asyncio
+    async def test_not_in_the_table_but_held_as_a_pdf(self):
+        p = _plugin_with_pdfs()
+        sc, text = await _find("AO 2026-108(S)", p)
+
+        assert sc["found"] is False
+        assert sc["ordinance_pdfs"] == [
+            {"ordinance": "AO No. 2026-108(S)", "url": PDF_108}
+        ]
+        assert _codes(sc) == [
+            CAVEAT_ORDINANCE_NOT_IN_TABLE, CAVEAT_ORDINANCE_PDF_AVAILABLE,
+        ]
+        assert sc["summary"].startswith("AO No. 2026-108(S) has been adopted")
+        assert text.startswith(sc["summary"])
+        assert PDF_108 in text and "read_attachment" in text
+        assert p.queries == [{"query": PENDING_ORDINANCE_QUERY, "page": 0}]
+
+    @pytest.mark.asyncio
+    async def test_matched_on_the_title_not_on_a_mention(self):
+        """AO 2026-98's text mentions 2026-47; that is not 2026-47's PDF.
+        And 2026-10 is not 2026-108."""
+        for asked in ("2026-47", "2026-10"):
+            sc, _ = await _find(asked, _plugin_with_pdfs())
+            assert sc["ordinance_pdfs"] == []
+            assert CAVEAT_ORDINANCE_PDF_AVAILABLE not in _codes(sc)
+
+    @pytest.mark.asyncio
+    async def test_link_is_one_read_attachment_accepts(self):
+        sc, _ = await _find("2026-98", _plugin_with_pdfs())
+        (pdf,) = sc["ordinance_pdfs"]
+
+        assert pdf == {"ordinance": "AO No. 2026-98(S-1)", "url": PDF_98}
+        p = _plugin()
+        assert p._attachment_url_arg({"url": pdf["url"]}) == PDF_98
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [500, 404])
+    async def test_a_failed_check_never_fails_the_lookup(self, status):
+        sc, _ = await _find("2025-115", _plugin_with_pdfs(search_status=status))
+
+        assert sc["found"] is True
+        assert sc["ordinance_pdfs"] == []
+
+    @pytest.mark.asyncio
+    async def test_no_pdfs_at_all(self):
+        sc, _ = await _find("2031-5", _plugin_with_pdfs(hits=[]))
+        assert sc["ordinance_pdfs"] == []
+        assert _codes(sc) == [CAVEAT_ORDINANCE_NOT_IN_TABLE]
+
+
+class TestRecentOrdinancesNotYetCodified:
+    async def _recent(self, plugin, **args):
+        result = await plugin.execute_tool("recent_ordinances", args)
+        assert result.success, result.error_message
+        sc = result.structured_content
+        validate(sc, ORDINANCES_OUTPUT_SCHEMA)
+        text = result.content[0]["text"]
+        for caveat in sc["caveats"]:
+            assert caveat["message"] in text
+        return sc, text
+
+    @pytest.mark.asyncio
+    async def test_lists_what_is_newer_than_the_list(self):
+        sc, text = await self._recent(_plugin_with_pdfs())
+
+        assert sc["not_yet_codified"] == [
+            {"ordinance": "AO No. 2026-108(S)", "url": PDF_108},
+            {"ordinance": "AO No. 2026-98(S-1)", "url": PDF_98},
+        ]
+        assert _codes(sc)[-1] == CAVEAT_ORDINANCES_NOT_YET_CODIFIED
+        assert "NEWER than everything listed above: 2 ordinance(s)" in text
+        assert sc["ordinances"]  # the list itself is unchanged
+
+    @pytest.mark.asyncio
+    async def test_within_does_not_hide_them(self):
+        sc, text = await self._recent(_plugin_with_pdfs(), within="Title 7")
+
+        assert len(sc["not_yet_codified"]) == 2
+        assert "`within` does not filter them" in text
+
+    @pytest.mark.asyncio
+    async def test_none_or_unknown_adds_nothing(self):
+        for p in (_plugin_with_pdfs(hits=[]), _plugin_with_pdfs(search_status=500)):
+            sc, _ = await self._recent(p)
+            assert sc["not_yet_codified"] == []
+            assert CAVEAT_ORDINANCES_NOT_YET_CODIFIED not in _codes(sc)

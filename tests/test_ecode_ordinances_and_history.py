@@ -336,8 +336,9 @@ class TestOrdinanceListMissing:
             CAVEAT_ORDINANCE_LIST_UNAVAILABLE
         ]
         assert "not evidence that nothing changed" in text
-        # Only the outline was read: no guid was guessed.
-        assert all(path.endswith("/code/toc") for path in p.calls)
+        # No section was fetched: no guid was guessed. (The search for
+        # ordinances held as PDFs, added in 1.16.0, is not a section read.)
+        assert not any("/code/content/" in path for path in p.calls)
 
     @pytest.mark.asyncio
     async def test_a_table_that_no_longer_parses_says_so(self):
