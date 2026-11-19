@@ -244,6 +244,7 @@ try:
               "ecode__get_sections",
               "ecode__find_definition",
               "ecode__find_references",
+              "ecode__recent_ordinances",
               "ecode__read_attachment",
               "ecode__browse_structure",
               "ecode__get_table_of_contents",
@@ -638,6 +639,48 @@ try:
     )
 except Exception as e:
     check("find_references: 9.14.040 leads with its fine schedule row",
+          False, repr(e))
+
+# ── 7e. recent ordinances and section history ─────────────────────────────
+
+try:
+    r = call_tool("recent_ordinances", {"within": "Title 21", "limit": 5})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__recent_ordinances", sc)
+    rows = sc.get("ordinances") or []
+    dates = [x.get("adopted") for x in rows if x.get("adopted")]
+    check(
+        "recent_ordinances: Title 21 rows are dated, newest first, in Title 21",
+        ok
+        and bool(rows)
+        and len(rows) <= 5
+        and dates == sorted(dates, reverse=True)
+        and all(
+            any(ch.split(".")[0] == "21" for ch in x.get("chapters") or [])
+            for x in rows
+        )
+        and (sc.get("covers") or {}).get("count", 0) >= len(rows),
+        why or f"{len(rows)} row(s), dates={dates}",
+    )
+except Exception as e:
+    check(
+        "recent_ordinances: Title 21 rows are dated, newest first, in Title 21",
+        False, repr(e),
+    )
+
+try:
+    r = call_tool("get_section", {"guid": "9.28.020"})
+    history = (structured_of(r) or {}).get("history") or {}
+    entries = history.get("entries") or []
+    check(
+        "get_section: 9.28.020 carries a parsed history with a latest date",
+        len(entries) >= 20
+        and (history.get("latest_date") or "") >= "2024-09-10"
+        and any(e.get("effective_date") for e in entries),
+        f"{len(entries)} entries, latest={history.get('latest_date')}",
+    )
+except Exception as e:
+    check("get_section: 9.28.020 carries a parsed history with a latest date",
           False, repr(e))
 
 try:

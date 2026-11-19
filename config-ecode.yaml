@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.11.1"
+server_version: "1.12.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -70,8 +70,15 @@ instructions: |
      find_references("9.14.040"). It finds the fine schedule row, penalty
      sections and other sections that cite it, including citations to
      its subsections, which a quoted search for the number misses.
+  6. For "what changed recently" or "has this title been amended
+     lately", use recent_ordinances (optionally within="Title 21"): the
+     ordinances most recently worked into the code, with adoption dates
+     and the chapters they amended. For "when was this section last
+     amended", read it with get_section: the result has the section's
+     history, parsed, with the newest ordinance and its adoption date.
+     Neither shows an ordinance adopted after the code's last update.
 
-  6. Some tables are published only as PDF attachments -- notably the
+  7. Some tables are published only as PDF attachments -- notably the
      Title 21 zoning tables (Table 21.05-1, Table of Allowed Uses). A
      search result with is_pdf=true, or an attachment listed by
      get_section, has a url: pass it to read_attachment(url) to read the
