@@ -243,6 +243,7 @@ CAVEAT_TERMS_OR_COMBINED = "terms_or_combined"
 CAVEAT_NO_MATCH_IN_CODE = "no_match_in_code"
 CAVEAT_STATE_LAW_NAMED = "state_law_named"
 CAVEAT_TITLE_FIELD_IS_HEADING = "title_field_is_heading"
+CAVEAT_WILDCARD_IN_QUOTES = "wildcard_in_quotes"
 CAVEAT_SCOPE_SCAN_PARTIAL = "scope_scan_partial"
 CAVEAT_NO_MATCH_IN_SCOPE = "no_match_in_scope"
 CAVEAT_SCOPE_UNPLACED_HITS = "scope_unplaced_hits"
@@ -257,6 +258,8 @@ CAVEAT_PDF_TEXT_EXTRACTION = "pdf_text_extraction"
 CAVEAT_MORE_ATTACHMENT_PAGES = "more_attachment_pages"
 CAVEAT_ATTACHMENT_PAGE_TRUNCATED = "attachment_page_truncated"
 CAVEAT_NO_TEXT_LAYER = "no_text_layer"
+CAVEAT_NO_REFERENCES_FOUND = "no_references_found"
+CAVEAT_MORE_REFERENCES = "more_references_available"
 
 # ── Search-syntax guidance ──────────────────────────────────────────────
 #
@@ -302,6 +305,32 @@ STATE_LAW_RE = re.compile(
 # headings containing "9" and `x AND title:9*` matches nothing (seen three
 # times from attorney sessions, 2026-11-15/16). There is no Title filter.
 TITLE_NUMBER_RE = re.compile(r'(?i)\btitle:"?\d')
+
+# A * inside double quotes. Verified live on 2026-11-18 (prod-log review):
+# '"indemnif*" AND "insurance" AND "risk"' -> 0 while
+# 'indemnif* AND "insurance" AND "risk"' -> 4. Quote pairs are taken in
+# order, so the text BETWEEN two quoted terms ('"a" AND b* AND "c"') is not
+# mistaken for a quoted term.
+# find_references: a full section number, optionally with a subsection
+# suffix ("9.28.019", "9.28.019B.2", "R3.70.120"). A chapter number
+# ("9.28") is refused: 9.28* matches every section of the chapter.
+# Verified live on 2026-11-18: the traffic fine schedule (§ 9.48.130) cites
+# subsections ("§ 9.14.040A.3.a $200.00"), so '"9.14.040"' misses it (3
+# hits) while 9.14.040* finds it (4 hits, the snippet carrying the rows).
+MAX_REFERENCE_CHARS = 40
+REFERENCE_NUMBER_RE = re.compile(
+    r"^([A-Za-z]{0,2}\d{1,3}\.\d{1,3}\.\d{1,4})([A-Za-z0-9.()]*)$"
+)
+REFERENCE_PREFIX_RE = re.compile(r"(?i)^(?:§+|sec(?:tion|\.)?)\s*")
+REFERENCE_TABLE_REF_RE = re.compile(r"^[A-Z]{2,}\.")
+FINE_OR_PENALTY_TITLE_RE = re.compile(r"(?i)\b(fines?|penalt(?:y|ies))\b")
+REFERENCE_TABLE_TITLE_RE = re.compile(
+    r"(?i)\b(disposition|reference|comparative)\s+table\b"
+)
+REFERENCE_KIND_ORDER = ("fine_or_penalty", "section", "document", "reference_table")
+
+QUOTED_TERM_RE = re.compile(r'"([^"]*)"')
+QUOTED_SINGLE_WILDCARD_RE = re.compile(r'"([^"\s]*\*[^"\s]*)"')
 
 # ── Scoped search (`within`) ────────────────────────────────────────────
 #
@@ -604,6 +633,72 @@ DEFINITION_OUTPUT_SCHEMA = {
     "required": ["term", "total_count", "definitions", "summary", "caveats"],
 }
 
+REFERENCES_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "section": {
+            "type": "string",
+            "description": "The section number the references are to.",
+        },
+        "query": {
+            "type": "string",
+            "description": "The search that was run; usable with search_code.",
+        },
+        "page": {"type": "integer"},
+        "total_count": {
+            "type": ["integer", "null"],
+            "description": (
+                "Hits for the number across all pages, INCLUDING the "
+                "section itself where it mentions its own number. null "
+                "means the upstream did not report a count."
+            ),
+        },
+        "references": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "guid": {"type": "string"},
+                    "ref": {"type": ["string", "null"]},
+                    "title": {"type": ["string", "null"]},
+                    "snippet": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "The text around the citation. An excerpt: "
+                            "read the section before quoting it."
+                        ),
+                    },
+                    "url": {"type": "string"},
+                    "is_pdf": {"type": "boolean"},
+                    "kind": {
+                        "type": "string",
+                        "enum": list(REFERENCE_KIND_ORDER),
+                        "description": (
+                            "fine_or_penalty: a fine schedule or penalty "
+                            "section (judged from its heading). section: "
+                            "any other code section. document: a PDF. "
+                            "reference_table: an editorial table such as "
+                            "the Ordinance Disposition Table, not law."
+                        ),
+                    },
+                },
+                "required": ["guid", "url", "is_pdf", "kind"],
+            },
+        },
+        "summary": {"type": "string"},
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": [
+        "section",
+        "query",
+        "page",
+        "total_count",
+        "references",
+        "summary",
+        "caveats",
+    ],
+}
+
 ATTACHMENT_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -756,7 +851,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.7.0"
+    plugin_version = "1.8.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -845,6 +940,7 @@ class EcodePlugin(MCPPlugin):
         "get_section": "Get Section",
         "get_sections": "Get Sections (Batch)",
         "find_definition": "Find Definition",
+        "find_references": "Find References",
         "read_attachment": "Read Attachment (PDF)",
         "get_customer_info": "Customer Info",
     }
@@ -872,7 +968,8 @@ class EcodePlugin(MCPPlugin):
                     "AND (or put + before each), and use NOT (or -term) to "
                     "exclude one. Parentheses group, e.g. "
                     '("notice of claim" OR "claim for damages") AND '
-                    "municipality; a trailing * is a wildcard (liab*); "
+                    "municipality; a trailing * is a wildcard, written "
+                    'WITHOUT quotes (liab*, not "liab*"); '
                     "title:word matches words in a section's heading "
                     "(title:penalty) -- it is NOT a filter on Title number: "
                     "title:9 does not mean Title 9 (use `within` for "
@@ -1084,6 +1181,49 @@ class EcodePlugin(MCPPlugin):
                 annotations=read_only,
             ),
             ToolDefinition(
+                name="find_references",
+                description=(
+                    "Find where the rest of the code CITES a section: its "
+                    "fine in a fine schedule, the penalty section that "
+                    "covers it, and other sections that refer to it. Use "
+                    "this for 'what is the fine / penalty for violating "
+                    "§ X' and 'what refers to § X' instead of searching "
+                    "for the number: a quoted search misses citations to "
+                    "subsections (the traffic fine schedule lists "
+                    "§ 9.14.040A.3.a, which '\"9.14.040\"' does not "
+                    "match). Pass a full section number, e.g. '9.14.040', "
+                    "or a subsection, e.g. '9.28.019B'. Fine schedules and "
+                    "penalty sections are listed first, editorial "
+                    "reference tables last. Each result has a snippet of "
+                    "the text around the citation; read the citing section "
+                    "with get_section before quoting it. A section with no "
+                    "listed fine may still be covered by a general penalty "
+                    "provision of its title or chapter that does not name "
+                    "it."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "section": {
+                            "type": "string",
+                            "description": (
+                                "A section number such as '9.14.040', "
+                                "optionally with a subsection ('9.28.019B')"
+                            ),
+                        },
+                        "page": {
+                            "type": "integer",
+                            "description": "0-indexed result page, 20 per page",
+                            "default": 0,
+                            "minimum": 0,
+                        },
+                    },
+                    "required": ["section"],
+                },
+                output_schema=REFERENCES_OUTPUT_SCHEMA,
+                annotations=read_only,
+            ),
+            ToolDefinition(
                 name="read_attachment",
                 description=(
                     "Read the text of a PDF the code publishes as an "
@@ -1139,7 +1279,10 @@ class EcodePlugin(MCPPlugin):
                     f"Get metadata about {city}'s code library: official name, "
                     "state, government type, last-updated date, and public URL. "
                     "The last-updated date says how current the published "
-                    "code text is."
+                    "code text is. Every get_section and get_sections "
+                    "result already carries that date as "
+                    "`code_last_updated`, so there is no need to call this "
+                    "just to check how current a section is."
                 ),
                 input_schema={"type": "object", "properties": {}},
                 output_schema=CUSTOMER_OUTPUT_SCHEMA,
@@ -1262,6 +1405,19 @@ class EcodePlugin(MCPPlugin):
                 )
                 return self._ok(
                     *self._format_definitions(term, data, hits, bodies)
+                )
+
+            if tool_name == "find_references":
+                number, base = self._reference_arg(arguments)
+                page = self._int_arg(arguments, "page", 0)
+                if page < 0:
+                    raise ToolInputError(
+                        f"page must be 0 or greater (got {page}); results are "
+                        "0-indexed, 20 per page."
+                    )
+                data = await self._search(f"{number}*", page)
+                return self._ok(
+                    *self._format_references(number, base, data, page)
                 )
 
             if tool_name == "read_attachment":
@@ -2661,7 +2817,162 @@ class EcodePlugin(MCPPlugin):
                     f"refer to the statute, {how}.",
                 )
             )
+        wildcard = self._quoted_wildcard_caveat(query)
+        if wildcard:
+            entries.append(wildcard)
         return entries
+
+    @staticmethod
+    def _reference_arg(args: Dict[str, Any]) -> Tuple[str, str]:
+        """(the number to look for, its three-part section number)."""
+        raw = args.get("section")
+        text = str(raw).strip() if raw is not None else ""
+        if not text:
+            raise ToolInputError(
+                "section is required -- pass a section number such as "
+                "'9.14.040'."
+            )
+        if len(text) > MAX_REFERENCE_CHARS:
+            raise ToolInputError(
+                f"section is too long (at most {MAX_REFERENCE_CHARS} "
+                "characters). Pass one section number such as '9.14.040'."
+            )
+        number = REFERENCE_PREFIX_RE.sub("", text).strip().rstrip(".")
+        match = REFERENCE_NUMBER_RE.match(number)
+        if not match:
+            raise ToolInputError(
+                f"{text!r} is not a section number. Pass a full section "
+                "number such as '9.14.040' or '9.28.019B'. A whole chapter "
+                "or title is cited too widely to list: use search_code for "
+                "that."
+            )
+        return number, match.group(1)
+
+    @staticmethod
+    def _reference_kind(
+        ref: Optional[str], title: Optional[str], is_pdf: bool
+    ) -> str:
+        if is_pdf:
+            return "document"
+        number = REFERENCE_PREFIX_RE.sub("", (ref or "").strip())
+        if REFERENCE_TABLE_REF_RE.match(number):
+            return "reference_table"
+        # Before the table-title test: § 8.05.025 is headed "Minor offense
+        # fine schedule; misdemeanor reference table" and is law, not an
+        # editorial table.
+        if FINE_OR_PENALTY_TITLE_RE.search(title or ""):
+            return "fine_or_penalty"
+        if REFERENCE_TABLE_TITLE_RE.search(title or ""):
+            return "reference_table"
+        return "section"
+
+    def _format_references(
+        self, number: str, base: str, data: Dict[str, Any], page: int
+    ) -> tuple:
+        results = data.get("results", []) or []
+        max_pages = self._as_int(data.get("maxPages", 1), default=1)
+        raw_total = data.get("totalResultCount")
+        if raw_total is not None:
+            total_count = self._as_int(raw_total)
+        else:
+            total_count = 0 if not results else None
+
+        def kind_of(r: Dict[str, Any]) -> str:
+            return self._reference_kind(
+                r.get("number"),
+                self._strip_html(r.get("title", "")),
+                bool(r.get("pdf")),
+            )
+
+        # The section's own node (and its subsection nodes) mention the
+        # number too; they are not references TO it.
+        def is_self(r: Dict[str, Any]) -> bool:
+            own = REFERENCE_PREFIX_RE.sub("", (r.get("number") or "").strip())
+            return own.lower().startswith(base.lower())
+
+        citing = [r for r in results if isinstance(r, dict) and not is_self(r)]
+        citing.sort(key=lambda r: REFERENCE_KIND_ORDER.index(kind_of(r)))
+        hit_lines, rows = self._render_hits(citing, 1 + page * 20)
+        for row in rows:
+            row["kind"] = self._reference_kind(
+                row.get("ref"), row.get("title"), row["is_pdf"]
+            )
+
+        entries: List[tuple] = []
+        if not rows:
+            entries.append(
+                (
+                    CAVEAT_NO_REFERENCES_FOUND,
+                    f"No other part of the published code cites {number}"
+                    + (" on this page of results" if page else "")
+                    + ". That does not mean it carries no penalty: a "
+                    "general penalty provision of its title or chapter may "
+                    "cover it without naming it. Check the number, or look "
+                    "for a penalties section with search_code "
+                    "(title:penalties) or browse_structure.",
+                )
+            )
+        if page + 1 < max_pages:
+            entries.append(
+                (
+                    CAVEAT_MORE_REFERENCES,
+                    f"This is page {page + 1} of {max_pages}. Call "
+                    f"find_references with page={page + 1} for more.",
+                )
+            )
+        caveats, caveat_lines = self._caveats(entries)
+
+        fines = sum(1 for row in rows if row["kind"] == "fine_or_penalty")
+        summary = (
+            f"{len(rows)} place(s) citing {number} on page {page + 1} of "
+            f"{max_pages}"
+            + (
+                f", {fines} of them a fine schedule or penalty section"
+                if fines
+                else ""
+            )
+            + "."
+        )
+        lines = [summary]
+        if rows:
+            lines += [
+                "Fine schedules and penalty sections first, editorial "
+                "reference tables last. Snippets are excerpts: read the "
+                "section with get_section before quoting it.",
+                "",
+            ] + hit_lines
+        lines.extend(caveat_lines)
+        return "\n".join(lines), {
+            "section": number,
+            "query": f"{number}*",
+            "page": page,
+            "total_count": total_count,
+            "references": rows,
+            "summary": summary,
+            "caveats": caveats,
+        }
+
+    @staticmethod
+    def _quoted_wildcard_caveat(query: str) -> Optional[tuple]:
+        """Only attached to an empty result: with hits the quoted form is
+        merely inconsistent, and the caller has something to read."""
+        quoted = QUOTED_TERM_RE.findall(query or "")
+        if not any("*" in term for term in quoted):
+            return None
+        # A suggestion in the message only; the query that ran is unchanged.
+        suggestion = QUOTED_SINGLE_WILDCARD_RE.sub(r"\1", query)
+        example = (
+            f" Try: {suggestion}"
+            if suggestion != query
+            else " Use the wildcard on a single unquoted word instead."
+        )
+        return (
+            CAVEAT_WILDCARD_IN_QUOTES,
+            "This query has a * wildcard inside double quotes. A quoted "
+            "wildcard often matches nothing, especially combined with AND. "
+            "Write wildcard terms without quotes (indemnif*, not "
+            f'"indemnif*") and keep quotes for exact phrases.{example}',
+        )
 
     @staticmethod
     def _as_int(value: Any, default: int = 0) -> int:

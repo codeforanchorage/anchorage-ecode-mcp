@@ -47,7 +47,8 @@ title, a highlighted snippet and a guid.
 Terms written side by side are matched with OR, so a list of words matches
 every section containing any of them. For precise results, quote phrases and
 join required terms with `AND`; exclude with `NOT`; group with parentheses.
-Proximity search (`"a b"~3`) is not supported.
+Proximity search (`"a b"~3`) is not supported. A trailing `*` is a wildcard
+and must be written without quotes (`indemnif*`, not `"indemnif*"`).
 
 ```
 "snow" AND "sidewalk" AND "occupant"     → 4 sections, led by § 24.80.090
@@ -115,6 +116,22 @@ How the code defines a term: the defined term, its full text, and the section
 it is defined in. A term defined in more than one place returns up to 8
 definitions with a `multiple_definitions` caveat.
 
+### `find_references(section, page=0)`
+
+Where the rest of the code cites a section, for questions such as "what is the
+fine for violating § 9.14.040" or "what refers to this section". It searches
+for the number with a trailing wildcard (`9.14.040*`), because fine schedules
+cite subsections (`§ 9.14.040A.3.a`) that a quoted search for the number does
+not match. The section's own text is left out.
+
+Each reference has a snippet of the text around the citation and a `kind`:
+`fine_or_penalty` (judged from the heading), `section`, `document` (a PDF) or
+`reference_table` (editorial tables such as the Ordinance Disposition Table).
+Fine and penalty sections are listed first and reference tables last.
+
+`section` must be a full section number, optionally with a subsection
+(`9.28.019B`). A chapter or title number is refused.
+
 ### `read_attachment(url, page=1, layout=true)`
 
 The text of a PDF the code publishes as an attachment. Some tables exist only
@@ -152,6 +169,7 @@ code and a message. The ones seen most often:
 | `resolved_from_section_number` | The reference was a number and was resolved to a guid |
 | `rendered_text_truncated` | The text block shows part of the section; the caveat gives the `offset` for the next part, and the full text is in `structuredContent` |
 | `node_too_large` | A whole chapter or title exceeded 200,000 characters and was cut; read its parts individually |
+| `wildcard_in_quotes` | An empty search had a `*` inside double quotes; a quoted wildcard often matches nothing, so the message suggests the unquoted form |
 | `title_field_is_heading` | A search used `title:` with a number; `title:` matches headings, and `within` is the way to limit a search to a Title |
 | `scope_scan_partial` | A `within` search checked 200 hits and the query has more; the in-scope count is not complete |
 | `no_match_in_scope` | The query matches elsewhere in the code but not inside the `within` scope |
@@ -159,6 +177,7 @@ code and a message. The ones seen most often:
 | `section_unavailable` | One section of a batch could not be fetched |
 | `multiple_definitions` | The term is defined in more than one place |
 | `no_definition_found` | No definition node matched the term |
+| `no_references_found` | Nothing else in the code cites the section; a general penalty provision may still cover it |
 | `pdf_text_extraction` | The text was extracted from a PDF and table layout may be imperfect |
 | `more_attachment_pages` | The PDF has pages beyond those returned |
 | `no_text_layer` | The PDF is a scan with no extractable text |

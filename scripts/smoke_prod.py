@@ -243,6 +243,7 @@ try:
               "ecode__get_section",
               "ecode__get_sections",
               "ecode__find_definition",
+              "ecode__find_references",
               "ecode__read_attachment",
               "ecode__browse_structure",
               "ecode__get_table_of_contents",
@@ -608,6 +609,34 @@ try:
 except Exception as e:
     check("find_definition: unknown term is an empty, explained success",
           False, repr(e))
+
+
+# ── 7d. references: the fine schedule cites a subsection of 9.14.040 ──────
+
+try:
+    r = call_tool("find_references", {"section": "9.14.040"})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__find_references", sc)
+    refs = sc.get("references") or []
+    check(
+        "find_references: 9.14.040 leads with its fine schedule row",
+        ok
+        and bool(refs)
+        and refs[0].get("kind") == "fine_or_penalty"
+        and "9.14.040A" in (refs[0].get("snippet") or "")
+        and all("9.14.040" not in (x.get("ref") or "") for x in refs),
+        why or f"{len(refs)} reference(s), first={refs[0].get('ref') if refs else None}",
+    )
+except Exception as e:
+    check("find_references: 9.14.040 leads with its fine schedule row",
+          False, repr(e))
+
+try:
+    r = call_tool("find_references", {"section": "9.28"})
+    check("find_references: a chapter number is refused",
+          bool(r["result"].get("isError")), text_of(r)[:80])
+except Exception as e:
+    check("find_references: a chapter number is refused", False, repr(e))
 
 
 # ── 8. modern era (MCP 2026-07-28, stateless, per-request _meta) ──────────

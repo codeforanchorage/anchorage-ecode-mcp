@@ -24,6 +24,7 @@ from plugins.ecode.plugin import (
     CAVEAT_STATE_LAW_NAMED,
     CAVEAT_TERMS_OR_COMBINED,
     CAVEAT_TITLE_FIELD_IS_HEADING,
+    CAVEAT_WILDCARD_IN_QUOTES,
     OR_CAVEAT_MIN_TOTAL,
     SEARCH_OUTPUT_SCHEMA,
     EcodePlugin,
@@ -330,3 +331,46 @@ class TestTitleFieldIsHeading:
     async def test_not_reported_for_heading_words(self, plugin, query):
         sc, _ = await _search(plugin, query, 4)
         assert CAVEAT_TITLE_FIELD_IS_HEADING not in _codes(sc)
+
+
+# --------------------------------------------------------------------------
+# A * inside quotes returns nothing with AND (prod, 2026-11-17)
+# --------------------------------------------------------------------------
+
+
+class TestWildcardInQuotes:
+    @pytest.mark.asyncio
+    async def test_empty_result_suggests_unquoted_form(self, plugin):
+        query = '"indemnif*" AND "insurance" AND "risk"'
+        sc, text = await _search(plugin, query, 0)
+        assert _codes(sc) == [CAVEAT_NO_MATCH_IN_CODE, CAVEAT_WILDCARD_IN_QUOTES]
+        message = sc["caveats"][1]["message"]
+        assert 'Try: indemnif* AND "insurance" AND "risk"' in message
+        assert message in text
+        assert sc["query"] == query
+        validate(sc, SEARCH_OUTPUT_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_wildcard_inside_a_phrase_gets_advice_without_rewrite(self, plugin):
+        sc, _ = await _search(plugin, '"contract* award" AND mayor', 0)
+        message = sc["caveats"][1]["message"]
+        assert sc["caveats"][1]["code"] == CAVEAT_WILDCARD_IN_QUOTES
+        assert "Try:" not in message
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            'indemnif* AND "insurance" AND "risk"',
+            '"insurance" AND indemnif* AND "risk"',
+            '"bus lane"',
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_not_reported_for_unquoted_wildcards(self, plugin, query):
+        sc, _ = await _search(plugin, query, 0)
+        assert CAVEAT_WILDCARD_IN_QUOTES not in _codes(sc)
+
+    @pytest.mark.asyncio
+    async def test_not_reported_when_results_exist(self, plugin):
+        sc, _ = await _search(plugin, '"volunteer*"', 4)
+        assert CAVEAT_WILDCARD_IN_QUOTES not in _codes(sc)
