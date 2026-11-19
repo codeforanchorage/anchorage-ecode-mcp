@@ -761,3 +761,80 @@ class TestReadAttachment:
 
     def test_cache_holds_only_a_couple_of_documents(self):
         assert ecode_mod.ATTACHMENT_CACHE_ENTRIES <= 3
+
+
+# ── 1.15.0: ordinance PDFs ───────────────────────────────────────────────
+
+LAW_URL = "https://live.ecode360.com/AN6998/laws/LF2907762.pdf"
+
+
+class TestOrdinancePdf:
+    """Search returns recently adopted ordinances as PDFs and tells the
+    caller to pass the link to read_attachment, which used to refuse it."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            LAW_URL,
+            "https://ecode360.com/AN6998/laws/LF1.pdf",
+            "https://live.ecode360.com/an6998/laws/lf2907762.PDF",
+        ],
+    )
+    def test_url_is_accepted(self, url):
+        p = _attachment_plugin(_pdf_response(["x"]))
+        assert p._attachment_url_arg({"url": url}).startswith("https://")
+        assert p._is_ordinance_pdf(url) is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://live.ecode360.com/VA4680/laws/LF2907762.pdf",  # other city
+            "https://live.ecode360.com/AN6998/laws/2907762.pdf",
+            "https://live.ecode360.com/AN6998/laws/LFabc.pdf",
+            "https://live.ecode360.com/AN6998/laws/LF1.html",
+            "https://live.ecode360.com/AN6998/laws/x/LF1.pdf",
+            "https://live.ecode360.com/AN6998/laws/../laws/LF1.pdf",
+            "https://live.ecode360.com/AN6998/laws/LF1.pdf?x=1",
+            "https://live.ecode360.com/AN6998/law/LF1.pdf",
+            "https://live.ecode360.com/AN6998/LF1.pdf",
+            "https://evil.example/AN6998/laws/LF1.pdf",
+            "http://live.ecode360.com/AN6998/laws/LF1.pdf",
+        ],
+    )
+    async def test_near_misses_are_refused_before_any_request(self, url):
+        p = _attachment_plugin(_pdf_response(["x"]))
+        result = await p.execute_tool("read_attachment", {"url": url})
+
+        assert result.success is False
+        assert "ordinance" in result.error_message
+        assert p.requests == []
+
+    @pytest.mark.asyncio
+    async def test_result_leads_with_what_an_ordinance_pdf_is(self):
+        p = _attachment_plugin(_pdf_response(["seven [nine][SEVEN] members"]))
+        result = await p.execute_tool("read_attachment", {"url": LAW_URL})
+
+        assert result.success is True, result.error_message
+        sc = result.structured_content
+        validate(sc, ATTACHMENT_OUTPUT_SCHEMA)
+        codes = [c["code"] for c in sc["caveats"]]
+        assert codes[:2] == ["ordinance_pdf", CAVEAT_PDF_TEXT_EXTRACTION]
+        note = sc["caveats"][0]["message"]
+        assert "not code text" in note
+        assert "bracketed text as deleted" in note
+        assert LAW_URL in note
+        text = result.content[0]["text"]
+        for caveat in sc["caveats"]:
+            assert caveat["message"] in text
+        # No API credentials go to the public site.
+        sent = {k.lower() for k in p.requests[0].headers}
+        assert "api-key" not in sent and "api-secret" not in sent
+
+    @pytest.mark.asyncio
+    async def test_a_table_attachment_does_not_get_the_ordinance_note(self):
+        p = _attachment_plugin(_pdf_response(["x"]))
+        sc = (
+            await p.execute_tool("read_attachment", {"url": GOOD_URL})
+        ).structured_content
+        assert "ordinance_pdf" not in [c["code"] for c in sc["caveats"]]

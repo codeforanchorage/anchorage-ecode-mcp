@@ -281,8 +281,17 @@ Pass a URL from the `attachments` list of `get_section`, or from a
 - `layout=true` keeps the column alignment of tables. Set it to `false` for
   plain reading order.
 
-Only `https` attachment URLs on `live.ecode360.com` and `ecode360.com` are
-accepted. See [Security](SECURITY.md) before changing that.
+It also reads an ordinance that `search_code` returns as a PDF (a hit of type
+`law`, labelled "Ordinance PDF", with a URL like
+`https://live.ecode360.com/AN6998/laws/LF2907762.pdf`). These are ordinances
+adopted but not yet worked into the code text. The result leads with an
+`ordinance_pdf` caveat: it is the ordinance, not the code; text extraction
+drops underlining and strikethrough, so bracketed text (deleted language)
+reads as if it were law; and the PDF is the place to see what was added and
+removed.
+
+Only `https` URLs on `live.ecode360.com` and `ecode360.com` with one of three
+path shapes are accepted. See [Security](SECURITY.md) before changing that.
 
 ### `get_customer_info()`
 
@@ -317,6 +326,8 @@ code and a message. The ones seen most often:
 | `definition_lookup` | A zero-result query read like a definition lookup; the definition is in `related_definitions` |
 | `node_too_large` | A whole chapter or title exceeded 200,000 characters and was cut; read its parts individually |
 | `wildcard_in_quotes` | An empty search had a `*` inside double quotes; a quoted wildcard often matches nothing, so the message suggests the unquoted form |
+| `proximity_ignored` | The query used `"a b"~N`. eCode360 has no proximity search, so the phrase was matched exactly; the message suggests the words joined with `AND` |
+| `ordinance_pdf` | `read_attachment` read an ordinance PDF: it is not code text, and extraction loses the marks that show deleted language |
 | `title_field_is_heading` | A search used `title:` with a number; `title:` matches headings, and `within` is the way to limit a search to a Title |
 | `scope_scan_partial` | A `within` search checked 200 hits and the query has more; the in-scope count is not complete |
 | `no_match_in_scope` | The query matches elsewhere in the code but not inside the `within` scope |

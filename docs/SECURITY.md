@@ -107,9 +107,12 @@ and `_download_attachment`):
 - The URL is validated **before any request**: scheme `https`; host
   exactly `live.ecode360.com` or `ecode360.com` (`ATTACHMENT_HOSTS`); no
   port, userinfo or query string; no `..` segment (checked after
-  percent-decoding); and a path that is either `/attachment/<digits>/
-  <file>.pdf` or `/documents/<configured customer_id>/…/<file>.pdf`.
-  Another library's documents are refused.
+  percent-decoding); and a path that is one of `/attachment/<digits>/
+  <file>.pdf`, `/documents/<configured customer_id>/…/<file>.pdf`, or
+  `/<configured customer_id>/laws/LF<digits>.pdf` (an ordinance the
+  publisher holds as a PDF; added 2026-11-19 after review, because search
+  results return these links and tell the caller to read them). Another
+  library's documents and ordinances are refused.
 - **Redirects are not followed** — a 3xx is an error — so an allowed
   URL cannot bounce the request to another host.
 - The download uses a **separate HTTP client with no API credentials**.

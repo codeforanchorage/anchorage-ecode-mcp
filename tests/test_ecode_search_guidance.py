@@ -380,3 +380,72 @@ class TestWildcardInQuotes:
     async def test_not_reported_when_results_exist(self, plugin):
         sc, _ = await _search(plugin, '"volunteer*"', 4)
         assert CAVEAT_WILDCARD_IN_QUOTES not in _codes(sc)
+
+
+# --------------------------------------------------------------------------
+# 1.15.0 -- a proximity search is not run as one; ordinance PDFs are named
+# --------------------------------------------------------------------------
+
+
+class TestProximityIgnored:
+    """A proximity query such as '"notice of claim"~3' came back as an
+    ordinary exact-phrase result, with nothing to say the ~3 did nothing."""
+
+    @pytest.mark.asyncio
+    async def test_noted_when_there_are_hits(self, plugin):
+        query = '"notice of claim"~3'
+        sc, text = await _search(
+            plugin, query, 1, payload=_page(query, 1, n_rows=1)
+        )
+
+        assert "proximity_ignored" in _codes(sc)
+        note = next(c for c in sc["caveats"] if c["code"] == "proximity_ignored")
+        assert 'after "notice of claim" was ignored' in note["message"]
+        # "of" is dropped from the suggestion: it matches everything.
+        assert '("notice" AND "claim")' in note["message"]
+        assert note["message"] in text
+
+    @pytest.mark.asyncio
+    async def test_noted_when_there_are_none(self, plugin):
+        sc, _ = await _search(plugin, '"shall not liable"~2 AND damages', 0)
+        assert "proximity_ignored" in _codes(sc)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "query",
+        ['"notice of claim"', "claim~3", '"B-4" OR "I-3"', 'title:"snow"'],
+    )
+    async def test_not_attached_to_other_queries(self, plugin, query):
+        sc, _ = await _search(plugin, query, 3, payload=_page(query, 3, 3))
+        assert "proximity_ignored" not in _codes(sc)
+
+    @pytest.mark.asyncio
+    async def test_one_word_phrase_gets_no_and_suggestion(self, plugin):
+        sc, _ = await _search(plugin, '"snow"~3', 2, payload=_page('"snow"~3', 2, 2))
+        note = next(c for c in sc["caveats"] if c["code"] == "proximity_ignored")
+        assert " AND " not in note["message"]
+
+
+class TestOrdinancePdfHit:
+    @pytest.mark.asyncio
+    async def test_law_hit_is_labelled_an_ordinance_not_code(self, plugin):
+        payload = {
+            "results": [
+                {"id": "LF2907762", "title": "AO No. 2026-108(S)",
+                 "url": "https://live.ecode360.com/AN6998/laws/LF2907762.pdf",
+                 "type": "law", "text": "AO No. 2026-108(S), As Amended",
+                 "pdf": True},
+                {"id": "753304506", "title": "OLD Title 21", "type": "doc",
+                 "url": "https://live.ecode360.com/documents/AN6998/x.pdf",
+                 "text": "old", "pdf": True},
+            ],
+            "query": "q", "page": "0", "maxPages": 1, "totalResultCount": 2,
+        }
+        sc, text = await _search(plugin, '"2026-108"', 2, payload=payload)
+
+        law, doc = sc["rows"]
+        assert law["is_pdf"] is True
+        assert law["url"] == "https://live.ecode360.com/AN6998/laws/LF2907762.pdf"
+        assert text.count("(Ordinance PDF") == 1
+        assert "not the code itself" in text
+        assert text.count("(PDF document") == 1
