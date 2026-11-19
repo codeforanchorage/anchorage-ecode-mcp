@@ -549,3 +549,144 @@ class TestRelaxedRetryWithinScope:
             params["query"] for path, params in p.calls
             if path.endswith("/search")
         ]
+
+
+# ── 1.14.1: parts of the code cited by name ──────────────────────────────
+
+
+# The live outline's top levels (2026-11-19): the Charter is a Title
+# numbered "CHA" under Part I, its articles are labelled ARTICLE, and
+# Part II carries an empty label.
+NAMED_TOC = {
+    "guid": "AN6998", "type": "code", "label": "", "number": "",
+    "title": "Municipality of Anchorage, AK",
+    "children": [
+        _node("p1", "Part", "I", "PART I: CHARTER", "container", "", [
+            _node("cha", "Title", "CHA", "Charter", "chapter", "Ttl CHA", [
+                _node("a4", "ARTICLE", "IV", "THE ASSEMBLY", "article",
+                      "Art CHA-IV", [
+                    _node("c401", "Section", "Section\xa04.01", "Power.",
+                          "section", "§\xa04.01"),
+                ]),
+                _node("a13", "ARTICLE", "XIII", "FINANCE", "article",
+                      "Art CHA-XIII", [
+                    _node("c1301", "Section", "Section\xa013.01",
+                          "Fiscal year.", "section", "§\xa013.01"),
+                ]),
+            ]),
+        ]),
+        _node("p2", "", "II", "PART II: ANCHORAGE MUNICIPAL CODE",
+              "container", "", [
+            _node("t9", "Title", "9", "Vehicles and Traffic", "chapter",
+                  "Ttl 9", [
+                _node("s928020", "Section", "§\xa09.28.020", "DUI."),
+            ]),
+        ]),
+        _node("p3", "Part", "III",
+              "PART III: ANCHORAGE MUNICIPAL CODE OF REGULATIONS",
+              "container", "", [
+            _node("r9", "Title", "R9", "Vehicles and Traffic", "chapter",
+                  "Ttl R9", [
+                _node("sr9", "Section", "§\xa0R9.06.001", "Fees."),
+            ]),
+        ]),
+    ],
+}
+POWER = _hit("c401", "Section\xa04.01", "Power.")
+FISCAL = _hit("c1301", "Section\xa013.01", "Fiscal year.")
+FEES = _hit("sr9", "§\xa0R9.06.001", "Fees.")
+EVERYWHERE = [DUI, POWER, FEES, FISCAL]
+
+
+class TestNamedScopes:
+    """The Charter has no title number, so 'Title 9'-style references
+    cannot reach it; the bare word was read as a guid and refused."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "within",
+        ["Charter", "the Charter", "charter.", "CHARTER", "Municipal Charter"],
+    )
+    async def test_charter(self, within):
+        p = _plugin({0: EVERYWHERE}, toc=NAMED_TOC)
+        sc, _ = await _run(p, within)
+
+        assert _guids(sc) == ["c401", "c1301"]
+        assert sc["within"]["guid"] == "cha"
+        assert sc["within"]["display"] == "the Charter"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "within, guids",
+        [
+            ("Charter Article IV", ["c401"]),
+            ("Charter Art. 4", ["c401"]),
+            ("Article XIII of the Charter", ["c1301"]),
+            ("charter article 13", ["c1301"]),
+        ],
+    )
+    async def test_charter_article(self, within, guids):
+        p = _plugin({0: EVERYWHERE}, toc=NAMED_TOC)
+        sc, _ = await _run(p, within)
+
+        assert _guids(sc) == guids
+        assert sc["within"]["display"].startswith("Charter Article ")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "within, guids",
+        [
+            ("Part I", ["c401", "c1301"]),
+            ("Part 2", ["s928020"]),
+            ("Part III", ["sr9"]),
+            ("Regulations", ["sr9"]),
+            ("the Code of Regulations", ["sr9"]),
+        ],
+    )
+    async def test_part_of_the_code(self, within, guids):
+        p = _plugin({0: EVERYWHERE}, toc=NAMED_TOC)
+        sc, _ = await _run(p, within)
+        assert _guids(sc) == guids
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "within",
+        [
+            "Charter Article XXX",  # no such article
+            "Article IV",  # not said to be the Charter's
+            "Zoning",  # a word, not a part of the code
+            "Part IV",
+        ],
+    )
+    async def test_unknown_name_is_refused_and_points_to_the_charter(
+        self, within
+    ):
+        p = _plugin({0: EVERYWHERE}, toc=NAMED_TOC)
+        result = await p.execute_tool(
+            "search_code", {"query": "x", "within": within}
+        )
+
+        assert result.success is False
+        assert "is not a title, chapter, section or guid" in result.error_message
+        assert "'Charter'" in result.error_message
+        assert _searched(p) == []
+
+    @pytest.mark.asyncio
+    async def test_guid_and_title_scopes_are_unchanged(self):
+        p = _plugin({0: EVERYWHERE}, toc=NAMED_TOC)
+        assert _guids((await _run(p, "Title 9"))[0]) == ["s928020"]
+        assert _guids((await _run(p, "cha"))[0]) == ["c401", "c1301"]
+        assert _guids((await _run(p, "a13"))[0]) == ["c1301"]
+
+    def test_code_without_a_charter(self):
+        toc = {"guid": "X", "children": [
+            _node("t9", "Title", "9", "Vehicles and Traffic", "chapter")]}
+        assert EcodePlugin._named_scope(toc, "Charter") is None
+        assert EcodePlugin._named_scope(toc, "Part III") is None
+
+    @pytest.mark.parametrize(
+        "value, roman",
+        [(1, "I"), (4, "IV"), (9, "IX"), (13, "XIII"), (19, "XIX"), (21, "XXI")],
+    )
+    def test_roman(self, value, roman):
+        assert EcodePlugin._roman(value) == roman
