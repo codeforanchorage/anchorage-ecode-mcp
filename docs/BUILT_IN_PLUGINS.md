@@ -196,6 +196,15 @@ history note cites the ordinance.
   the Ordinance Disposition Table (`§ CCT.020`), which `find_ordinance` reads.
 - A few rows have no adoption date in the table; they are listed last with an
   `ordinance_rows_undated` caveat.
+- `not_yet_codified` lists the ordinances adopted but not yet worked into the
+  code text, which the publisher holds as PDFs. They are newer than every row
+  of the table. One search (`title:"AO No"`) finds them; on 2026-11-19 there
+  were two, and none of the table's 54 ordinances had a PDF, because a PDF
+  exists only until its ordinance is codified. `within` does not filter them:
+  nothing says which chapters they amend until they are read. Each has a `url`
+  for `read_attachment`, and the result carries an
+  `ordinances_not_yet_codified` caveat. If the search fails the list is empty
+  and the rest of the result is unaffected.
 - If the table is missing or its layout changes so that no row can be read, the
   result is empty with an `ordinance_list_unavailable` caveat, which is not
   evidence that nothing changed.
@@ -230,6 +239,10 @@ mistyped in the table), which `get_sections` would not find.
   `effective_date` null.
 - When the ordinance is also in the Ordinance List (`§ OL.010`), `listing`
   carries its adoption date, subject and chapters.
+- When the publisher holds the ordinance itself as a PDF (adopted, not yet
+  codified), `ordinance_pdfs` gives its title and a `url` for
+  `read_attachment`, with an `ordinance_pdf_available` caveat. It is matched
+  on the number in the PDF's title, never on a mention in its text.
 - The table is a finding aid, not the ordinance. A section it names may have
   changed since; every result says so in an `ordinance_table_scope` caveat.
 - `found` is false with an `ordinance_not_in_table` caveat when the table has
@@ -328,6 +341,8 @@ code and a message. The ones seen most often:
 | `wildcard_in_quotes` | An empty search had a `*` inside double quotes; a quoted wildcard often matches nothing, so the message suggests the unquoted form |
 | `proximity_ignored` | The query used `"a b"~N`. eCode360 has no proximity search, so the phrase was matched exactly; the message suggests the words joined with `AND` |
 | `ordinance_pdf` | `read_attachment` read an ordinance PDF: it is not code text, and extraction loses the marks that show deleted language |
+| `ordinance_pdf_available` | `find_ordinance`: the publisher holds this ordinance as a PDF; the message gives the link |
+| `ordinances_not_yet_codified` | `recent_ordinances`: ordinances adopted but not yet in the code text, newer than the whole list, with their PDF links |
 | `title_field_is_heading` | A search used `title:` with a number; `title:` matches headings, and `within` is the way to limit a search to a Title |
 | `scope_scan_partial` | A `within` search checked 200 hits and the query has more; the in-scope count is not complete |
 | `no_match_in_scope` | The query matches elsewhere in the code but not inside the `within` scope |

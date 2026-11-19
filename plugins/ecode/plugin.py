@@ -244,6 +244,15 @@ DOCUMENT_PATH_TEMPLATE = r"^/documents/{customer}/(?:[^/\\]+/)*[^/\\]+\.pdf$"
 # layer present. The shape is as narrow as the links are: this library,
 # "LF" and digits.
 LAW_PATH_TEMPLATE = r"^/{customer}/laws/LF\d+\.pdf$"
+# The publisher's "new laws": ordinances adopted but not yet worked into
+# the code text, held as PDFs. Checked live 2026-11-19: there were two, and
+# NONE of the 54 ordinances in the Ordinance List had one -- a PDF exists
+# only until its ordinance is codified. They are reachable only by search;
+# their titles all read "AO No. <number>", so this one query lists exactly
+# them (total 2, both type "law"), where a search for a number alone also
+# returns PDFs that merely mention it.
+PENDING_ORDINANCE_QUERY = 'title:"AO No"'
+PENDING_ORDINANCE_PAGES = 3
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 # Rendered text per call. Layout mode pads columns with spaces, so one page
 # of a wide table runs ~16,000 characters.
@@ -300,6 +309,8 @@ CAVEAT_PDF_TEXT_EXTRACTION = "pdf_text_extraction"
 CAVEAT_MORE_ATTACHMENT_PAGES = "more_attachment_pages"
 CAVEAT_ATTACHMENT_PAGE_TRUNCATED = "attachment_page_truncated"
 CAVEAT_ORDINANCE_PDF = "ordinance_pdf"
+CAVEAT_ORDINANCE_PDF_AVAILABLE = "ordinance_pdf_available"
+CAVEAT_ORDINANCES_NOT_YET_CODIFIED = "ordinances_not_yet_codified"
 CAVEAT_PROXIMITY_IGNORED = "proximity_ignored"
 CAVEAT_NO_TEXT_LAYER = "no_text_layer"
 CAVEAT_NO_REFERENCES_FOUND = "no_references_found"
@@ -1090,6 +1101,28 @@ ORDINANCES_OUTPUT_SCHEMA = {
             ),
         },
         "within": {"type": ["string", "null"]},
+        "not_yet_codified": {
+            "type": "array",
+            "description": (
+                "Ordinances adopted but NOT yet worked into the code text, "
+                "which the publisher holds as PDFs. Newer than everything "
+                "in `ordinances`, and never filtered by `within`: nothing "
+                "says which chapters they amend until they are read. Pass "
+                "a url to read_attachment. Empty when there are none, or "
+                "when the check could not be made."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ordinance": {
+                        "type": "string",
+                        "description": "As titled, e.g. 'AO No. 2026-108(S)'.",
+                    },
+                    "url": {"type": "string"},
+                },
+                "required": ["ordinance", "url"],
+            },
+        },
         "covers": {
             "type": ["object", "null"],
             "description": "The whole table, before any `within` filter.",
@@ -1118,6 +1151,7 @@ ORDINANCES_OUTPUT_SCHEMA = {
         "ordinances",
         "total_count",
         "within",
+        "not_yet_codified",
         "covers",
         "source",
         "code_last_updated",
@@ -1392,6 +1426,24 @@ FIND_ORDINANCE_OUTPUT_SCHEMA = {
                 "note cites this ordinance."
             ),
         },
+        "ordinance_pdfs": {
+            "type": "array",
+            "description": (
+                "The ordinance itself, when the publisher holds it as a "
+                "PDF: only while it is adopted but not yet worked into "
+                "the code text. Pass the url to read_attachment. Empty "
+                "for a codified ordinance, or when the check could not "
+                "be made."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ordinance": {"type": "string"},
+                    "url": {"type": "string"},
+                },
+                "required": ["ordinance", "url"],
+            },
+        },
         "covers": {
             "type": ["object", "null"],
             "description": "The whole table.",
@@ -1414,6 +1466,7 @@ FIND_ORDINANCE_OUTPUT_SCHEMA = {
         "total_entries",
         "listing",
         "search_query",
+        "ordinance_pdfs",
         "covers",
         "source",
         "code_last_updated",
@@ -1582,7 +1635,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.13.0"
+    plugin_version = "1.14.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -1988,7 +2041,10 @@ class EcodePlugin(MCPPlugin):
                     "ordinances codified there. The table names chapters, "
                     "not sections: each row gives a ready-made query to "
                     "pass to search_code, which lists the sections whose "
-                    "history cites the ordinance. To see when ONE section was last "
+                    "history cites the ordinance. The result also names "
+                    "any ordinance adopted but not yet worked into the "
+                    "code text, which is newer than the whole list and "
+                    "can be read with read_attachment. To see when ONE section was last "
                     "amended, read it with get_section instead: its result "
                     "carries the section's parsed history."
                 ),
@@ -2029,7 +2085,9 @@ class EcodePlugin(MCPPlugin):
                     "runs from the 1977 code to the ordinances most "
                     "recently worked into the published code; for a "
                     "recent ordinance it also returns the subject and "
-                    "adoption date. The table is a finding aid, not the "
+                    "adoption date, and for one adopted but not yet in "
+                    "the code text, a link to the ordinance itself for "
+                    "read_attachment. The table is a finding aid, not the "
                     "ordinance's text: read the sections it names with "
                     "get_sections to see what the code says now. An "
                     "ordinance that is not listed may still exist (too "
@@ -2298,12 +2356,16 @@ class EcodePlugin(MCPPlugin):
                         f"limit must be between 1 and {MAX_ORDINANCES} "
                         f"(got {limit})."
                     )
-                node, updated = await asyncio.gather(
+                node, updated, pending = await asyncio.gather(
                     self._fetch_ordinance_list(),
                     self._code_last_updated(),
+                    self._pending_ordinances(),
                 )
                 return self._ok(
-                    *self._format_ordinances(node, scope, limit, updated)
+                    *self._with_pending_ordinances(
+                        *self._format_ordinances(node, scope, limit, updated),
+                        pending,
+                    )
                 )
 
             if tool_name == "find_ordinance":
@@ -2318,10 +2380,17 @@ class EcodePlugin(MCPPlugin):
                     self._fetch_ordinance_list(),
                     self._code_last_updated(),
                 )
+                # After the table, not beside it: the table can take 9 s,
+                # and this short search must not be the one left waiting.
+                pending = await self._pending_ordinances()
                 numbers = self._outline_section_numbers(await self._get_toc())
                 return self._ok(
-                    *self._format_ordinance_lookup(
-                        base, asked, table, listing, updated, numbers
+                    *self._with_ordinance_pdfs(
+                        *self._format_ordinance_lookup(
+                            base, asked, table, listing, updated, numbers
+                        ),
+                        base,
+                        pending,
                     )
                 )
 
@@ -6018,6 +6087,115 @@ class EcodePlugin(MCPPlugin):
             "summary": summary,
             "caveats": caveats,
         }
+
+    # ── Ordinances held as PDFs: adopted, not yet codified ───────────────
+
+    async def _pending_ordinances(self) -> Optional[List[Dict[str, str]]]:
+        """[{ordinance, url}] for the ordinances the publisher holds as
+        PDFs (see PENDING_ORDINANCE_QUERY), or None when that could not be
+        checked. It decorates a result and must never fail one."""
+        found: List[Dict[str, str]] = []
+        try:
+            for page in range(PENDING_ORDINANCE_PAGES):
+                data = await self._search(PENDING_ORDINANCE_QUERY, page)
+                results = (data or {}).get("results") or []
+                for hit in results:
+                    if hit.get("type") != "law" or not hit.get("pdf"):
+                        continue
+                    try:
+                        # Only a link read_attachment will accept.
+                        url = self._attachment_url_arg(
+                            {"url": str(hit.get("url") or "").split("?")[0]}
+                        )
+                    except ToolInputError:
+                        continue
+                    if not self._is_ordinance_pdf(url):
+                        continue
+                    title = " ".join(
+                        self._strip_html(hit.get("title") or "").split()
+                    )
+                    if title and all(f["url"] != url for f in found):
+                        found.append({"ordinance": title, "url": url})
+                if len(results) < 20:
+                    break
+        except (EcodeAPIError, ToolInputError) as e:
+            logger.warning("could not list the ordinance PDFs: %s", e)
+            return None
+        return found
+
+    @staticmethod
+    def _append_note(
+        text: str, structured: Dict[str, Any], code: str, message: str
+    ) -> str:
+        """One more caveat on a finished result, in both halves: the
+        structured array and a 'Note:' line above the code-date trailer."""
+        structured["caveats"] = list(structured.get("caveats") or []) + [
+            {"code": code, "message": message}
+        ]
+        trailer = "\n\nPublished code last updated "
+        head, sep, tail = text.partition(trailer)
+        return f"{head}\nNote: {message}{sep}{tail}"
+
+    def _with_pending_ordinances(
+        self,
+        text: str,
+        structured: Dict[str, Any],
+        pending: Optional[List[Dict[str, str]]],
+    ) -> tuple:
+        """recent_ordinances: add what is newer than the whole list."""
+        structured = {**structured, "not_yet_codified": list(pending or [])}
+        if pending:
+            listed = "; ".join(f"{o['ordinance']} ({o['url']})" for o in pending)
+            text = self._append_note(
+                text,
+                structured,
+                CAVEAT_ORDINANCES_NOT_YET_CODIFIED,
+                f"NEWER than everything listed above: {len(pending)} "
+                "ordinance(s) adopted but not yet worked into the code "
+                f"text, held by the publisher as PDFs: {listed}. The "
+                "sections they amend still show their earlier wording, and "
+                "nothing here says which chapters they touch, so `within` "
+                "does not filter them: read one with read_attachment to "
+                "find out. Mention them when asked what changed recently.",
+            )
+        return text, structured
+
+    def _with_ordinance_pdfs(
+        self,
+        text: str,
+        structured: Dict[str, Any],
+        base: str,
+        pending: Optional[List[Dict[str, str]]],
+    ) -> tuple:
+        """find_ordinance: add the ordinance itself when it is held as a
+        PDF. Matched on the number in the PDF's TITLE: a search for the
+        number alone also returns PDFs that merely mention it."""
+        wanted = re.compile(rf"(?<![\d-]){re.escape(base)}(?!\d)")
+        pdfs = [o for o in pending or [] if wanted.search(o["ordinance"])]
+        structured = {**structured, "ordinance_pdfs": pdfs}
+        if not pdfs:
+            return text, structured
+        listed = "; ".join(f"{o['ordinance']} ({o['url']})" for o in pdfs)
+        if not structured.get("found"):
+            summary = (
+                f"{pdfs[0]['ordinance']} has been adopted but is not in the "
+                "Ordinance Disposition Table yet; the publisher holds the "
+                "ordinance itself as a PDF."
+            )
+            old = structured.get("summary") or ""
+            if old and text.startswith(old):
+                text = summary + text[len(old):]
+            structured["summary"] = summary
+        text = self._append_note(
+            text,
+            structured,
+            CAVEAT_ORDINANCE_PDF_AVAILABLE,
+            f"The ordinance itself is available as a PDF: {listed}. Read "
+            "it with read_attachment to see what it changes. It has not "
+            "been worked into the code text yet, so the sections it amends "
+            "may still show their earlier wording.",
+        )
+        return text, structured
 
     # ── One ordinance: the Ordinance Disposition Table ──────────────────
 
