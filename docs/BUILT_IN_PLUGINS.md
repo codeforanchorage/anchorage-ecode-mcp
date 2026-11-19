@@ -71,10 +71,25 @@ requested node.
 - `title:` in a query is a different thing: it matches words in a section's
   heading and does not select a Title.
 
+A search that matches nothing says that no section matched the query as
+written, which is not proof that the text is absent. When the whole query is
+one quoted phrase, two follow-ups are added to the result, both kept apart
+from `rows` and `total_count`:
+
+- `relaxed_match`: the phrase's words required in any order, with a
+  `relaxed_match` caveat. These are not matches for the phrase.
+- `related_definitions`: when the phrase reads like a definition lookup
+  (`"labor agreement means"`), what `find_definition` returns for the term,
+  with a `definition_lookup` caveat. A definition is its own entry whose
+  heading is the term, so a phrase never spans the term and its text.
+
 ### `get_table_of_contents()`
 
-The outline of the code: every title, chapter and section with its guid, and
-no body text.
+The outline of the code, three levels deep: the parts (Charter, Municipal
+Code, Code of Regulations, tables), the titles under each part, and the
+chapters under each title, each with its guid. Sections and body text are not
+listed; a chapter shows how many entries it has, and `browse_structure` with
+its guid lists them. For this code that is about 480 entries.
 
 ### `browse_structure(guid="ROOT")`
 
@@ -99,6 +114,22 @@ The text block holds up to 40,000 characters. A longer section is marked
 range shown and the `offset` to pass on the next call; each part ends on a
 line break and the next one starts exactly there. `structuredContent.text`
 always carries the whole section.
+
+`length` reports every size in characters, each named for what it measures:
+`text_chars` (the length of `text`), `shown_from` and `shown_to` (the part of
+`text` in the text block; offsets index `text`), and `whole_node_chars`, which
+is null unless a chapter or title was cut, and is then the size of all its
+text.
+
+The section heading appears once, in the heading line. Subsections show their
+label (`A.`, `1.`, `a.`) and their own text. The history note (`(AO No. ...)`)
+closes the section.
+
+The eCode360 API returns a paragraph's words before and after a list as one
+string, with the list items separate. The server puts the list back after the
+colon that introduces it, so the sentence that follows a list is shown after
+it, and says so with a `list_position_inferred` caveat. Where the position is
+ambiguous it leaves the text as received and says that instead.
 
 ### `get_sections(sections)`
 
@@ -168,6 +199,10 @@ code and a message. The ones seen most often:
 | --- | --- |
 | `resolved_from_section_number` | The reference was a number and was resolved to a guid |
 | `rendered_text_truncated` | The text block shows part of the section; the caveat gives the `offset` for the next part, and the full text is in `structuredContent` |
+| `list_position_inferred` | A list was placed after the colon that introduces it, because the API does not say where in the paragraph it sits; check the order at the link |
+| `no_match_in_code` | No section matched the query as written; not proof the text is absent |
+| `relaxed_match` | A quoted phrase matched nothing; the same words in any order matched the sections listed under `relaxed_match` |
+| `definition_lookup` | A zero-result query read like a definition lookup; the definition is in `related_definitions` |
 | `node_too_large` | A whole chapter or title exceeded 200,000 characters and was cut; read its parts individually |
 | `wildcard_in_quotes` | An empty search had a `*` inside double quotes; a quoted wildcard often matches nothing, so the message suggests the unquoted form |
 | `title_field_is_heading` | A search used `title:` with a number; `title:` matches headings, and `within` is the way to limit a search to a Title |

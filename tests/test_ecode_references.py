@@ -159,6 +159,14 @@ class TestFindReferences:
         assert "general penalty provision" in text
 
     @pytest.mark.asyncio
+    async def test_empty_result_does_not_say_page_1_of_0(self, plugin):
+        """Prod 2026-11-18: the upstream sends maxPages 0 with no results."""
+        _wire(plugin, [], max_pages=0)
+        sc, text = await _refs(plugin, {"section": "99.99.999"})
+        assert "page 1 of 1" in sc["summary"]
+        assert "of 0" not in text
+
+    @pytest.mark.asyncio
     async def test_more_pages_are_announced(self, plugin):
         _wire(plugin, HITS, total=45, max_pages=3)
         sc, _ = await _refs(plugin, {"section": "9.14.040"})

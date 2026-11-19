@@ -13,6 +13,7 @@ every request; all endpoints are GET under ``/v1`` and return JSON.
 import asyncio
 import contextvars
 import io
+import html
 import json
 import logging
 import os
@@ -259,6 +260,11 @@ CAVEAT_MORE_ATTACHMENT_PAGES = "more_attachment_pages"
 CAVEAT_ATTACHMENT_PAGE_TRUNCATED = "attachment_page_truncated"
 CAVEAT_NO_TEXT_LAYER = "no_text_layer"
 CAVEAT_NO_REFERENCES_FOUND = "no_references_found"
+CAVEAT_LIST_POSITION_INFERRED = "list_position_inferred"
+CAVEAT_SUBSECTION_OF_SECTION = "subsection_read_as_whole_section"
+CAVEAT_DEFINITION_LOOKUP = "definition_lookup"
+CAVEAT_RELAXED_MATCH = "relaxed_match"
+CAVEAT_OUTLINE_DEPTH_LIMITED = "outline_depth_limited"
 CAVEAT_MORE_REFERENCES = "more_references_available"
 
 # ── Search-syntax guidance ──────────────────────────────────────────────
@@ -328,6 +334,58 @@ REFERENCE_TABLE_TITLE_RE = re.compile(
     r"(?i)\b(disposition|reference|comparative)\s+table\b"
 )
 REFERENCE_KIND_ORDER = ("fine_or_penalty", "section", "document", "reference_table")
+
+# ── Section rendering (attorney audit, 2026-11-18) ──────────────────────
+#
+# The content endpoint flattens a paragraph that contains a list: the text
+# before the list, the text after it and the section's history note arrive
+# as ONE string on the parent node, and the list items as children. Charter
+# Section 4.01: "...within two months from: If the assembly determines ...
+# (AO No. 2006-154, ...)" with item (1) as the only child. The publisher's
+# own search index shows the real order ("...two months from: (1) Adoption
+# of a final state ...; If the assembly determines"). Rendering parent text
+# then children therefore put the closing sentence BEFORE the list.
+#
+# A colon followed by a capital marks where the list was. Only a colon at
+# least LEAD_IN_MIN_WORDS words in counts: a heading written with a colon
+# ("Administration: An RFA shall be administered ...", "Protest: The
+# assembly shall ...") is not a list lead-in. Surveyed on six chapters
+# (743 nodes with children): 15 had such a colon, 6 of them headings.
+LIST_LEAD_IN_RE = re.compile(r':\s+(?=["\u201c(]?[A-Z])')
+LEAD_IN_MIN_WORDS = 10
+# The history note that closes a section: "(AO No. 69-75; AO No. 2023-63,
+# § 1, 6-6-2023)", "(CAC 10.48.200; ...)", "(AR No. 97-180, ...)".
+HISTORY_NOTE_RE = re.compile(
+    r"\s*(\((?:AO|AR|EO|AM|CAC|GAAB|CBC|Ord\.|Res\.|Code)\b"
+    r"(?:[^()]|\([^()]*\))*\))\s*$"
+)
+
+# ── Zero-result follow-ups (attorney audit, 2026-11-18) ────────────────
+#
+# '"Labor agreement means"' -> 0, yet § 3.70.010 defines the term: the
+# definition is its own node whose TITLE is the term and whose body starts
+# "means ...", so no phrase spans the two. A query that is one quoted
+# phrase and nothing else gets two follow-ups: a definition lookup when it
+# reads like one, and the same words ANDed (7 hits for that example, the
+# definition first).
+SINGLE_PHRASE_RE = re.compile(r'^\s*"([^"]+)"\s*$')
+DEFINITION_QUERY_RE = re.compile(
+    r"(?i)^(?:the\s+(?:term|word|phrase)\s+)?(.+?)\s+"
+    r"(?:means|shall\s+mean|is\s+defined\s+as|is\s+defined|defined\s+as)$"
+)
+RELAXED_MIN_WORDS = 2
+RELAXED_MAX_WORDS = 8
+RELAXED_MAX_ROWS = 10
+RELATED_DEFINITIONS = 3
+RELATED_DEFINITION_CHARS = 600
+
+# Levels of the outline get_table_of_contents returns: parts, titles and
+# chapters (5 + 57 + 422 nodes for AN6998, about 34,000 characters). The
+# next level is 4,300 sections and 350,000 characters.
+TOC_DEPTH = 3
+
+# See _repair_search_json. A hit's `hits` object holds no nested braces.
+BROKEN_HITS_RE = re.compile(r'"hits"\s*:\s*\{[^{}]*\}')
 
 QUOTED_TERM_RE = re.compile(r'"([^"]*)"')
 QUOTED_SINGLE_WILDCARD_RE = re.compile(r'"([^"\s]*\*[^"\s]*)"')
@@ -401,6 +459,30 @@ _NODE_SCHEMA = {
     "required": ["guid"],
 }
 
+def _outline_node_schema(levels: int) -> Dict[str, Any]:
+    """_NODE_SCHEMA with `children` nested `levels` deep (no $ref, so every
+    client can validate it)."""
+    schema = {
+        "type": "object",
+        "properties": dict(_NODE_SCHEMA["properties"]),
+        "required": ["guid"],
+    }
+    schema["properties"]["children_not_listed"] = {
+        "type": "integer",
+        "description": (
+            "Children this node has that are NOT listed here (the outline "
+            "stops at chapters). Call browse_structure with this node's "
+            "guid to list them."
+        ),
+    }
+    if levels > 1:
+        schema["properties"]["children"] = {
+            "type": "array",
+            "items": _outline_node_schema(levels - 1),
+        }
+    return schema
+
+
 # Files published alongside a node (mostly PDF tables). `url` goes to
 # read_attachment.
 _ATTACHMENTS_SCHEMA = {
@@ -413,6 +495,33 @@ _ATTACHMENTS_SCHEMA = {
         },
         "required": ["name", "url"],
     },
+}
+
+_SEARCH_ROW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "guid": {"type": "string"},
+        "ref": {"type": ["string", "null"]},
+        "title": {"type": ["string", "null"]},
+        "snippet": {"type": ["string", "null"]},
+        "url": {
+            "type": "string",
+            "description": (
+                "As returned by the API where it supplies one (document "
+                "hits link to a PDF on live.ecode360.com); otherwise the "
+                "canonical https://ecode360.com/<guid> form."
+            ),
+        },
+        "is_pdf": {
+            "type": "boolean",
+            "description": (
+                "The hit is a PDF document, not a code section: pass its "
+                "`url` to read_attachment to read it. get_section cannot "
+                "open it."
+            ),
+        },
+    },
+    "required": ["guid", "url", "is_pdf"],
 }
 
 SEARCH_OUTPUT_SCHEMA = {
@@ -430,37 +539,43 @@ SEARCH_OUTPUT_SCHEMA = {
             ),
         },
         "summary": {"type": "string"},
-        "rows": {
+        "rows": {"type": "array", "items": _SEARCH_ROW_SCHEMA},
+        "caveats": _CAVEAT_SCHEMA,
+        "related_definitions": {
             "type": "array",
+            "description": (
+                "Present only when a search that matched nothing read like "
+                "a definition lookup ('\"X means\"'): what find_definition "
+                "returns for the term."
+            ),
             "items": {
                 "type": "object",
                 "properties": {
                     "guid": {"type": "string"},
-                    "ref": {"type": ["string", "null"]},
-                    "title": {"type": ["string", "null"]},
-                    "snippet": {"type": ["string", "null"]},
-                    "url": {
-                        "type": "string",
-                        "description": (
-                            "As returned by the API where it supplies one "
-                            "(document hits link to a PDF on "
-                            "live.ecode360.com); otherwise the canonical "
-                            "https://ecode360.com/<guid> form."
-                        ),
-                    },
-                    "is_pdf": {
-                        "type": "boolean",
-                        "description": (
-                            "The hit is a PDF document, not a code section: "
-                            "pass its `url` to read_attachment to read it. "
-                            "get_section cannot open it."
-                        ),
-                    },
+                    "term": {"type": ["string", "null"]},
+                    "exact_match": {"type": "boolean"},
+                    "defined_in": {"type": ["string", "null"]},
+                    "text": {"type": ["string", "null"]},
+                    "url": {"type": "string"},
                 },
-                "required": ["guid", "url", "is_pdf"],
+                "required": ["guid", "exact_match", "url"],
             },
         },
-        "caveats": _CAVEAT_SCHEMA,
+        "relaxed_match": {
+            "type": "object",
+            "description": (
+                "Present only when a quoted phrase matched nothing and the "
+                "same words, required in any order anywhere in a section, "
+                "matched something. These rows are NOT phrase matches and "
+                "are kept out of `rows` and `total_count` for that reason."
+            ),
+            "properties": {
+                "query": {"type": "string"},
+                "total_count": {"type": ["integer", "null"]},
+                "rows": {"type": "array", "items": _SEARCH_ROW_SCHEMA},
+            },
+            "required": ["query", "total_count", "rows"],
+        },
         "within": {
             "type": "object",
             "description": (
@@ -504,6 +619,46 @@ _CODE_LAST_UPDATED_SCHEMA = {
     ),
 }
 
+# Every length a section result reports, each named for what it measures.
+# Before 2026-11-18 a too-large node reported "about 1,867,764 characters"
+# in one message and "242,053 characters long" in another with nothing to
+# say they measured different things.
+_LENGTH_SCHEMA = {
+    "type": "object",
+    "description": (
+        "Lengths in characters. Offsets (`offset`, shown_from, shown_to) "
+        "all index `text` as returned in this result."
+    ),
+    "properties": {
+        "text_chars": {
+            "type": "integer",
+            "description": "Length of `text` in this result.",
+        },
+        "shown_from": {
+            "type": "integer",
+            "description": "0-based start of the text block within `text`.",
+        },
+        "shown_to": {
+            "type": "integer",
+            "description": (
+                "0-based end (exclusive) of the text block within `text`; "
+                "pass it as `offset` to read on when it is less than "
+                "text_chars."
+            ),
+        },
+        "whole_node_chars": {
+            "type": ["integer", "null"],
+            "description": (
+                "null when `text` is the whole node. Otherwise the node "
+                "was cut (node_too_large): this is the approximate length "
+                "of ALL its code text as the API holds it, of which `text` "
+                "is only the first part."
+            ),
+        },
+    },
+    "required": ["text_chars", "shown_from", "shown_to", "whole_node_chars"],
+}
+
 SECTION_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -522,6 +677,7 @@ SECTION_OUTPUT_SCHEMA = {
                 "cut, and then a `node_too_large` caveat says so."
             ),
         },
+        "length": _LENGTH_SCHEMA,
         "has_attachment": {"type": "boolean"},
         "attachments": _ATTACHMENTS_SCHEMA,
         "is_pdf": {"type": "boolean"},
@@ -566,6 +722,7 @@ SECTIONS_OUTPUT_SCHEMA = {
                         "type": ["string", "null"],
                         "description": "Full section body, NOT clipped.",
                     },
+                    "length": _LENGTH_SCHEMA,
                     "has_attachment": {"type": "boolean"},
                     "attachments": _ATTACHMENTS_SCHEMA,
                     "is_pdf": {"type": "boolean"},
@@ -765,7 +922,15 @@ TOC_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
         "node": _NODE_SCHEMA,
-        "children": {"type": "array", "items": _NODE_SCHEMA},
+        "children": {
+            "type": "array",
+            "description": (
+                "The outline as a tree, three levels deep: parts, the "
+                "titles under each part, and the chapters under each "
+                "title. Sections are not listed."
+            ),
+            "items": _outline_node_schema(TOC_DEPTH),
+        },
         "summary": {"type": "string"},
         "caveats": _CAVEAT_SCHEMA,
     },
@@ -851,7 +1016,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.8.0"
+    plugin_version = "1.9.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -990,11 +1155,18 @@ class EcodePlugin(MCPPlugin):
                     "more, a scope_scan_partial note says so and `page` "
                     "moves to the next 200. PDF documents are left out of "
                     "a scoped search.\n\n"
-                    "No results means this code does not contain that "
-                    "text, which can itself be the answer (the rule may be "
-                    "state law, repealed, or worded differently); broaden "
-                    "the words or browse with get_table_of_contents before "
-                    "concluding."
+                    "No results means no section matched the query AS "
+                    "WRITTEN. That alone does not prove the code is silent: "
+                    "a quoted phrase fails on small differences, and "
+                    "punctuation inside it (quotation marks around a "
+                    "defined term) can block a match. It can also be the "
+                    "answer (the rule may be state law, repealed, or worded "
+                    "differently). When a quoted phrase matches nothing, "
+                    "the result may add a relaxed match on the same words "
+                    "and, for a query like 'X means', the definition of X; "
+                    "for definitions call find_definition directly. "
+                    "Broaden the words or browse with "
+                    "get_table_of_contents before concluding."
                 ),
                 input_schema={
                     "type": "object",
@@ -1035,10 +1207,14 @@ class EcodePlugin(MCPPlugin):
             ToolDefinition(
                 name="get_table_of_contents",
                 description=(
-                    f"Get the top-level table of contents of {city}'s municipal code "
-                    "(titles/chapters down to the section level, without body text). "
-                    "Each entry has a guid you can pass to browse_structure or "
-                    "get_section. Start here to orient before drilling in."
+                    f"Get the outline of {city}'s municipal code, three "
+                    "levels deep: the parts (Charter, Municipal Code, Code "
+                    "of Regulations, tables), the titles under each part, "
+                    "and the chapters under each title. Sections and body "
+                    "text are NOT listed. Each entry has a guid: pass a "
+                    "chapter's guid to browse_structure to list its "
+                    "sections, or to get_section to read it. Start here to "
+                    "orient before drilling in."
                 ),
                 input_schema={"type": "object", "properties": {}},
                 output_schema=TOC_OUTPUT_SCHEMA,
@@ -1050,15 +1226,21 @@ class EcodePlugin(MCPPlugin):
                     "Browse one node of the code hierarchy: returns the node's "
                     "number, title, type, and its immediate children (each with a "
                     "guid). Pass guid='ROOT' (the default) for the top of the tree, "
-                    "then walk down using child guids. Use this to navigate the "
-                    "outline; use get_section to read actual text."
+                    "then walk down using child guids. A title, chapter or "
+                    "section written as it is cited ('Title 9', 'Chapter "
+                    "9.28', '9.28.019') is accepted in place of a guid. Use "
+                    "this to navigate the outline; use get_section to read "
+                    "actual text."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
                         "guid": {
                             "type": "string",
-                            "description": "Node guid, or 'ROOT' for the top",
+                            "description": (
+                                "Node guid, 'ROOT' for the top, or a "
+                                "reference such as 'Chapter 9.28'"
+                            ),
                             "default": "ROOT",
                         },
                     },
@@ -1306,6 +1488,15 @@ class EcodePlugin(MCPPlugin):
     async def execute_tool(
         self, tool_name: str, arguments: Dict[str, Any]
     ) -> ToolResult:
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            # The MCP server refuses this before it gets here (-32602); kept
+            # so a direct caller gets a sentence, not an AttributeError.
+            return self._err(
+                "Tool arguments must be an object of named values "
+                f"(got {type(arguments).__name__})."
+            )
         token = _call_deadline.set(time.monotonic() + TOOL_CALL_BUDGET_S)
         try:
             return await self._execute_tool(tool_name, arguments)
@@ -1317,7 +1508,13 @@ class EcodePlugin(MCPPlugin):
     ) -> ToolResult:
         try:
             if tool_name == "search_code":
-                query = (arguments.get("query") or "").strip()
+                query = arguments.get("query")
+                if query is not None and not isinstance(query, str):
+                    raise ToolInputError(
+                        "query must be a string of words or phrases to "
+                        f"search for (got {type(query).__name__})."
+                    )
+                query = (query or "").strip()
                 if not query:
                     raise ToolInputError(
                         "query is required -- pass the words or phrase to search "
@@ -1349,14 +1546,30 @@ class EcodePlugin(MCPPlugin):
                         )
                     )
                 data = await self._search(query, page)
-                return self._ok(*self._format_search(data, query, page))
+                text, structured = self._format_search(data, query, page)
+                if page == 0 and structured["total_count"] == 0:
+                    text, structured = await self._zero_result_followups(
+                        query, text, structured
+                    )
+                return self._ok(text, structured)
 
             if tool_name == "get_table_of_contents":
                 data = await self._get_toc()
                 return self._ok(*self._format_toc(data))
 
             if tool_name == "browse_structure":
-                guid = self._guid_arg(arguments, default="ROOT")
+                # A title, chapter or section written as it is cited works
+                # here as it does in get_section (prod, week of 2026-11-12:
+                # browse_structure('R3.70.120') was refused twice).
+                parsed = self._parse_ref(arguments.get("guid"))
+                if parsed:
+                    kind, number, charter_only = parsed
+                    shown = " ".join(str(arguments.get("guid")).split())
+                    guid = await self._resolve_reference(
+                        kind, number, charter_only, shown
+                    )
+                else:
+                    guid = self._guid_arg(arguments, default="ROOT")
                 data = await self._get_recent_json(
                     self._cust_path(f"/structure/{quote(guid, safe='')}")
                 )
@@ -1604,12 +1817,32 @@ class EcodePlugin(MCPPlugin):
         if parsed:
             kind, number, charter_only = parsed
             shown = " ".join(str(raw).split())
-            guid = await self._resolve_reference(
-                kind, number, charter_only, shown
-            )
+            subsection = None
+            try:
+                guid = await self._resolve_reference(
+                    kind, number, charter_only, shown
+                )
+            except ToolInputError:
+                # "9.28.019B.2" is how a fine schedule cites a subsection,
+                # and subsections have no number of their own to look up:
+                # read the section it belongs to and say so.
+                whole = REFERENCE_NUMBER_RE.match(number)
+                if not whole or not whole.group(2) or charter_only:
+                    raise
+                guid = await self._resolve_reference(
+                    kind, whole.group(1), charter_only, shown
+                )
+                subsection, number = whole.group(2), whole.group(1)
             resolved_from: Optional[str] = (
                 number if kind is None and not charter_only else shown
             )
+            data = await self._get_recent_json(
+                self._cust_path(f"/code/content/{quote(guid, safe='')}")
+            )
+            if subsection:
+                # A copy: cached responses are shared and read-only.
+                data = {**data, "_subsection": subsection}
+            return data, resolved_from
         else:
             guid = self._guid_arg({"guid": raw})
             resolved_from = None
@@ -2302,6 +2535,30 @@ class EcodePlugin(MCPPlugin):
                         "the section up and read its guid from the result.",
                         status,
                     ) from e
+                if status >= 500 and "above the chapter level" in detail:
+                    # A deterministic refusal dressed as a 500 (seen for
+                    # /code/content/ROOT and for a Part): retrying it three
+                    # times only delays the same answer.
+                    raise ToolInputError(
+                        "eCode360 does not return text for this node: it is "
+                        "above the chapter level (the whole code, or a part "
+                        "of it). Call browse_structure with the same guid "
+                        "to list what is under it, or get_table_of_contents "
+                        "for the outline, then read a title, chapter or "
+                        "section."
+                    ) from e
+                if status == 403 and detail.lstrip()[:15].lower().startswith(
+                    ("<!doctype", "<html")
+                ):
+                    # An HTML 403 is the publisher's firewall refusing the
+                    # REQUEST (seen for queries containing markup such as
+                    # <script>); a credential failure answers in JSON.
+                    raise ToolInputError(
+                        "eCode360's firewall refused this request (HTTP "
+                        "403). It blocks some characters and patterns, such "
+                        "as HTML tags or code-like text. Rewrite the query "
+                        "in plain words and try again."
+                    ) from e
                 if status >= 500 and self._may_retry(attempt, started):
                     await self._backoff(attempt, path, f"HTTP {status}")
                     continue
@@ -2326,12 +2583,41 @@ class EcodePlugin(MCPPlugin):
             try:
                 return resp.json()
             except ValueError as e:
+                repaired = self._repair_search_json(resp.text)
+                if repaired is not None:
+                    logger.warning(
+                        "eCode360 sent invalid JSON for %s; repaired by "
+                        "dropping its unescaped `hits` objects",
+                        path,
+                    )
+                    return repaired
                 raise EcodeAPIError(
                     f"eCode360 returned a non-JSON response for {path} "
                     f"(content-type "
                     f"{resp.headers.get('content-type', '?')}).",
                     502,
                 ) from e
+
+    @staticmethod
+    def _repair_search_json(body: str) -> Optional[Dict[str, Any]]:
+        """Parse a search response whose `hits` objects are not valid JSON.
+
+        Seen live on 2026-11-18: a phrase that matches across a quotation
+        mark ('"agreement means"' against '"Labor agreement" means ...')
+        comes back with the matched text as an UNESCAPED object key --
+        `"hits" : { "agreement" means":1 }` -- so the whole response fails
+        to parse and a search with real results was reported as an upstream
+        fault. Nothing here reads `hits`, so those objects are emptied and
+        the rest is parsed as usual. None if that does not make it valid.
+        """
+        fixed, count = BROKEN_HITS_RE.subn('"hits": {}', body or "")
+        if not count:
+            return None
+        try:
+            data = json.loads(fixed)
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
 
     @staticmethod
     def _may_retry(attempt: int, started: float) -> bool:
@@ -2787,13 +3073,18 @@ class EcodePlugin(MCPPlugin):
         entries: List[tuple] = [
             (
                 CAVEAT_NO_MATCH_IN_CODE,
-                "This exact text does not appear in the published "
-                f"municipal code of the {city} (eCode360 library "
-                f"{library}). That can be a real answer: the rule may be "
+                "No section of the published municipal code of the "
+                f"{city} (eCode360 library {library}) matched this query "
+                "as written. That is not proof the text is absent: a "
+                "quoted phrase must match word for word, and punctuation "
+                "inside it -- such as the quotation marks around a defined "
+                "term ('\"Labor agreement\" means ...') -- can prevent a "
+                "match. It can also be a real answer: the rule may be "
                 "state law (Alaska Statutes / Alaska Administrative Code), "
                 "in a repealed chapter, or worded differently here. Next "
                 "steps: try fewer or broader words, put OR between "
-                "synonyms, drop the quotes, or use browse_structure / "
+                "synonyms, drop the quotes, use find_definition for a "
+                "defined term, or use browse_structure / "
                 "get_table_of_contents to look through the relevant title.",
             )
         ]
@@ -2821,6 +3112,140 @@ class EcodePlugin(MCPPlugin):
         if wildcard:
             entries.append(wildcard)
         return entries
+
+    async def _zero_result_followups(
+        self, query: str, text: str, structured: Dict[str, Any]
+    ) -> tuple:
+        """For a query that is ONE quoted phrase and matched nothing: look
+        the term up as a definition when the phrase reads like one, and
+        retry with the phrase's words required in any order.
+
+        Additions only. `rows` and `total_count` stay empty and 0 -- the
+        phrase did not match -- and a failed follow-up is dropped, never
+        allowed to sink the result the caller already has.
+        """
+        match = SINGLE_PHRASE_RE.match(query or "")
+        if not match or "*" in match.group(1):
+            return text, structured
+        phrase = " ".join(match.group(1).split())
+        definition = DEFINITION_QUERY_RE.match(phrase)
+        term = (
+            " ".join(_QUOTE_CHARS_RE.sub("", definition.group(1)).split())
+            if definition
+            else ""
+        )
+        words = [w for w in (re.sub(r"[^\w.$%/-]", "", tok) for tok in phrase.split()) if w]
+        relaxed_query = (
+            " AND ".join(f'"{w}"' for w in words)
+            if RELAXED_MIN_WORDS <= len(words) <= RELAXED_MAX_WORDS
+            else ""
+        )
+
+        async def definitions() -> Optional[List[Dict[str, Any]]]:
+            if not term or len(term) > MAX_TERM_CHARS:
+                return None
+            data = await self._search(f'title:"{term}"', 0)
+            hits = self._definition_hits(data, term)[:RELATED_DEFINITIONS]
+            bodies = await self._fetch_definition_bodies(hits)
+            return [
+                {
+                    "guid": hit["guid"],
+                    "term": hit["term"],
+                    "exact_match": hit["exact_match"],
+                    "defined_in": hit["defined_in"],
+                    "text": body or hit["snippet"],
+                    "url": PUBLIC_URL.format(guid=hit["guid"]),
+                }
+                for hit, body in zip(hits, bodies)
+            ]
+
+        async def relaxed() -> Optional[Dict[str, Any]]:
+            if not relaxed_query:
+                return None
+            return await self._search(relaxed_query, 0)
+
+        found, loose = await asyncio.gather(
+            definitions(), relaxed(), return_exceptions=True
+        )
+        entries: List[tuple] = []
+        extra: List[str] = []
+        structured = dict(structured)
+
+        if isinstance(found, BaseException):
+            logger.warning("definition follow-up failed for %r: %s", query, found)
+        elif found:
+            structured["related_definitions"] = found
+            entries.append(
+                (
+                    CAVEAT_DEFINITION_LOOKUP,
+                    f"This query reads like a definition lookup, so the "
+                    f"term {term!r} was looked up as find_definition does: "
+                    f"{len(found)} definition(s) are listed below under "
+                    "DEFINITIONS. A definition is its own entry in the "
+                    "code -- the term is its heading and the text begins "
+                    "'means ...' -- which is why the phrase did not match. "
+                    "A term can be defined differently in several titles: "
+                    f"call find_definition({term!r}) for all of them and "
+                    "use the one for the area of law in question.",
+                )
+            )
+            extra += ["", "DEFINITIONS (from a definition lookup, not from the search):"]
+            for item in found:
+                body = item["text"] or ""
+                if len(body) > RELATED_DEFINITION_CHARS:
+                    body = body[:RELATED_DEFINITION_CHARS] + " …"
+                extra += [
+                    f"- {item['term'] or '(untitled)'}"
+                    + (f" -- defined in § {item['defined_in']}" if item["defined_in"] else "")
+                    + ("" if item["exact_match"] else " (related term, not an exact match)"),
+                    f"  guid: {item['guid']}   {item['url']}",
+                    f"  {body}",
+                ]
+        elif term:
+            entries.append(
+                (
+                    CAVEAT_DEFINITION_LOOKUP,
+                    f"This query reads like a definition lookup, but no "
+                    f"definition headed {term!r} was found either. Try "
+                    "find_definition with the singular or a shorter form "
+                    "of the term.",
+                )
+            )
+
+        if isinstance(loose, BaseException):
+            logger.warning("relaxed follow-up failed for %r: %s", query, loose)
+        elif loose and loose.get("results"):
+            hit_lines, rows = self._render_hits(
+                (loose.get("results") or [])[:RELAXED_MAX_ROWS], 1
+            )
+            raw_total = loose.get("totalResultCount")
+            total = self._as_int(raw_total) if raw_total is not None else None
+            structured["relaxed_match"] = {
+                "query": relaxed_query,
+                "total_count": total,
+                "rows": rows,
+            }
+            entries.append(
+                (
+                    CAVEAT_RELAXED_MATCH,
+                    "The phrase matched nothing, so the same words were "
+                    "searched again without requiring them to be adjacent "
+                    f"or in order ({relaxed_query}): "
+                    f"{total if total is not None else len(rows)} section(s) "
+                    f"matched, the first {len(rows)} listed below under "
+                    "RELAXED MATCHES. These are NOT matches for the phrase: "
+                    "read a section with get_section before saying it "
+                    "contains the wording.",
+                )
+            )
+            extra += ["", "RELAXED MATCHES (same words, any order -- not the phrase):", ""]
+            extra += hit_lines
+
+        if not entries:
+            return text, structured
+        caveats, caveat_lines = self._caveats(entries)
+        structured["caveats"] = list(structured.get("caveats") or []) + caveats
+        return "\n".join([text] + caveat_lines + extra), structured
 
     @staticmethod
     def _reference_arg(args: Dict[str, Any]) -> Tuple[str, str]:
@@ -2870,7 +3295,9 @@ class EcodePlugin(MCPPlugin):
         self, number: str, base: str, data: Dict[str, Any], page: int
     ) -> tuple:
         results = data.get("results", []) or []
-        max_pages = self._as_int(data.get("maxPages", 1), default=1)
+        # The upstream reports maxPages 0 for an empty result; "page 1 of 0"
+        # reads as a fault.
+        max_pages = max(1, self._as_int(data.get("maxPages", 1), default=1))
         raw_total = data.get("totalResultCount")
         if raw_total is not None:
             total_count = self._as_int(raw_total)
@@ -2999,14 +3426,26 @@ class EcodePlugin(MCPPlugin):
         header.append("")
 
         raw_children = data.get("children", []) or []
-        body = self._render_children(raw_children, depth=0)
-        children = self._structured_children(raw_children)
+        counts: List[int] = [0] * TOC_DEPTH
+        body, children = self._outline(raw_children, 0, counts)
         if not children:
             entries.append(
                 (
                     CAVEAT_NODE_HAS_NO_CHILDREN,
                     "The outline came back empty; use browse_structure "
                     "with guid='ROOT' to walk the tree directly.",
+                )
+            )
+        elif not any(counts[1:]):
+            # The structure/ROOT fallback, or a library the API gives no
+            # nested outline for: say the tree is shallow rather than let
+            # one level pass for the whole outline.
+            entries.append(
+                (
+                    CAVEAT_OUTLINE_DEPTH_LIMITED,
+                    "Only the top level of the outline was available. Call "
+                    "browse_structure with an entry's guid to list what is "
+                    "under it.",
                 )
             )
 
@@ -3016,7 +3455,21 @@ class EcodePlugin(MCPPlugin):
             + header
             + (body if body else ["(no entries)"])
         )
-        summary = f"{len(children)} top-level entr(y/ies) under {title}."
+        summary = (
+            f"{counts[0]} top-level entr(y/ies) under {title}"
+            + (
+                f", with {counts[1]} at the second level and {counts[2]} "
+                "at the third (parts, titles, chapters). Sections are not "
+                "listed: call browse_structure with a chapter's guid."
+                if any(counts[1:])
+                else "."
+            )
+        )
+        text = text.replace(
+            f"root guid: {guid}",
+            f"root guid: {guid}\n{summary}",
+            1,
+        )
         return text, {
             "node": {
                 "guid": str(guid),
@@ -3034,8 +3487,15 @@ class EcodePlugin(MCPPlugin):
         guid = str(data.get("guid") or data.get("id", "") or "ROOT")
         url = PUBLIC_URL.format(guid=guid) if guid and guid != "ROOT" else None
         lines = [
-            f"{data.get('label', '')} {data.get('number', '')} "
-            f"{data.get('title', '')}".strip(),
+            " ".join(
+                part
+                for part in (
+                    self._kind_word(data.get("label"), data.get("number")),
+                    data.get("number") or "",
+                    data.get("title") or "",
+                )
+                if part.strip()
+            ),
             f"guid: {guid}   type: {data.get('type', '')}",
             f"parent: {data.get('parent') or '(none)'}",
             f"link: {url}" if url else "",
@@ -3081,6 +3541,43 @@ class EcodePlugin(MCPPlugin):
             "caveats": caveats,
         }
 
+    def _outline(
+        self, children: List[Any], depth: int, counts: List[int]
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        """(rendered lines, structured tree) for the outline, TOC_DEPTH
+        levels deep. One walk builds both, so they cannot disagree."""
+        lines: List[str] = []
+        nodes: List[Dict[str, Any]] = []
+        for child in children:
+            if not isinstance(child, (dict, str)):
+                continue
+            # One child at a time: the two helpers skip different things (a
+            # node with no guid has a line but no structured entry), and a
+            # zip over their whole outputs would then pair the wrong ones.
+            structured = self._structured_children([child])
+            if not structured:
+                continue
+            node = structured[0]
+            line = self._render_children([child], depth)[0]
+            counts[depth] += 1
+            below = (
+                [c for c in child.get("children") or [] if isinstance(c, (dict, str))]
+                if isinstance(child, dict)
+                else []
+            )
+            if below and depth + 1 < TOC_DEPTH:
+                sub_lines, sub_nodes = self._outline(below, depth + 1, counts)
+                lines.append(line)
+                lines.extend(sub_lines)
+                node["children"] = sub_nodes
+            elif below:
+                node["children_not_listed"] = len(below)
+                lines.append(f"{line}  (+{len(below)} below)")
+            else:
+                lines.append(line)
+            nodes.append(node)
+        return lines, nodes
+
     def _structured_children(self, children: List[Any]) -> List[Dict[str, Any]]:
         """Children as a tree of {guid, ref, title, type}.
 
@@ -3122,6 +3619,15 @@ class EcodePlugin(MCPPlugin):
             )
         return out
 
+    @staticmethod
+    def _kind_word(label: Any, number: Any) -> str:
+        """The node kind, unless the number already opens with it: the
+        structure endpoint numbers a chapter "Chapter 9.28" and a list item
+        "Litem A", which rendered as "Chapter Chapter 9.28", "Litem Litem A"."""
+        label = (label or "").strip() if isinstance(label, str) else ""
+        number = (number or "").strip() if isinstance(number, str) else ""
+        return "" if label and number.lower().startswith(label.lower()) else label
+
     def _render_children(self, children: List[Any], depth: int) -> List[str]:
         """Render a list of child nodes (each a dict, or a bare guid string)."""
         out: List[str] = []
@@ -3130,13 +3636,15 @@ class EcodePlugin(MCPPlugin):
             if isinstance(child, str):
                 out.append(f"{indent}- guid {child}")
                 continue
+            if not isinstance(child, dict):
+                continue
             guid = child.get("guid") or child.get("id", "")
             # Include the node kind (Title / Part / Chapter / Litem). Several
             # real nodes carry an empty `number`, so without it a child can
             # render as nothing but a title and a guid, losing where it sits
             # in the hierarchy -- which is the entire reason to call this.
             parts = [
-                child.get("label", ""),
+                self._kind_word(child.get("label"), child.get("number")),
                 child.get("number", ""),
                 child.get("title", ""),
             ]
@@ -3174,17 +3682,29 @@ class EcodePlugin(MCPPlugin):
         # Render once, whole, for structuredContent. The text block shows a
         # window of that same rendering, so a caller can read on from the
         # character where one response stopped (`offset`).
+        notes: Dict[str, int] = {"inferred": 0, "uncertain": 0}
         full_body = self._render_content_node(
             data,
             depth=0,
             budget=[max_structured_chars if too_large else self._UNCAPPED],
+            heading_shown=True,
+            notes=notes,
         )
         if offset and offset >= len(full_body):
+            if too_large:
+                raise ToolInputError(
+                    f"offset {offset} is past the end of the "
+                    f"{len(full_body):,} characters this server returns "
+                    "for this node. That is only the first part of it: "
+                    f"the whole node holds about {total_chars:,} "
+                    "characters of code text. Call browse_structure with "
+                    f"guid {guid} and read its sections individually."
+                )
             raise ToolInputError(
-                f"offset {offset} is past the end of this section, which "
-                f"is {len(full_body):,} characters long. Use the offset "
-                "given in the rendered_text_truncated note, or leave it "
-                "out to read from the start."
+                f"offset {offset} is past the end of this section, whose "
+                f"text is {len(full_body):,} characters long. Use the "
+                "offset given in the rendered_text_truncated note, or "
+                "leave it out to read from the start."
             )
         shown_end = min(len(full_body), offset + max_chars)
         if shown_end < len(full_body):
@@ -3205,6 +3725,17 @@ class EcodePlugin(MCPPlugin):
                     CAVEAT_RESOLVED_FROM_SECTION_NUMBER,
                     f"Reference {resolved_from!r} was resolved to guid "
                     f"{guid} by exact match on its number.",
+                )
+            )
+
+        if data.get("_subsection"):
+            entries.append(
+                (
+                    CAVEAT_SUBSECTION_OF_SECTION,
+                    f"Subsection {data['_subsection']} was asked for. A "
+                    "subsection cannot be fetched on its own, so the whole "
+                    f"of {ref or 'the section'} is returned: find "
+                    f"subsection {data['_subsection']} in the text below.",
                 )
             )
 
@@ -3233,13 +3764,18 @@ class EcodePlugin(MCPPlugin):
             entries.append(
                 (
                     CAVEAT_NODE_TOO_LARGE,
-                    f"This node is a whole chapter or title of about "
-                    f"{total_chars:,} characters -- too large to return "
-                    f"in one piece. The text below is cut at "
-                    f"{max_chars:,} characters and structuredContent.text "
-                    f"at {max_structured_chars:,}. Call browse_structure "
-                    f"with guid {guid} to list its sections, then read "
-                    "the ones you need with get_sections.",
+                    "This node is a whole chapter or title, too large to "
+                    "return in one piece. Three different lengths apply. "
+                    f"(1) The whole node holds about {total_chars:,} "
+                    "characters of code text. (2) This server returns "
+                    f"only the first part of it: {len(full_body):,} "
+                    "characters as formatted here, which is all that "
+                    "structuredContent.text holds. (3) The text below is "
+                    f"characters {offset + 1:,}-{shown_end:,} of those "
+                    f"{len(full_body):,}. Most of the node is therefore "
+                    "NOT in this result. Call browse_structure with guid "
+                    f"{guid} to list its sections, then read the ones you "
+                    "need with get_sections.",
                 )
             )
         elif shown_end < len(full_body):
@@ -3261,6 +3797,32 @@ class EcodePlugin(MCPPlugin):
                     f"{shown_end:,} of {len(full_body):,}: the end of this "
                     "section, continued from an earlier call. Its start is "
                     "not repeated here.",
+                )
+            )
+
+        if notes["inferred"] or notes["uncertain"]:
+            parts = []
+            if notes["inferred"]:
+                parts.append(
+                    f"In {notes['inferred']} place(s) here, the eCode360 "
+                    "API gives the words before a list and the words after "
+                    "it as one run of text, with the list items separate. "
+                    "This server put each list back after the colon that "
+                    "introduces it, so the sentence that follows a list is "
+                    "shown after it. That placement is inferred, not "
+                    "supplied by the publisher."
+                )
+            if notes["uncertain"]:
+                parts.append(
+                    f"In {notes['uncertain']} place(s) the position of a "
+                    "list could not be worked out, and words that follow "
+                    "the list in the published code may appear before it."
+                )
+            entries.append(
+                (
+                    CAVEAT_LIST_POSITION_INFERRED,
+                    " ".join(parts)
+                    + f" Check the order at {url} before relying on it.",
                 )
             )
 
@@ -3292,6 +3854,12 @@ class EcodePlugin(MCPPlugin):
             "title": title,
             "url": url,
             "text": full_body,
+            "length": {
+                "text_chars": len(full_body),
+                "shown_from": offset,
+                "shown_to": shown_end,
+                "whole_node_chars": total_chars if too_large else None,
+            },
             "has_attachment": has_attachment,
             "attachments": attachment_list,
             "is_pdf": is_pdf,
@@ -3793,32 +4361,127 @@ class EcodePlugin(MCPPlugin):
                 return marker
         return None
 
+    @staticmethod
+    def _same_heading(a: Optional[str], b: Optional[str]) -> bool:
+        def norm(text: Optional[str]) -> str:
+            return " ".join((text or "").split()).rstrip(".").lower()
+
+        return bool(norm(a)) and norm(a) == norm(b)
+
+    @staticmethod
+    def _split_list_text(text: str) -> Tuple[str, str, Optional[str]]:
+        """(words before the list, words after it, how that was decided).
+
+        `text` is a parent node's own text with any history note removed.
+        See LIST_LEAD_IN_RE for why this is needed and how it decides.
+        """
+        if not text or text.endswith(":"):
+            return text, "", None
+        cuts = [
+            m
+            for m in LIST_LEAD_IN_RE.finditer(text)
+            if len(text[: m.start()].split()) >= LEAD_IN_MIN_WORDS
+        ]
+        if not cuts:
+            return text, "", None
+        if len(cuts) > 1:
+            return text, "", "uncertain"
+        return text[: cuts[0].start() + 1], text[cuts[0].end():], "inferred"
+
     def _render_content_node(
-        self, node: Dict[str, Any], depth: int, budget: List[int]
+        self,
+        node: Dict[str, Any],
+        depth: int,
+        budget: List[int],
+        heading_shown: bool = False,
+        inherited_title: Optional[str] = None,
+        notes: Optional[Dict[str, int]] = None,
     ) -> str:
+        """Render a node and its descendants in DOCUMENT order: the node's
+        lead-in text, its children, the text that follows them, then the
+        history note.
+
+        `heading_shown` says the caller prints this node's heading itself
+        (the "§ number title" line of get_section), so the copy of it that
+        opens the body is dropped. `inherited_title` is the heading of the
+        section this node is a subsection of: the API stamps that heading on
+        every subsection, where repeating it ("A. Unfair labor practices.",
+        "1. Unfair labor practices.") only buries the text.
+        """
         if budget[0] <= 0:
             return ""
         indent = "  " * depth
-        parts: List[str] = []
-        heading = " ".join(
-            p for p in [node.get("number", ""), node.get("title", "")] if p
-        ).strip()
-        if depth > 0 and heading:
-            parts.append(f"{indent}{heading}")
+        number = (node.get("number") or "").strip()
+        title = (node.get("title") or "").strip()
         text = (node.get("content") or "").strip()
-        if text:
-            if len(text) > budget[0]:
-                text = text[: budget[0]] + " …[truncated]"
-            budget[0] -= len(text)
-            wrapped = "\n".join(f"{indent}{ln}" for ln in text.splitlines())
-            parts.append(wrapped)
-        for child in node.get("children", []) or []:
+        children = [c for c in node.get("children") or [] if isinstance(c, dict)]
+        inherited = self._same_heading(title, inherited_title)
+        own_heading = depth > 0 and bool(title) and not inherited
+
+        if title and not inherited and (heading_shown or own_heading):
+            # Only a whole heading: "Fees." opening "Fees. A fee of ..." is
+            # the heading, but "Fees" opening "Fees shall be paid ..." is the
+            # first word of the law.
+            rest = text[len(title):]
+            if text.startswith(title) and (
+                not rest or (rest[0].isspace() and title[-1] in ".:;?!)")
+            ):
+                text = rest.lstrip()
+
+        lead, after, history = text, "", ""
+        if children:
+            note = HISTORY_NOTE_RE.search(text)
+            if note:
+                history = note.group(1)
+                text = text[: note.start()].rstrip()
+            lead, after, how = self._split_list_text(text)
+            if how and notes is not None:
+                notes[how] += 1
+
+        def take(piece: str) -> str:
+            if not piece or budget[0] <= 0:
+                return ""
+            if len(piece) > budget[0]:
+                piece = piece[: budget[0]] + " …[truncated]"
+            budget[0] -= len(piece)
+            return piece
+
+        def block(piece: str, first_prefix: str = "") -> str:
+            rows = piece.splitlines() or [""]
+            out = [f"{indent}{first_prefix}{rows[0]}".rstrip()]
+            out += [f"{indent}{row}" for row in rows[1:]]
+            return "\n".join(out)
+
+        parts: List[str] = []
+        lead = take(lead)
+        if own_heading:
+            parts.append(f"{indent}{' '.join(p for p in [number, title] if p)}")
+            if lead:
+                parts.append(block(lead))
+        elif depth > 0 and number:
+            # A subsection: its label, then its own text, on one line.
+            parts.append(block(lead, f"{number} ") if lead else f"{indent}{number}")
+        elif lead:
+            parts.append(block(lead))
+
+        child_title = title if (depth == 0 or own_heading) else inherited_title
+        for child in children:
             if budget[0] <= 0:
                 parts.append(f"{indent}…[output truncated; fetch child guids "
                              "individually with get_section]")
                 break
-            if isinstance(child, dict):
-                parts.append(self._render_content_node(child, depth + 1, budget))
+            parts.append(
+                self._render_content_node(
+                    child,
+                    depth + 1,
+                    budget,
+                    inherited_title=child_title,
+                    notes=notes,
+                )
+            )
+        for tail in (take(after), take(history)):
+            if tail:
+                parts.append(block(tail))
         return "\n".join(p for p in parts if p)
 
     def _format_customer(self, data: Dict[str, Any]) -> tuple:
@@ -3930,7 +4593,10 @@ class EcodePlugin(MCPPlugin):
 
     @staticmethod
     def _strip_html(text: str) -> str:
-        return re.sub(r"<[^>]+>", "", text or "").strip()
+        # Tags out, then entities: search snippets of PDF documents carry
+        # "&nbsp;" and "&amp;" (seen live in find_references 21.05.010).
+        plain = html.unescape(re.sub(r"<[^>]+>", "", text or ""))
+        return plain.replace(" ", " ").strip()
 
 
 def _load_env_file(path: str) -> None:

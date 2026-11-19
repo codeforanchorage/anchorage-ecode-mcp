@@ -88,7 +88,9 @@ async def _search(plugin, query, total, page=0, payload=None):
     sc = result.structured_content
     validate(sc, SEARCH_OUTPUT_SCHEMA)
     # The upstream was asked for exactly what the caller wrote.
-    sent = plugin.client.get.call_args.kwargs["params"]["query"]
+    # (A phrase that matches nothing may be followed by clearly labelled
+    # follow-up searches; the FIRST call is always the caller's own.)
+    sent = plugin.client.get.call_args_list[0].kwargs["params"]["query"]
     assert sent == query, "the server rewrote the caller's query"
     return sc, result.content[0]["text"]
 
@@ -230,11 +232,16 @@ class TestNoMatchInCode:
 
     @pytest.mark.asyncio
     async def test_wording_is_neutral(self, plugin):
-        """Say the CODE lacks the text, never that the law does not exist."""
+        """Say no section MATCHED, never that the text or the law does not
+        exist (attorney audit 2026-11-18: '"Labor agreement means"' -> 0
+        although § 3.70.010 defines the term)."""
         sc, _ = await _search(plugin, '"purchasing card"', 0)
         msg = sc["caveats"][0]["message"].lower()
-        assert "does not appear in the published" in msg
-        for claim in ("does not exist", "no such law", "is not the law"):
+        assert "matched this query as written" in msg
+        assert "not proof the text is absent" in msg
+        assert "quotation marks around a defined term" in msg
+        for claim in ("does not appear", "does not exist", "no such law",
+                      "is not the law"):
             assert claim not in msg
 
     @pytest.mark.parametrize(

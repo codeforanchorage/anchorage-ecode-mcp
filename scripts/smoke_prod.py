@@ -432,6 +432,15 @@ try:
     check("table of contents: structuredContent present and conforming",
           bool(sc and sc.get("children") and valid),
           why or f"{len(sc.get('children', [])) if sc else 0} entries")
+    # Three levels: parts -> titles -> chapters, and no sections.
+    titles = [t for part in sc["children"] for t in part.get("children", [])]
+    chapters = [c for t in titles for c in t.get("children", [])]
+    check("table of contents: parts, titles and chapters, no sections",
+          len(titles) > 20 and len(chapters) > 100
+          and not any("children" in c for c in chapters)
+          and "Sections are not listed" in sc.get("summary", ""),
+          f"{len(sc['children'])} parts, {len(titles)} titles, "
+          f"{len(chapters)} chapters")
 except Exception as e:
     check("table of contents: structuredContent present and conforming",
           False, repr(e))
@@ -637,6 +646,65 @@ try:
           bool(r["result"].get("isError")), text_of(r)[:80])
 except Exception as e:
     check("find_references: a chapter number is refused", False, repr(e))
+
+
+# ── 7e. attorney audit 2026-11-18 ─────────────────────────────────────────
+
+try:
+    r = call_tool("get_section", {"guid": "48977253"})
+    sc = structured_of(r) or {}
+    body = sc.get("text") or ""
+    a, b, c = (body.find("within two months from:"), body.find("(1) Adoption"),
+               body.find("If the assembly determines"))
+    check("Charter 4.01: list item sits between its lead-in and the closing sentence",
+          0 <= a < b < c and body.rstrip().endswith(")")
+          and "list_position_inferred" in [x.get("code") for x in sc.get("caveats") or []],
+          f"positions {a}, {b}, {c}")
+except Exception as e:
+    check("Charter 4.01: list item sits between its lead-in and the closing sentence",
+          False, repr(e))
+
+try:
+    r = call_tool("get_section", {"guid": "3.70.140"})
+    sc = structured_of(r) or {}
+    body = sc.get("text") or ""
+    check("3.70.140: heading appears once, subsections carry only their label",
+          "Unfair labor practices" not in body
+          and text_of(r).count("Unfair labor practices.") == 1
+          and "A. Prohibited acts by municipality." in body
+          and body.find("6. Engage in any illegal effort") < body.find("Notwithstanding the above")
+          and sc.get("length", {}).get("text_chars") == len(body),
+          f"{len(body)} chars")
+except Exception as e:
+    check("3.70.140: heading appears once, subsections carry only their label",
+          False, repr(e))
+
+try:
+    r = call_tool("search_code", {"query": '"Labor agreement means"'})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__search_code", sc)
+    defs = sc.get("related_definitions") or []
+    check("search miss 'Labor agreement means': definition found, relaxed match labelled",
+          ok and sc.get("rows") == [] and sc.get("total_count") == 0
+          and bool(defs) and defs[0].get("defined_in") == "3.70.010"
+          and bool((sc.get("relaxed_match") or {}).get("rows"))
+          and "does not appear" not in text_of(r),
+          why or f"{len(defs)} definition(s)")
+except Exception as e:
+    check("search miss 'Labor agreement means': definition found, relaxed match labelled",
+          False, repr(e))
+
+try:
+    r = call_tool("get_section", {"guid": "Title 21"})
+    sc = structured_of(r) or {}
+    ln = sc.get("length") or {}
+    check("Title 21: every reported length is labelled and consistent",
+          ln.get("text_chars") == len(sc.get("text") or "")
+          and (ln.get("whole_node_chars") or 0) > ln.get("text_chars", 0)
+          and "Three different lengths apply" in text_of(r),
+          json.dumps(ln))
+except Exception as e:
+    check("Title 21: every reported length is labelled and consistent", False, repr(e))
 
 
 # ── 8. modern era (MCP 2026-07-28, stateless, per-request _meta) ──────────

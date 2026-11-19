@@ -25,7 +25,7 @@ the section number and an `https://ecode360.com/<guid>` link for verification.
 | Tool | Arguments | What it does |
 | --- | --- | --- |
 | `search_code` | `query`, `page` (default 0), `within` (optional) | Full-text search of the code. Returns up to 20 sections per page, each with its number, title, a snippet and a guid. Terms side by side are matched with OR; use quotes, `AND` and `NOT` for precise queries. `within` (`Title 9`, `Chapter 9.28`, a section number or a guid) keeps only the hits under that part of the code. |
-| `get_table_of_contents` | none | The outline of the code: titles and chapters down to section level, without body text. |
+| `get_table_of_contents` | none | The outline of the code, three levels deep: parts, titles and chapters, each with a guid. Sections and body text are not listed; `browse_structure` lists a chapter's sections. |
 | `browse_structure` | `guid` (default `ROOT`) | One node of the hierarchy and its immediate children, for walking the outline. |
 | `get_section` | `guid`, `offset` (default 0) | Full text of a section and its subsections, with any attachments listed. Up to 40,000 characters come back per call; a longer section says so and gives the `offset` to continue from. Accepts a guid, a section number (`21.05.010`), or a chapter or title reference (`Chapter 17.05`, `Title 21`). The text of a very large node, such as a whole title, is cut at a size cap and flagged with a `node_too_large` caveat; read its chapters or sections individually. |
 | `get_sections` | `sections` | Full text of up to 10 sections in one call, by guid or number. A section that cannot be fetched is reported in place without failing the rest. |
