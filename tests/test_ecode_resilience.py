@@ -10,6 +10,7 @@ Three behaviours added together in 1.2.0:
 * The table of contents and customer record are cached per instance.
 """
 
+import asyncio
 import time
 
 import httpx
@@ -340,6 +341,79 @@ class TestCallBudget:
         p = EcodePlugin(ecode_config)
         p.plugin_config = EcodePluginConfig(**ecode_config)
         assert p._request_timeout() is None
+        assert p._hard_limit() is None
+
+
+class TestCallDeadline:
+    """The budget is a wall-clock deadline, not only an httpx timeout.
+
+    httpx times each phase (connect, every read) separately, so a response
+    that trickles a few bytes inside each read window never trips it and
+    could run on until the Lambda is killed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_trickling_response_is_cut_off_at_the_budget(
+        self, ecode_config, monkeypatch
+    ):
+        monkeypatch.setattr(ecode_mod, "TOOL_CALL_BUDGET_S", 0.2)
+
+        async def trickle(*_args, **_kwargs):
+            # Stands in for a body that keeps arriving: no httpx timeout
+            # ever fires.
+            await asyncio.sleep(30)
+            return _json(CONTENT_49422044)
+
+        p = _plugin(ecode_config, trickle)
+        started = time.monotonic()
+        result = await p.execute_tool("get_section", {"guid": "49422044"})
+
+        assert time.monotonic() - started < 5
+        assert result.success is False
+        assert "budget" in result.error_message
+        assert p.client.get.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_outside_cancellation_is_not_reported_as_the_budget(
+        self, ecode_config
+    ):
+        async def slow(*_args, **_kwargs):
+            await asyncio.sleep(30)
+
+        p = _plugin(ecode_config, slow)
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.1):
+                await p._get_json("/x")
+
+    @pytest.mark.asyncio
+    async def test_trickling_attachment_is_cut_off_at_the_budget(
+        self, ecode_config, monkeypatch
+    ):
+        monkeypatch.setattr(ecode_mod, "TOOL_CALL_BUDGET_S", 0.3)
+        monkeypatch.setattr(ecode_mod, "ATTACHMENT_TIME_RESERVE_S", 0.0)
+        ecode_mod._ATTACHMENT_CACHE.clear()
+
+        async def body():
+            yield b"%PDF-1.4\n"
+            while True:
+                await asyncio.sleep(0.05)
+                yield b" "
+
+        async def handler(_request):
+            return httpx.Response(200, content=body())
+
+        p = _plugin(ecode_config, AssertionError("API not expected"))
+        p._attachment_transport = httpx.MockTransport(handler)
+        started = time.monotonic()
+        result = await p.execute_tool(
+            "read_attachment",
+            {"url": "https://live.ecode360.com/attachment/123/x.pdf"},
+        )
+
+        assert time.monotonic() - started < 5
+        assert result.success is False
+        assert "attachment" in result.error_message
+        assert "budget" in result.error_message
 
 
 # ── Static caching ──────────────────────────────────────────────────────
