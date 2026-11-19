@@ -199,7 +199,9 @@ fetch and which every new Lambda container would otherwise fetch again.
   table's guid from the table of contents.
 - **Access.** All public access is blocked, objects are encrypted at rest
   (SSE-S3), and the Lambda role may only `s3:GetObject` and `s3:PutObject` on
-  the bucket's objects. It cannot list, delete or change the bucket.
+  the bucket's objects and `s3:ListBucket` on the bucket (so a missing object
+  reads as "not found", not "access denied"). It cannot delete anything or
+  change the bucket.
 - **Trust.** An object is read with a size cap, parsed as JSON and used only
   if it has the expected shape, was stored under the code's current
   last-updated date and is under 7 days old. Anything else is ignored and the
