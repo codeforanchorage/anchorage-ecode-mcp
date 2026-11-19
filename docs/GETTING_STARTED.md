@@ -7,7 +7,7 @@ If you only want to use the hosted server from Claude, follow the
 [Quick Start](QUICKSTART.md) instead.
 
 The server uses the Model Context Protocol (MCP), which connects AI assistants
-to external data. It exposes nine read-only tools for searching and reading
+to external data. It exposes ten read-only tools for searching and reading
 the Municipality of Anchorage municipal code published on eCode360.
 
 ## Prerequisites

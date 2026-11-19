@@ -137,6 +137,14 @@ colon that introduces it, so the sentence that follows a list is shown after
 it, and says so with a `list_position_inferred` caveat. Where the position is
 ambiguous it leaves the text as received and says that instead.
 
+`history` is the section's history note, parsed: one entry per ordinance in the
+order printed, each with its `citation` (`AO No. 2025-36`), the `date` printed
+with it (the adoption date, as `YYYY-MM-DD`), an `effective_date` when the note
+gives one (`eff. 4-1-2025`), and the entry as printed. `latest_date` and
+`latest_citation` name the newest dated entry, which answers "when was this
+section last amended" as far as the published code knows. Old entries carry no
+date. `history` is null for a node with no note of its own, such as a chapter.
+
 ### `get_sections(sections)`
 
 Up to 10 sections in one call, each given as a guid or a number. A section that
@@ -158,6 +166,36 @@ the list is placed after the colon that introduces it. When that placement
 was inferred, or could not be worked out, the result carries a
 `list_position_inferred` caveat naming the definition(s) by their number in
 the result.
+
+### `recent_ordinances(within=None, limit=25)`
+
+The ordinances most recently worked into the code, newest first, for questions
+such as "what changed recently" or "has Title 21 been amended this year".
+eCode360 has no endpoint for changes, so the tool reads a section of the code
+itself: the publisher's Ordinance List and Disposition Table (`§ OL.010`),
+found by its title in the table of contents. The API returns that table as one
+run of text, which the tool splits into rows.
+
+Each row has the `ordinance` number as printed, the `adopted` date, the
+`subject`, the `chapters` it was codified in (`21.05`, `R11.10` for a
+regulation, `Charter`), the `supplement` number when printed, a `search_query`
+and the row as printed. The table names chapters, not sections: passing the
+`search_query` (`"AO No. 2026-40"`) to `search_code` lists the sections whose
+history note cites the ordinance.
+
+- `within` keeps the ordinances codified in a title or chapter: `Title 21`,
+  `Chapter 21.05`, `21`, `R21` or `Charter`. A section number narrows to its
+  chapter.
+- `limit` is 1 to 100. `total_count` is the number of matching rows.
+- `covers` gives the size and date range of the whole table. It holds roughly
+  the last year or two of ordinances already in the published code. An ordinance
+  adopted since the code was last updated is not in it, and older history is in
+  the Ordinance Disposition Table (`§ CCT.020`).
+- A few rows have no adoption date in the table; they are listed last with an
+  `ordinance_rows_undated` caveat.
+- If the table is missing or its layout changes so that no row can be read, the
+  result is empty with an `ordinance_list_unavailable` caveat, which is not
+  evidence that nothing changed.
 
 ### `find_references(section, page=0)`
 
@@ -213,6 +251,7 @@ code and a message. The ones seen most often:
 | `rendered_text_truncated` | The text block shows part of the section; the caveat gives the `offset` for the next part, and the full text is in `structuredContent` |
 | `list_position_inferred` | A list was placed after the colon that introduces it, because the API does not say where in the paragraph it sits; check the order at the link |
 | `no_match_in_code` | No section matched the query as written; not proof the text is absent |
+| `ordinance_list_scope` | On every `recent_ordinances` result: what the table covers, that dates are adoption dates, and how to get from an ordinance to its sections |
 | `relaxed_match` | A quoted phrase matched nothing; the same words in any order matched the sections listed under `relaxed_match` |
 | `definition_lookup` | A zero-result query read like a definition lookup; the definition is in `related_definitions` |
 | `node_too_large` | A whole chapter or title exceeded 200,000 characters and was cut; read its parts individually |

@@ -51,7 +51,7 @@ The answers are the published code text, not legal advice.
 
 ### Some tools are missing
 
-The server has nine tools (see the [README](../README.md#tools)). If the
+The server has ten tools (see the [README](../README.md#tools)). If the
 connector was added before a tool was released, disconnect and reconnect it in
 Settings → Connectors to refresh the tool list.
 
