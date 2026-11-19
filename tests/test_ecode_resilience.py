@@ -344,6 +344,56 @@ class TestCallBudget:
         assert p._hard_limit() is None
 
 
+class TestIntegerArguments:
+    """Odd values for an integer argument (the input-handling cases fixed
+    in opencontext-arcgis-hub v1.1.0, checked here on 2026-11-19)."""
+
+    @pytest.mark.parametrize(
+        "value", [float("inf"), float("-inf"), float("nan"), 1.5, True, False]
+    )
+    def test_refused_as_a_caller_error(self, value):
+        with pytest.raises(ecode_mod.ToolInputError) as err:
+            EcodePlugin._int_arg({"page": value}, "page", 0)
+        assert "page must be an integer" in str(err.value)
+
+    @pytest.mark.parametrize(
+        "value, expected", [(None, 7), ("2", 2), (2.0, 2), (3, 3), (0, 0)]
+    )
+    def test_accepted(self, value, expected):
+        assert EcodePlugin._int_arg({"page": value}, "page", 7) == expected
+
+    def test_absent_uses_the_default(self):
+        assert EcodePlugin._int_arg({}, "page", 7) == 7
+
+    @pytest.mark.asyncio
+    async def test_infinity_is_not_logged_as_a_server_fault(
+        self, ecode_config, caplog
+    ):
+        """int(inf) raised OverflowError: a traceback at ERROR, and the
+        caller was told 'cannot convert float infinity to integer'."""
+        p = _plugin(ecode_config, [_json(CONTENT_49422044)])
+        with caplog.at_level("ERROR"):
+            result = await p.execute_tool(
+                "search_code", {"query": "dog", "page": float("inf")}
+            )
+
+        assert result.success is False
+        assert "page must be an integer" in result.error_message
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+        assert p.client.get.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_null_for_an_optional_integer_means_not_supplied(
+        self, ecode_config
+    ):
+        p = _plugin(ecode_config, [_json(CONTENT_49422044)])
+        result = await p.execute_tool(
+            "get_section", {"guid": "49422044", "offset": None}
+        )
+
+        assert result.success is True
+
+
 class TestCallDeadline:
     """The budget is a wall-clock deadline, not only an httpx timeout.
 

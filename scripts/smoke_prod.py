@@ -245,6 +245,7 @@ try:
               "ecode__find_definition",
               "ecode__find_references",
               "ecode__recent_ordinances",
+              "ecode__find_ordinance",
               "ecode__read_attachment",
               "ecode__browse_structure",
               "ecode__get_table_of_contents",
@@ -667,6 +668,43 @@ except Exception as e:
         "recent_ordinances: Title 21 rows are dated, newest first, in Title 21",
         False, repr(e),
     )
+
+# AO 2011-113(S) rewrote Title 9: a large, old, stable entry of the
+# Ordinance Disposition Table, so the check does not age.
+try:
+    r = call_tool("find_ordinance", {"ordinance": "AO 2011-113"})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__find_ordinance", sc)
+    found = sc.get("matches") or []
+    first = found[0] if found else {}
+    check(
+        "find_ordinance: AO 2011-113 lists its Title 9 sections",
+        ok
+        and sc.get("found") is True
+        and first.get("ordinance") == "2011-113(S)"
+        and first.get("entry_count", 0) >= 150
+        and "9.06.010" in (first.get("sections") or [])
+        and any(e.get("action") == "repealed" for e in first.get("entries") or []),
+        why or f"found={sc.get('found')} entries={first.get('entry_count')}",
+    )
+except Exception as e:
+    check("find_ordinance: AO 2011-113 lists its Title 9 sections",
+          False, repr(e))
+
+try:
+    r = call_tool("find_ordinance", {"ordinance": "2099-1"})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__find_ordinance", sc)
+    codes = [c.get("code") for c in sc.get("caveats") or []]
+    check(
+        "find_ordinance: an unlisted number is reported, not an error",
+        ok and sc.get("found") is False and sc.get("matches") == []
+        and "ordinance_not_in_table" in codes,
+        why or f"found={sc.get('found')} caveats={codes}",
+    )
+except Exception as e:
+    check("find_ordinance: an unlisted number is reported, not an error",
+          False, repr(e))
 
 try:
     r = call_tool("get_section", {"guid": "9.28.020"})

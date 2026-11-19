@@ -190,12 +190,53 @@ history note cites the ordinance.
 - `covers` gives the size and date range of the whole table. It holds roughly
   the last year or two of ordinances already in the published code. An ordinance
   adopted since the code was last updated is not in it, and older history is in
-  the Ordinance Disposition Table (`§ CCT.020`).
+  the Ordinance Disposition Table (`§ CCT.020`), which `find_ordinance` reads.
 - A few rows have no adoption date in the table; they are listed last with an
   `ordinance_rows_undated` caveat.
 - If the table is missing or its layout changes so that no row can be read, the
   result is empty with an `ordinance_list_unavailable` caveat, which is not
   evidence that nothing changed.
+
+### `find_ordinance(ordinance)`
+
+The code sections one ordinance added, amended or repealed, and when it took
+effect, for questions such as "what did AO 2025-94 change" or "which sections
+did ordinance 2011-113 touch". It reads the publisher's Ordinance Disposition
+Table (`§ CCT.020`), found by its title in the table of contents: about 1,560
+ordinances from the 1977 code onward, one row per provision changed.
+
+`ordinance` is the number, with or without a prefix or version suffix:
+`2025-94`, `AO 2025-94`, `AO No. 2025-115(S-2)`. Rows are matched on the base
+number, so every version the table prints is returned. Before 2000 the number
+came first and the year last (`85-8`).
+
+Each match has the `ordinance` number as printed, its `effective_date`, its
+`entries` and the distinct `sections` they name (ready for `get_sections`). An
+entry has the `ordinance_section` that made the change, the `action` when the
+table marks one (`added`, `repealed`, `amended`, `renumbered`), the
+`disposition` as printed and the section numbers in it.
+
+- The dates are effective dates, unlike `recent_ordinances`, which gives
+  adoption dates. A date that is not one plain date is kept as printed in
+  `effective_as_printed` (`12-8-2020/election of 4-6-2021`), with
+  `effective_date` null.
+- When the ordinance is also in the Ordinance List (`§ OL.010`), `listing`
+  carries its adoption date, subject and chapters.
+- The table is a finding aid, not the ordinance. A section it names may have
+  changed since; every result says so in an `ordinance_table_scope` caveat.
+- `found` is false with an `ordinance_not_in_table` caveat when the table has
+  no row. That is not evidence the ordinance does not exist: the table leaves
+  out ordinances that were repealed, superseded or not of a general and
+  permanent nature, and one newer than its last row. `search_query` finds the
+  sections whose history cites the number.
+- A number listed under more than one form (`2008-134` and `2008-134(S)`, or a
+  later `Amd. of` row) returns one match per form with an
+  `ordinance_several_versions` caveat.
+- The table is typed by hand and the API returns it as one run of cells, so the
+  parser guesses nothing: a cell that does not read as a section number or a
+  date stays in the disposition as printed.
+- If the table is missing or no row can be read, the result has an
+  `ordinance_table_unavailable` caveat.
 
 ### `find_references(section, page=0)`
 
@@ -252,6 +293,11 @@ code and a message. The ones seen most often:
 | `list_position_inferred` | A list was placed after the colon that introduces it, because the API does not say where in the paragraph it sits; check the order at the link |
 | `no_match_in_code` | No section matched the query as written; not proof the text is absent |
 | `ordinance_list_scope` | On every `recent_ordinances` result: what the table covers, that dates are adoption dates, and how to get from an ordinance to its sections |
+| `ordinance_table_scope` | On every `find_ordinance` match: the table is a finding aid, dates are effective dates, unmarked rows do not say how a provision changed |
+| `ordinance_not_in_table` | `find_ordinance` found no row: what the table leaves out, and how to search for the number instead |
+| `ordinance_several_versions` | `find_ordinance` found the number under more than one printed form |
+| `ordinance_entries_truncated` | `find_ordinance` matched more than 300 rows and shows the first 300 |
+| `ordinance_table_unavailable` | The Ordinance Disposition Table is missing or could not be parsed |
 | `relaxed_match` | A quoted phrase matched nothing; the same words in any order matched the sections listed under `relaxed_match` |
 | `definition_lookup` | A zero-result query read like a definition lookup; the definition is in `related_definitions` |
 | `node_too_large` | A whole chapter or title exceeded 200,000 characters and was cut; read its parts individually |
