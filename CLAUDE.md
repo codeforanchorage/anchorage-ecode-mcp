@@ -89,4 +89,4 @@ Two AWS sizing values are read from `config.yaml` in preference to `terraform/aw
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on push to main and on PRs: ruff lint (no format check), config validation and pytest (serial, then parallel with the 80% coverage floor) on Python 3.11 and 3.14, `pip-audit -r requirements.txt` (what ships in the Lambda zip), and `go vet` / `go test` for `client/`. Deploys stay manual.
+GitHub Actions (`.github/workflows/ci.yml`) runs on push to main and on PRs: ruff lint (no format check), config validation and pytest (serial, then parallel with the 80% coverage floor) on Python 3.11 and 3.14, `pip-audit` on the runtime versions in `uv.lock` (what ships in the Lambda zip; the job also fails if the lock has drifted from `pyproject.toml`), and `go vet` / `go test` for `client/`. Deploys stay manual.

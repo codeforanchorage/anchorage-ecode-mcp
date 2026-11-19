@@ -56,7 +56,10 @@ and must be written without quotes (`indemnif*`, not `"indemnif*"`).
 
 `within` limits the results to one part of the code. It accepts what
 `get_section` accepts: `Title 9`, `Chapter 9.28`, a section number, or a guid
-from the table of contents. eCode360 has no scoped search, so the server does
+from the table of contents. It also accepts the parts of the code that are
+cited by name, not number: `Charter`, one article of it (`Charter Article IV`,
+`Article 13 of the Charter`), `Part I` to `Part III`, and `Regulations`. A bare
+`Article IV` is refused, since it does not say it is the Charter's. eCode360 has no scoped search, so the server does
 the filtering: it reads up to 200 hits for the query (10 upstream pages),
 places each one using the table of contents, and returns those under the
 requested node.

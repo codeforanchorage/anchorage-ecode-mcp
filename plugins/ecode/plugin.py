@@ -1126,6 +1126,23 @@ ORDINANCES_OUTPUT_SCHEMA = {
 # simply absent on a continuation row. The table is typed by hand: dates
 # such as "3-a9-21" and "12-8-2020/election of 4-6-2021", glued cells
 # ("2000-127(S)1"), a few ordinances listed in two places.
+# Parts of the code that are cited by name, not number (see _named_scope).
+SCOPE_CHARTER_NAMES = frozenset({
+    "charter",
+    "municipal charter",
+    "anchorage charter",
+    "anchorage municipal charter",
+    "home rule charter",
+    "title cha",
+    "cha",
+})
+SCOPE_REGULATIONS_NAMES = frozenset({
+    "regulations",
+    "code of regulations",
+    "municipal code of regulations",
+    "anchorage municipal code of regulations",
+})
+
 ORDINANCE_TABLE_TITLE = "ordinance disposition table"
 ORDINANCE_TABLE_HEADER = "Ordinance Number Section Effective Date Disposition "
 ORDINANCE_EMPTY_CELL = "\xa0"
@@ -1138,7 +1155,10 @@ ORDINANCE_ASKED_RE = re.compile(
     r"(?<![\d-])(\d{1,4})\s*[-‐-―]\s*(\d{1,4})(?![\d-])"
     r"\s*(\([A-Za-z0-9 -]{1,8}\))?"
 )
-ORDINANCE_RESOLUTION_RE = re.compile(r"\bAR\b|(?i:\bresolution\b)")
+# "AR 2025-94", "ar no. 2025-94", "A.R. 2025-94", "AR2025-94".
+ORDINANCE_RESOLUTION_RE = re.compile(
+    r"(?i)(?<![a-z])a\.?r\.?(?=\s*(?:no\.?\s*)?\d)|\bresolution\b"
+)
 ORDINANCE_SECTION_CELL_RE = re.compile(
     r"^\d+(?:[—-]\d+)?,?\xa0?$|^\d+,\d+$|^\d+\(\S*\)$"
 )
@@ -1545,7 +1565,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.12.0"
+    plugin_version = "1.12.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -1679,7 +1699,7 @@ class EcodePlugin(MCPPlugin):
                     "least essential term rather than reverting to a bag of "
                     "words.\n\n"
                     "LIMIT TO PART OF THE CODE: pass `within` (e.g. "
-                    "'Title 9', 'Chapter 9.28', or a guid) to keep only "
+                    "'Title 9', 'Chapter 9.28', 'Charter', or a guid) to keep only "
                     "hits under that title, chapter or section. The server "
                     "checks up to 200 hits for the query per call and "
                     "returns those inside the scope; if the query has "
@@ -1723,7 +1743,7 @@ class EcodePlugin(MCPPlugin):
                             "type": "string",
                             "description": (
                                 "Optional. Limit results to one title, "
-                                "chapter or section: 'Title 9', 'Chapter "
+                                "chapter or section: 'Charter', 'Title 9', 'Chapter "
                                 "9.28', '9.28.020', or its guid. With "
                                 "`within`, each page checks 200 hits for "
                                 "the query instead of returning 20."
@@ -2782,6 +2802,100 @@ class EcodePlugin(MCPPlugin):
 
     # ── Scoped search ───────────────────────────────────────────────────
 
+    @staticmethod
+    def _named_scope(toc: Any, within: str) -> Optional[Tuple[str, str]]:
+        """(guid, display) for a part of the code that is cited by NAME:
+        'Charter', 'Charter Article IV', 'Part III', 'Regulations'.
+
+        The Charter has no title number, so "Title 9"-style references
+        cannot reach it, and the bare word was taken for a guid and refused
+        (seen four times in one day of prod logs, 2026-11-19). Found by the
+        outline's own labels and numbers, never by a guid written here.
+        None when `within` is not such a name or the outline has no such
+        part.
+        """
+        text = " ".join(within.lower().replace(".", " ").split())
+        text = re.sub(r"^the ", "", text)
+
+        def first(match) -> Optional[Dict[str, Any]]:
+            stack = [toc]
+            while stack:
+                node = stack.pop()
+                if not isinstance(node, dict):
+                    continue
+                if match(node):
+                    return node
+                stack.extend(reversed(node.get("children") or []))
+            return None
+
+        def number_of(node: Dict[str, Any]) -> str:
+            return "".join(str(node.get("number") or "").split()).upper()
+
+        def is_charter(node: Dict[str, Any]) -> bool:
+            return (
+                str(node.get("label") or "").lower() == "title"
+                and number_of(node) == "CHA"
+            )
+
+        def result(node: Optional[Dict[str, Any]], display: str):
+            guid = str((node or {}).get("guid") or "")
+            return (guid, display) if guid else None
+
+        article = re.fullmatch(
+            r"(?:charter,? )?art(?:icle)? ([ivxlc]+|\d{1,2})"
+            r"(?: of (?:the )?charter)?",
+            text,
+        )
+        if article and "charter" in text:
+            wanted = article.group(1).upper()
+            if wanted.isdigit():
+                wanted = EcodePlugin._roman(int(wanted))
+            charter = first(is_charter)
+            node = next(
+                (
+                    child
+                    for child in (charter or {}).get("children") or []
+                    if isinstance(child, dict)
+                    and str(child.get("label") or "").lower() == "article"
+                    and number_of(child) == wanted
+                ),
+                None,
+            )
+            title = str((node or {}).get("title") or "").strip()
+            return result(node, f"Charter Article {wanted} {title}".strip())
+        if text in SCOPE_CHARTER_NAMES:
+            return result(first(is_charter), "the Charter")
+        part = re.fullmatch(r"part (i{1,3}|[123])", text)
+        wanted_part = None
+        if part:
+            wanted_part = part.group(1).upper()
+            if wanted_part.isdigit():
+                wanted_part = "I" * int(wanted_part)
+        elif text in SCOPE_REGULATIONS_NAMES:
+            wanted_part = "III"
+        if wanted_part:
+            node = first(
+                lambda n: re.match(
+                    rf"PART {wanted_part}\b(?!I)",
+                    str(n.get("title") or "").upper(),
+                )
+                is not None
+            )
+            return result(node, str((node or {}).get("title") or "").strip())
+        return None
+
+    @staticmethod
+    def _roman(value: int) -> str:
+        out = ""
+        for size, letters in (
+            (50, "L"), (40, "XL"), (10, "X"), (9, "IX"),
+            (5, "V"), (4, "IV"), (1, "I"),
+        ):
+            while value >= size:
+                out += letters
+                value -= size
+        return out
+
     async def _resolve_scope(self, within: str) -> Dict[str, Any]:
         """The outline node `within` names, with what is needed to tell
         whether a search hit sits under it.
@@ -2808,7 +2922,10 @@ class EcodePlugin(MCPPlugin):
             # "9" for Title 9. Guids are far longer, so this cannot hide one.
             parsed = (KIND_TITLE, within, False)
         display = ""
-        if parsed is not None:
+        named = self._named_scope(toc, within) if parsed is None else None
+        if named is not None:
+            guid, display = named
+        elif parsed is not None:
             kind, number, charter_only = parsed
             matches = self._outline_matches(toc, kind, number, charter_only)
             if not matches:
@@ -2828,12 +2945,19 @@ class EcodePlugin(MCPPlugin):
                 )
             guid = matches[0]["guid"]
             display = matches[0]["display"]
-        elif GUID_RE.match(within) and within.upper() != "ROOT":
+        elif (
+            GUID_RE.match(within)
+            and within.upper() != "ROOT"
+            # Every guid has digits. A bare word ("Zoning") is a name this
+            # code has no part called, not a guid to go looking for.
+            and any(c.isdigit() for c in within)
+        ):
             guid = within
         else:
             raise ToolInputError(
                 f"within {within!r} is not a title, chapter, section or "
-                "guid." + hint
+                "guid." + hint + " The Charter is 'Charter' (one article: "
+                "'Charter Article IV')."
             )
 
         in_scope: set = set()
@@ -3441,7 +3565,7 @@ class EcodePlugin(MCPPlugin):
                 "shared cache read of %s: %s: %s",
                 key,
                 type(e).__name__,
-                e or "timed out",
+                str(e) or "timed out",
             )
             return None
         if stored.get("code_last_updated") != code_date:
@@ -3493,7 +3617,7 @@ class EcodePlugin(MCPPlugin):
                 "shared cache write of %s: %s: %s",
                 key,
                 type(e).__name__,
-                e or "timed out",
+                str(e) or "timed out",
             )
 
     async def _get_shared_static_json(self, path: str) -> Any:

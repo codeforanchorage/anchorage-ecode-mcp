@@ -531,7 +531,11 @@ class TestNumberAsWritten:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "asked", ["AR 2025-94", "AR No. 2025-94", "Resolution 2025-94"]
+        "asked",
+        [
+            "AR 2025-94", "AR No. 2025-94", "Resolution 2025-94",
+            "ar 2025-94", "AR2025-94", "A.R. 2025-94",
+        ],
     )
     async def test_resolution_is_not_answered_as_the_ordinance(self, asked):
         """AR 2025-94 and AO 2025-94 are different acts with one number."""
