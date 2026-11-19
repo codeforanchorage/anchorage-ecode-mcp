@@ -235,6 +235,15 @@ ATTACHMENT_PATH_RE = re.compile(
 )
 # {customer} is replaced with the configured library id (re.escape'd).
 DOCUMENT_PATH_TEMPLATE = r"^/documents/{customer}/(?:[^/\\]+/)*[^/\\]+\.pdf$"
+# Ordinances the publisher holds as PDFs: search hits of type "law", e.g.
+# https://live.ecode360.com/AN6998/laws/LF2907762.pdf. They are the
+# ordinances adopted but not yet worked into the code text, reachable only
+# through search. A search result already told the caller to pass such a
+# link to read_attachment, which then refused it (seen in prod on launch
+# day, 2026-11-19). Checked that day: served without credentials, text
+# layer present. The shape is as narrow as the links are: this library,
+# "LF" and digits.
+LAW_PATH_TEMPLATE = r"^/{customer}/laws/LF\d+\.pdf$"
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 # Rendered text per call. Layout mode pads columns with spaces, so one page
 # of a wide table runs ~16,000 characters.
@@ -290,6 +299,8 @@ CAVEAT_NODE_TOO_LARGE = "node_too_large"
 CAVEAT_PDF_TEXT_EXTRACTION = "pdf_text_extraction"
 CAVEAT_MORE_ATTACHMENT_PAGES = "more_attachment_pages"
 CAVEAT_ATTACHMENT_PAGE_TRUNCATED = "attachment_page_truncated"
+CAVEAT_ORDINANCE_PDF = "ordinance_pdf"
+CAVEAT_PROXIMITY_IGNORED = "proximity_ignored"
 CAVEAT_NO_TEXT_LAYER = "no_text_layer"
 CAVEAT_NO_REFERENCES_FOUND = "no_references_found"
 CAVEAT_LIST_POSITION_INFERRED = "list_position_inferred"
@@ -330,6 +341,12 @@ _QUERY_TOKEN_RE = re.compile(
     r'[+-]?(?:\w+:)?"[^"]*"(?:~\d+)?|[()]|[^\s()"]+'
 )
 _QUERY_OPERATORS = frozenset({"and", "or", "not", "&&", "||"})
+# "notice of claim"~3 -- a proximity search, which eCode360 does not have.
+PROXIMITY_RE = re.compile(r'"([^"]+)"~\d+')
+PROXIMITY_STOP_WORDS = frozenset(
+    "a an and any as at be by for from in is it not of on or shall such "
+    "that the this to with".split()
+)
 # Operators that narrow a result set. Lowercase works too (verified).
 _NARROWING_OPERATORS = frozenset({"and", "not", "&&"})
 
@@ -1565,7 +1582,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.12.1"
+    plugin_version = "1.13.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2055,8 +2072,11 @@ class EcodePlugin(MCPPlugin):
                     "aligned with spaces: to read a table cell, line the "
                     "mark up with the column headers at the top of the "
                     "page, and tell the user to confirm against the PDF. "
-                    "Only eCode360 attachment urls for this code are "
-                    "accepted."
+                    "It also reads an ORDINANCE that search_code returns "
+                    "as a PDF (a recently adopted ordinance not yet in the "
+                    "code text): the result says how to read its drafting "
+                    "marks, which extraction loses. Only eCode360 urls for "
+                    "this code are accepted."
                 ),
                 input_schema={
                     "type": "object",
@@ -3196,6 +3216,9 @@ class EcodePlugin(MCPPlugin):
         title_caveat = self._title_number_caveat(query)
         if title_caveat:
             entries.append(title_caveat)
+        proximity_caveat = self._proximity_caveat(query)
+        if proximity_caveat:
+            entries.append(proximity_caveat)
 
         lines = [summary, ""] if kept else [summary]
         hit_lines, rows = self._render_hits(kept, 1)
@@ -3848,6 +3871,9 @@ class EcodePlugin(MCPPlugin):
         title_caveat = self._title_number_caveat(query)
         if title_caveat:
             entries.append(title_caveat)
+        proximity_caveat = self._proximity_caveat(query)
+        if proximity_caveat:
+            entries.append(proximity_caveat)
 
         caveats, caveat_lines = self._caveats(entries)
         return "\n".join([summary] + caveat_lines), {
@@ -3882,7 +3908,13 @@ class EcodePlugin(MCPPlugin):
             heading = f"{ref or ''} {title}".strip()
             lines.append(f"{i}. {heading}")
             lines.append(f"   guid: {guid or '(unknown)'}   type: {r.get('type', '')}")
-            if is_pdf:
+            if is_pdf and r.get("type") == "law":
+                lines.append(
+                    "   (Ordinance PDF — an ordinance not yet worked into "
+                    "the code text, not the code itself; pass the link "
+                    "below to read_attachment)"
+                )
+            elif is_pdf:
                 lines.append(
                     "   (PDF document — not code text; pass the link below "
                     "to read_attachment)"
@@ -3977,6 +4009,9 @@ class EcodePlugin(MCPPlugin):
         title_caveat = self._title_number_caveat(query)
         if title_caveat:
             entries.append(title_caveat)
+        proximity_caveat = self._proximity_caveat(query)
+        if proximity_caveat:
+            entries.append(proximity_caveat)
 
         caveats, caveat_lines = self._caveats(entries)
         lines.extend(caveat_lines)
@@ -4413,6 +4448,35 @@ class EcodePlugin(MCPPlugin):
             "summary": summary,
             "caveats": caveats,
         }
+
+    @staticmethod
+    def _proximity_caveat(query: str) -> Optional[tuple]:
+        """Attached with or without hits: the search ran, but not as the
+        caller meant it, and nothing else in the result would say so."""
+        found = PROXIMITY_RE.search(query or "")
+        if not found:
+            return None
+        # The words worth requiring; "of" and "the" match everything.
+        words = [
+            w
+            for w in found.group(1).split()
+            if w.lower() not in PROXIMITY_STOP_WORDS
+        ]
+        joined = " AND ".join(f'"{w}"' for w in words[:4])
+        return (
+            CAVEAT_PROXIMITY_IGNORED,
+            f"The ~N after {found.group(0).rsplit('~', 1)[0]} was ignored: "
+            "this search has no proximity operator, so the phrase was "
+            "matched exactly, word for word. Sections that use those words "
+            "near each other in another order or with words between them "
+            "are NOT in this result."
+            + (
+                f" To find them, search for the words with AND ({joined}) "
+                "and read the hits."
+                if len(words) > 1
+                else ""
+            ),
+        )
 
     @staticmethod
     def _quoted_wildcard_caveat(query: str) -> Optional[tuple]:
@@ -4948,12 +5012,14 @@ class EcodePlugin(MCPPlugin):
                 "url is required -- pass the `url` of a search_code result "
                 "with is_pdf=true, or an attachment url from get_section."
             )
+        customer = self.plugin_config.customer_id
         refuse = (
-            "url must be an eCode360 PDF attachment for this code, e.g. "
-            "https://live.ecode360.com/attachment/<id>/<name>.pdf or "
-            "https://ecode360.com/documents/"
-            f"{self.plugin_config.customer_id}/<name>.pdf (got {raw.strip()!r}). "
-            "Use the url exactly as search_code or get_section returned it."
+            "url must be an eCode360 PDF for this code: an attachment "
+            "(https://live.ecode360.com/attachment/<id>/<name>.pdf or "
+            f"https://ecode360.com/documents/{customer}/<name>.pdf) or an "
+            f"ordinance (https://live.ecode360.com/{customer}/laws/"
+            f"LF<digits>.pdf). Got {raw.strip()!r}. Use the url exactly as "
+            "search_code or get_section returned it."
         )
         try:
             parts = urlsplit(raw.strip())
@@ -4977,10 +5043,27 @@ class EcodePlugin(MCPPlugin):
             or parts.query
             or ".." in path.split("/")
             or any(ord(c) < 32 for c in path)
-            or not (ATTACHMENT_PATH_RE.match(path) or document_re.match(path))
+            or not (
+                ATTACHMENT_PATH_RE.match(path)
+                or document_re.match(path)
+                or self._is_ordinance_pdf(path)
+            )
         ):
             raise ToolInputError(refuse)
         return f"https://{host}{quote(path)}"
+
+    def _is_ordinance_pdf(self, url_or_path: str) -> bool:
+        """True for an ordinance PDF of THIS library (see LAW_PATH_TEMPLATE)."""
+        path = unquote(urlsplit(url_or_path).path)
+        return bool(
+            re.match(
+                LAW_PATH_TEMPLATE.format(
+                    customer=re.escape(self.plugin_config.customer_id)
+                ),
+                path,
+                re.IGNORECASE,
+            )
+        )
 
     async def _download_attachment(self, url: str) -> bytes:
         """Fetch a validated attachment URL. No API credentials are sent,
@@ -5159,6 +5242,29 @@ class EcodePlugin(MCPPlugin):
                 f"to confirm them in the PDF: {url}",
             )
         ]
+        if self._is_ordinance_pdf(url):
+            entries.insert(
+                0,
+                (
+                    CAVEAT_ORDINANCE_PDF,
+                    "This is an ORDINANCE as the publisher holds it, not "
+                    "code text. It is here because it has not yet been "
+                    "worked into the published code, so the sections it "
+                    "amends may still show their earlier wording: say so. "
+                    "Text extraction drops the drafting marks. In an "
+                    "Anchorage ordinance new language is underlined and "
+                    "deleted language is struck through inside [brackets], "
+                    "usually in CAPITALS; the underlining and the strike "
+                    "do not survive here, so deleted words read as if "
+                    "they were law (seen: 'seven [nine][SEVEN] voting "
+                    "members', where only 'seven' is the adopted text). "
+                    "Treat bracketed text as deleted unless the PDF shows "
+                    "otherwise, do not quote this as the current code, and "
+                    "send the user to the PDF for what was added and "
+                    f"removed: {url}. It may be a substitute or amended "
+                    "version; its header says which.",
+                ),
+            )
         if next_page:
             entries.append(
                 (
@@ -6419,8 +6525,10 @@ class EcodePlugin(MCPPlugin):
                     CAVEAT_ORDINANCE_NOT_IN_TABLE,
                     f"The {table_name} has no row for {base}.{newer} To "
                     "find the sections whose history cites it, call "
-                    f"search_code with {search_query}; for ordinances "
-                    "adopted recently, see recent_ordinances.",
+                    f"search_code with {search_query}; a recent ordinance "
+                    "may also come back from that search as a PDF of the "
+                    "ordinance itself, which read_attachment reads. For "
+                    "ordinances adopted recently, see recent_ordinances.",
                 )
             )
         else:

@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.14.1"
+server_version: "1.15.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -91,6 +91,12 @@ instructions: |
      get_section, has a url: pass it to read_attachment(url) to read the
      table. Read cells by lining marks up under the column headers, say
      the reading came from extracted PDF text, and give the PDF link.
+     A search can also return a recently adopted ORDINANCE as a PDF
+     (marked "Ordinance PDF"): read_attachment reads it too. It is the
+     ordinance, not the code, and has not been worked into the code
+     text yet. Extraction loses underlining and strikethrough, so treat
+     [BRACKETED CAPITALS] as deleted language, never quote it as the
+     current code, and give the PDF link.
 
   Always report the section number and the https://ecode360.com/<guid> link so
   the user can verify. If a section points to a PDF or attachment, say so. If
