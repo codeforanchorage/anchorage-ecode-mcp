@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.10.0"
+server_version: "1.11.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -38,23 +38,28 @@ instructions: |
      Example: "snow" AND "sidewalk" AND "occupant" -> 4 sections, led by
      § 24.80.090; the same three terms without AND -> 254.
      If AND returns too few, drop the least essential term. If a search
-     returns nothing, the code does not contain that text -- the rule may
-     be state law, repealed, or worded differently; broaden the words, put
-     OR between synonyms, or browse the table of contents.
+     returns nothing, no section matched the query as written. That alone
+     does not prove the code is silent: punctuation inside a quoted phrase
+     (quotation marks around a defined term) can block a match, and the
+     rule may be state law, repealed, or worded differently. Broaden the
+     words, put OR between synonyms, or browse the table of contents. A
+     result marked RELAXED MATCHES is not a match for the phrase.
   2. get_section(guid) to read the FULL text of a section before quoting or
      summarizing it. A known section number (e.g. "21.05.010") also works
      in place of the guid, as does a whole chapter or title written as
      such ("Chapter 17.05", "Title 21"). A long section comes back in
      parts: when the result says INCOMPLETE, call get_section again with
      the offset it gives and read every part before quoting, summarizing
-     or saying what the section does not contain. Quote the controlling language;
+     or saying what the section does not contain. A note that a list's
+     position was inferred means: check the order at the ecode360.com link. Quote the controlling language;
      don't paraphrase legal requirements loosely. When you need more than one section, call
      get_sections([...]) once (up to 10 guids or numbers) instead of
      get_section repeatedly. Every section result states the date the
      published code was last updated; you do not need get_customer_info
      to check how current a section is.
-  3. To orient within the code's structure, use get_table_of_contents, then
-     browse_structure(guid) to walk chapters/articles → sections.
+  3. To orient within the code's structure, use get_table_of_contents: it
+     lists the parts, titles and chapters (three levels), not sections.
+     Then browse_structure(guid) on a chapter lists its sections.
   4. For "what does X mean" / "how is X defined", use find_definition(term)
      rather than searching. A term is often defined separately in several
      titles and each definition applies only within its own chapter or
