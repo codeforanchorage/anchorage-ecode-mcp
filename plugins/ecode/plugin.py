@@ -1185,6 +1185,9 @@ SCOPE_CHARTER_NAMES = frozenset({
     "title cha",
     "cha",
 })
+# Cheap test for "might be one of those names", so a guid or a section
+# number never costs an outline lookup.
+NAMED_PART_HINT_RE = re.compile(r"(?i)charter|regulations|^\s*(?:the\s+)?part\s")
 SCOPE_REGULATIONS_NAMES = frozenset({
     "regulations",
     "code of regulations",
@@ -1633,7 +1636,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.14.0"
+    plugin_version = "1.14.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2271,8 +2274,11 @@ class EcodePlugin(MCPPlugin):
                 # A title, chapter or section written as it is cited works
                 # here as it does in get_section; 'R3.70.120' used to be
                 # refused.
-                parsed = self._parse_ref(arguments.get("guid"))
-                if parsed:
+                named = await self._named_guid(arguments.get("guid"))
+                parsed = None if named else self._parse_ref(arguments.get("guid"))
+                if named:
+                    guid = named
+                elif parsed:
                     kind, number, charter_only = parsed
                     shown = " ".join(str(arguments.get("guid")).split())
                     guid = await self._resolve_reference(
@@ -2584,6 +2590,7 @@ class EcodePlugin(MCPPlugin):
 
         `raw` is a guid or a section number, as get_section accepts.
         """
+        raw = await self._named_guid(raw) or raw
         parsed = self._parse_ref(raw)
         if parsed:
             kind, number, charter_only = parsed
@@ -2889,6 +2896,22 @@ class EcodePlugin(MCPPlugin):
 
     # ── Scoped search ───────────────────────────────────────────────────
 
+    async def _named_guid(self, raw: Any) -> Optional[str]:
+        """The guid of a part of the code cited by name ('Charter',
+        'Charter Article IV', 'Part III'), for the tools that take a guid
+        or a reference. search_code learned these names in 1.14.1; without
+        this, get_section('Charter') went upstream as a guid and came back
+        as "no such entry". None for anything else, and when the outline
+        cannot be read (the caller then reports the reference as before).
+        """
+        if not isinstance(raw, str) or not NAMED_PART_HINT_RE.search(raw):
+            return None  # a guid or a number: no outline lookup needed
+        try:
+            named = self._named_scope(await self._get_toc(), raw.strip())
+        except (EcodeAPIError, ToolInputError):
+            return None
+        return named[0] if named else None
+
     @staticmethod
     def _named_scope(toc: Any, within: str) -> Optional[Tuple[str, str]]:
         """(guid, display) for a part of the code that is cited by NAME:
@@ -2930,7 +2953,7 @@ class EcodePlugin(MCPPlugin):
 
         article = re.fullmatch(
             r"(?:charter,? )?art(?:icle)? ([ivxlc]+|\d{1,2})"
-            r"(?: of (?:the )?charter)?",
+            r"(?:,? (?:of (?:the )?)?charter)?",
             text,
         )
         if article and "charter" in text:
@@ -5158,6 +5181,21 @@ class EcodePlugin(MCPPlugin):
                             f"No attachment exists at {url} (HTTP {status}). "
                             "Take the url from a current search_code or "
                             "get_section result."
+                        )
+                    if status >= 400 and self._is_ordinance_pdf(url):
+                        # eCode360 answers 500, not 404, for an ordinance
+                        # PDF it does not have (seen 2026-11-19). That is
+                        # the ordinary fate of these links: the PDF exists
+                        # only until the ordinance is codified.
+                        raise ToolInputError(
+                            f"eCode360 has no ordinance PDF at {url} (HTTP "
+                            f"{status}). The publisher keeps an ordinance "
+                            "as a PDF only until it is worked into the "
+                            "code text, so an older link stops working. "
+                            "Look the ordinance up with find_ordinance, "
+                            "which lists the sections it changed once it "
+                            "is in the code, or take a current link from "
+                            "recent_ordinances or search_code."
                         )
                     if status != 200:
                         raise EcodeAPIError(

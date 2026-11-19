@@ -838,3 +838,26 @@ class TestOrdinancePdf:
             await p.execute_tool("read_attachment", {"url": GOOD_URL})
         ).structured_content
         assert "ordinance_pdf" not in [c["code"] for c in sc["caveats"]]
+
+
+class TestOrdinancePdfGone:
+    """eCode360 answers 500, not 404, for an ordinance PDF it does not
+    have, and these links stop working once the ordinance is codified."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [500, 403])
+    async def test_reads_as_a_stale_link_not_an_upstream_fault(self, status):
+        p = _attachment_plugin(lambda _req: httpx.Response(status))
+        result = await p.execute_tool("read_attachment", {"url": LAW_URL})
+
+        assert result.success is False
+        assert "no ordinance PDF" in result.error_message
+        assert "find_ordinance" in result.error_message
+        with pytest.raises(ecode_mod.ToolInputError):
+            await p._download_attachment(LAW_URL)
+
+    @pytest.mark.asyncio
+    async def test_a_table_attachment_500_is_still_an_upstream_fault(self):
+        p = _attachment_plugin(lambda _req: httpx.Response(500))
+        with pytest.raises(ecode_mod.EcodeAPIError):
+            await p._download_attachment(GOOD_URL)
