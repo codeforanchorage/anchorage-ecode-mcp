@@ -225,10 +225,14 @@ class TestSharedCacheBucket:
             text,
         )
 
-    def test_role_can_only_get_and_put_objects(self):
+    def test_role_can_only_read_write_and_list(self):
+        """No delete, no bucket configuration, no wildcard. ListBucket is
+        what makes a missing object read as NoSuchKey, not AccessDenied."""
         text = SHARED_CACHE_TF.read_text(encoding="utf-8")
         actions = re.findall(r'"(s3:[A-Za-z*]+)"', text)
-        assert sorted(actions) == ["s3:GetObject", "s3:PutObject"]
+        assert sorted(actions) == [
+            "s3:GetObject", "s3:ListBucket", "s3:PutObject",
+        ]
         assert '"${aws_s3_bucket.shared_cache.arn}/*"' in text
 
     def test_bucket_is_not_public(self):
