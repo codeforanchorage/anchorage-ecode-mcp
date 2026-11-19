@@ -50,6 +50,11 @@ should read this before changing anything in `plugins/ecode/`,
   `prod.tfvars`), which keeps this MCP's limit as its own counter
   aggregated on `(IP, Host)`. The effective limit lives in mcp-stats'
   `fleet_waf_members` under the key `anchorage-ecode`, not in this repo.
+- **One public address.** The API's default
+  `execute-api.amazonaws.com` URL is disabled
+  (`disable_execute_api_endpoint`, set whenever `custom_domain` is); only
+  `https://anchorage-ecode.codeforanchorage.org/mcp` answers. Requests
+  to the default URL get a 403 from API Gateway.
 - **API Gateway throttling** at 15 rps / 30 burst, stage-wide via
   `aws_api_gateway_method_settings` reading `api_rate_limit` /
   `api_burst_limit` from `prod.tfvars`. The 3000 req/day usage-plan quota
@@ -188,7 +193,7 @@ Enforced by code today; do not relax without explicit discussion.
    config validation (`core/validators.py`) and at runtime
    (`PluginManager.load_plugins()`). Multiple enabled plugins is a hard
    error.
-2. **No write paths.** Every eCode360 call is a `GET`; all nine tools
+2. **No write paths.** Every eCode360 call is a `GET`; all ten tools
    are annotated `readOnlyHint: true`. A tool that writes would be a
    security-review-required change.
 3. **The API host and library are fixed by config, never by a tool
