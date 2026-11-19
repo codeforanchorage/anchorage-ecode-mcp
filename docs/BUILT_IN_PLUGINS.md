@@ -207,14 +207,19 @@ ordinances from the 1977 code onward, one row per provision changed.
 
 `ordinance` is the number, with or without a prefix or version suffix:
 `2025-94`, `AO 2025-94`, `AO No. 2025-115(S-2)`. Rows are matched on the base
-number, so every version the table prints is returned. Before 2000 the number
-came first and the year last (`85-8`).
+number, so every version the table prints is returned. Years before 2000 have
+two digits (`85-8` is no. 8 of 1985; `1985-8` is also accepted), and 1975-76
+ordinances are written number first (`13-75`). A resolution (`AR 2025-94`) is
+refused: resolutions share the numbering but are not in the table.
 
 Each match has the `ordinance` number as printed, its `effective_date`, its
 `entries` and the distinct `sections` they name (ready for `get_sections`). An
 entry has the `ordinance_section` that made the change, the `action` when the
 table marks one (`added`, `repealed`, `amended`, `renumbered`), the
-`disposition` as printed and the section numbers in it.
+`disposition` as printed and the section numbers in it. Each number is checked
+against the table of contents: `sections` holds those that are sections of
+the code today, `sections_not_in_code` those repealed or renumbered since (or
+mistyped in the table), which `get_sections` would not find.
 
 - The dates are effective dates, unlike `recent_ordinances`, which gives
   adoption dates. A date that is not one plain date is kept as printed in
@@ -237,6 +242,8 @@ table marks one (`added`, `repealed`, `amended`, `renumbered`), the
   date stays in the disposition as printed.
 - If the table is missing or no row can be read, the result has an
   `ordinance_table_unavailable` caveat.
+- eCode360 takes about 9 seconds to return this table, so it is cached for an
+  hour per Lambda container; the first lookup after a cold start is slow.
 
 ### `find_references(section, page=0)`
 
