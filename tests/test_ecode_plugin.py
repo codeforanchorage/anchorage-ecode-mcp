@@ -177,6 +177,7 @@ class TestGetTools:
             "find_definition",
             "find_references",
             "recent_ordinances",
+            "find_ordinance",
             "read_attachment",
             "get_customer_info",
         }

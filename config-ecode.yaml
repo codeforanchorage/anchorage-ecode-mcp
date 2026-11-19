@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.12.2"
+server_version: "1.13.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -76,7 +76,13 @@ instructions: |
      and the chapters they amended. For "when was this section last
      amended", read it with get_section: the result has the section's
      history, parsed, with the newest ordinance and its adoption date.
-     Neither shows an ordinance adopted after the code's last update.
+     For "what did AO 2025-94 change" or "when did it take effect", use
+     find_ordinance("2025-94"): the code sections that ordinance added,
+     amended or repealed, with its effective date, from the publisher's
+     disposition table (1977 on). It is a finding aid: read the sections
+     it names with get_sections for what the code says now.
+     None of these shows an ordinance adopted after the code's last
+     update.
 
   7. Some tables are published only as PDF attachments -- notably the
      Title 21 zoning tables (Table 21.05-1, Table of Allowed Uses). A

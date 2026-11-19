@@ -1078,6 +1078,259 @@ ORDINANCES_OUTPUT_SCHEMA = {
     ],
 }
 
+# ── One ordinance's sections (2026-11-19) ───────────────────────────────
+#
+# § CCT.020 "Ordinance Disposition Table" maps every ordinance since the
+# 1977 code to the sections it changed: about 1,560 ordinances and 6,900
+# rows in 169k characters. Four columns -- Ordinance Number, Section (of
+# the ordinance), Effective Date, Disposition (the code section) -- that
+# the API returns as ONE run of cells separated by single spaces, where an
+# EMPTY cell is a lone no-break space:
+#   "2025-94 1 10-21-2025 §\xa021.03.180 \xa0 2 \xa0 §\xa021.13.010A.1
+#    \xa0 \xa0 Added §\xa09.46.050F 2025-101(S) 1 9-23-2025 Added ..."
+# So the text must be split on " " alone: str.split() would swallow the
+# empty cells, and with them the row boundaries. A row is: ordinance cell
+# (empty on a continuation row), section cell, date cell, disposition.
+# When the disposition starts with Added/Rpld/Amd/Rnbd the date cell is
+# simply absent on a continuation row. The table is typed by hand: dates
+# such as "3-a9-21" and "12-8-2020/election of 4-6-2021", glued cells
+# ("2000-127(S)1"), a few ordinances listed in two places.
+ORDINANCE_TABLE_TITLE = "ordinance disposition table"
+ORDINANCE_TABLE_HEADER = "Ordinance Number Section Effective Date Disposition "
+ORDINANCE_EMPTY_CELL = "\xa0"
+# "13-75" (number-year, to 1999), "2025-94" (year-number), with a
+# substitute/amended suffix: "(S)", "(S-2)", "(am)", "am", "S".
+ORDINANCE_NUMBER_RE = re.compile(
+    r"^(\d{1,4}-\d{1,4})((?:\([A-Za-z0-9-]+\))?[A-Za-z0-9]{0,2})$"
+)
+ORDINANCE_ASKED_RE = re.compile(
+    r"(?<![\d-])(\d{1,4})\s*[-‐-―]\s*(\d{1,4})(?![\d-])"
+    r"\s*(\([A-Za-z0-9 -]{1,8}\))?"
+)
+ORDINANCE_SECTION_CELL_RE = re.compile(
+    r"^\d+(?:[—-]\d+)?,?\xa0?$|^\d+,\d+$|^\d+\(\S*\)$"
+)
+ORDINANCE_DATE_CELL_RE = re.compile(r"^\d{1,2}-\w{1,3}-\d{2,4}")
+ORDINANCE_ACTIONS = {
+    "Added": "added",
+    "Rpld": "repealed",
+    "Amd": "amended",
+    "Rnbd": "renumbered",
+    "Rbnd": "renumbered",  # the table's own misspelling
+}
+# The code sections a disposition names, to the section level:
+# "§ 21.05.070D.13b.vii(C)" -> 21.05.070, "§ R21.20.002A.12" -> R21.20.002.
+ORDINANCE_CODE_SECTION_RE = re.compile(r"§\s*(R?\d+\.\d+\.\d+)")
+MAX_ORDINANCE_ARG_CHARS = 100
+# The largest ordinance in the table (the 2011 rewrite of Title 21) has
+# 203 rows; the cap is there so a future one cannot flood a response.
+MAX_ORDINANCE_ENTRIES = 300
+
+CAVEAT_ORDINANCE_TABLE_SCOPE = "ordinance_table_scope"
+CAVEAT_ORDINANCE_NOT_IN_TABLE = "ordinance_not_in_table"
+CAVEAT_ORDINANCE_TABLE_UNAVAILABLE = "ordinance_table_unavailable"
+CAVEAT_ORDINANCE_SEVERAL_VERSIONS = "ordinance_several_versions"
+CAVEAT_ORDINANCE_ENTRIES_TRUNCATED = "ordinance_entries_truncated"
+
+_ORDINANCE_SOURCE_SCHEMA = {
+    "type": ["object", "null"],
+    "properties": {
+        "guid": {"type": "string"},
+        "ref": {"type": ["string", "null"]},
+        "title": {"type": ["string", "null"]},
+        "url": {"type": "string"},
+    },
+    "required": ["guid", "url"],
+}
+
+FIND_ORDINANCE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ordinance": {
+            "type": "string",
+            "description": "The ordinance number looked up, e.g. '2025-94'.",
+        },
+        "found": {
+            "type": "boolean",
+            "description": (
+                "true when the Ordinance Disposition Table lists it. false "
+                "does not mean no such ordinance exists: see the caveats."
+            ),
+        },
+        "matches": {
+            "type": "array",
+            "description": (
+                "One per form of the number the table prints (usually one; "
+                "'2008-134' and '2008-134(S)' are listed separately)."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ordinance": {
+                        "type": "string",
+                        "description": "As printed, e.g. '2025-115(S-2)'.",
+                    },
+                    "effective_date": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "The first effective date printed for it, "
+                            "YYYY-MM-DD. The EFFECTIVE date, not the "
+                            "adoption date. null when none is printed or "
+                            "it is not a single plain date."
+                        ),
+                    },
+                    "effective_as_printed": {"type": ["string", "null"]},
+                    "entry_count": {"type": "integer"},
+                    "entries": {
+                        "type": "array",
+                        "description": "Table rows, in the table's order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "ordinance_section": {
+                                    "type": ["string", "null"],
+                                    "description": (
+                                        "The section OF THE ORDINANCE that "
+                                        "made the change ('3', "
+                                        "'4 (Exh. A)'). null when the row "
+                                        "leaves it blank: the same "
+                                        "ordinance section as the row "
+                                        "above."
+                                    ),
+                                },
+                                "effective_date": {
+                                    "type": ["string", "null"],
+                                    "description": (
+                                        "Only when this row prints its own "
+                                        "date (YYYY-MM-DD); null otherwise, "
+                                        "which by the table's layout means "
+                                        "the date printed above."
+                                    ),
+                                },
+                                "effective_as_printed": {
+                                    "type": ["string", "null"]
+                                },
+                                "action": {
+                                    "type": ["string", "null"],
+                                    "description": (
+                                        "'added', 'repealed', 'amended' or "
+                                        "'renumbered' when the table marks "
+                                        "the row. null when unmarked: the "
+                                        "ordinance changed the provision "
+                                        "named, and the table does not say "
+                                        "how."
+                                    ),
+                                },
+                                "disposition": {
+                                    "type": "string",
+                                    "description": (
+                                        "Where the change went, as "
+                                        "printed: usually a code section "
+                                        "and subsection, sometimes a "
+                                        "chapter, a table or an 'Old' "
+                                        "(superseded) Title 21 section."
+                                    ),
+                                },
+                                "sections": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": (
+                                        "Section numbers named in the "
+                                        "disposition ('21.05.070'); for a "
+                                        "range, its two ends only."
+                                    ),
+                                },
+                            },
+                            "required": [
+                                "ordinance_section",
+                                "effective_date",
+                                "effective_as_printed",
+                                "action",
+                                "disposition",
+                                "sections",
+                            ],
+                        },
+                    },
+                    "sections": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Every distinct section number in the entries, "
+                            "in table order; pass up to 10 at a time to "
+                            "get_sections."
+                        ),
+                    },
+                },
+                "required": [
+                    "ordinance",
+                    "effective_date",
+                    "effective_as_printed",
+                    "entry_count",
+                    "entries",
+                    "sections",
+                ],
+            },
+        },
+        "total_entries": {"type": "integer"},
+        "listing": {
+            "type": ["object", "null"],
+            "description": (
+                "The ordinance's row in the Ordinance List (the table "
+                "recent_ordinances reads), when it has one: adoption date, "
+                "subject and chapters. Only recent ordinances do."
+            ),
+            "properties": {
+                "ordinance": {"type": "string"},
+                "adopted": {"type": ["string", "null"]},
+                "subject": {"type": ["string", "null"]},
+                "chapters": {"type": "array", "items": {"type": "string"}},
+                "supplement": {"type": ["string", "null"]},
+            },
+            "required": [
+                "ordinance",
+                "adopted",
+                "subject",
+                "chapters",
+                "supplement",
+            ],
+        },
+        "search_query": {
+            "type": "string",
+            "description": (
+                "Pass to search_code to list the sections whose history "
+                "note cites this ordinance."
+            ),
+        },
+        "covers": {
+            "type": ["object", "null"],
+            "description": "The whole table.",
+            "properties": {
+                "count": {"type": "integer"},
+                "first_ordinance": {"type": ["string", "null"]},
+                "last_ordinance": {"type": ["string", "null"]},
+            },
+            "required": ["count", "first_ordinance", "last_ordinance"],
+        },
+        "source": _ORDINANCE_SOURCE_SCHEMA,
+        "code_last_updated": _CODE_LAST_UPDATED_SCHEMA,
+        "summary": {"type": "string"},
+        "caveats": _CAVEAT_SCHEMA,
+    },
+    "required": [
+        "ordinance",
+        "found",
+        "matches",
+        "total_entries",
+        "listing",
+        "search_query",
+        "covers",
+        "source",
+        "code_last_updated",
+        "summary",
+        "caveats",
+    ],
+}
+
 ATTACHMENT_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1238,7 +1491,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.10.1"
+    plugin_version = "1.11.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -1329,6 +1582,7 @@ class EcodePlugin(MCPPlugin):
         "find_definition": "Find Definition",
         "find_references": "Find References",
         "recent_ordinances": "Recent Ordinances",
+        "find_ordinance": "Find Ordinance",
         "read_attachment": "Read Attachment (PDF)",
         "get_customer_info": "Customer Info",
     }
@@ -1673,6 +1927,45 @@ class EcodePlugin(MCPPlugin):
                 annotations=read_only,
             ),
             ToolDefinition(
+                name="find_ordinance",
+                description=(
+                    "Look up one ordinance by number and list the code "
+                    "sections it added, amended or repealed, with its "
+                    "effective date. Use this for 'what did AO 2025-94 "
+                    "change', 'which sections did ordinance 2011-113 "
+                    "touch' or 'when did AO 2016-53 take effect'. It reads "
+                    "the publisher's Ordinance Disposition Table, which "
+                    "runs from the 1977 code to the ordinances most "
+                    "recently worked into the published code; for a "
+                    "recent ordinance it also returns the subject and "
+                    "adoption date. The table is a finding aid, not the "
+                    "ordinance's text: read the sections it names with "
+                    "get_sections to see what the code says now. An "
+                    "ordinance that is not listed may still exist (too "
+                    "new, repealed, or not of a general and permanent "
+                    "nature). To go the other way -- which ordinances "
+                    "amended ONE section -- read that section with "
+                    "get_section and look at its history."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "ordinance": {
+                            "type": "string",
+                            "description": (
+                                "The ordinance number: '2025-94', "
+                                "'AO 2025-94', 'AO No. 2025-115(S-2)'. "
+                                "Before 2000 the number came first and "
+                                "the year last: '85-8'."
+                            ),
+                        },
+                    },
+                    "required": ["ordinance"],
+                },
+                output_schema=FIND_ORDINANCE_OUTPUT_SCHEMA,
+                annotations=read_only,
+            ),
+            ToolDefinition(
                 name="read_attachment",
                 description=(
                     "Read the text of a PDF the code publishes as an "
@@ -1919,6 +2212,19 @@ class EcodePlugin(MCPPlugin):
                     *self._format_ordinances(node, scope, limit, updated)
                 )
 
+            if tool_name == "find_ordinance":
+                base, asked = self._ordinance_number_arg(arguments)
+                table, listing, updated = await asyncio.gather(
+                    self._fetch_section_titled(ORDINANCE_TABLE_TITLE),
+                    self._fetch_ordinance_list(),
+                    self._code_last_updated(),
+                )
+                return self._ok(
+                    *self._format_ordinance_lookup(
+                        base, asked, table, listing, updated
+                    )
+                )
+
             if tool_name == "read_attachment":
                 url = self._attachment_url_arg(arguments)
                 page = self._int_arg(arguments, "page", 1)
@@ -1976,14 +2282,26 @@ class EcodePlugin(MCPPlugin):
         A bare int() raises "invalid literal for int() with base 10: 'two'"
         -- which reads as a server fault in the logs and tells the caller
         nothing about which argument was wrong.
+
+        An explicit null means "not supplied" (clients send it for an
+        optional argument left blank). A whole number written as a string
+        ("2") or a float (2.0) is taken; true/false, 1.5, NaN and infinity
+        are refused rather than read as some integer -- int(inf) raises
+        OverflowError, which used to surface as a server fault.
         """
-        raw = args.get(name, default)
+        raw = args.get(name)
+        if raw is None:
+            raw = default
+        refused = ToolInputError(f"{name} must be an integer (got {raw!r})")
+        if isinstance(raw, bool):
+            raise refused
+        if isinstance(raw, float) and not raw.is_integer():
+            # False for NaN and both infinities too.
+            raise refused
         try:
             return int(raw)
-        except (TypeError, ValueError) as exc:
-            raise ToolInputError(
-                f"{name} must be an integer (got {raw!r})"
-            ) from exc
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise refused from exc
 
     @staticmethod
     def _guid_arg(
@@ -5016,8 +5334,16 @@ class EcodePlugin(MCPPlugin):
 
     async def _fetch_ordinance_list(self) -> Optional[Dict[str, Any]]:
         """The Ordinance List section's content, or None when the code has
-        no such section. Found by title in the outline, never by a guid
-        written here: guids change when the publisher republishes."""
+        no such section."""
+        return await self._fetch_section_titled(ORDINANCE_LIST_TITLE)
+
+    async def _fetch_section_titled(
+        self, wanted: str
+    ) -> Optional[Dict[str, Any]]:
+        """The content of the outline's section with this exact title
+        (lower case, no final full stop), or None when there is none.
+        Found by title, never by a guid written here: guids change when
+        the publisher republishes."""
         toc = await self._get_toc()
         found: Optional[str] = None
         stack = [toc]
@@ -5027,7 +5353,7 @@ class EcodePlugin(MCPPlugin):
                 continue
             kids = node.get("children") or []
             title = " ".join((node.get("title") or "").split())
-            if not kids and title.lower().rstrip(".") == ORDINANCE_LIST_TITLE:
+            if not kids and title.lower().rstrip(".") == wanted:
                 found = str(node.get("guid") or node.get("id") or "")
                 break
             stack.extend(reversed(kids))
@@ -5176,9 +5502,9 @@ class EcodePlugin(MCPPlugin):
                 f"lists {covers['count']} ordinance(s) adopted {span}. It "
                 "covers only ordinances already worked into the published "
                 "code: one adopted since the code was last updated is not "
-                "here, and neither is the code's earlier history (see the "
-                "Ordinance Disposition Table, § CCT.020, or a section's own "
-                "history from get_section). Dates are adoption dates; an "
+                "here, and neither is the code's earlier history (look an "
+                "older ordinance up with find_ordinance, or read a "
+                "section's own history with get_section). Dates are adoption dates; an "
                 "ordinance may take effect later. The table names the "
                 "chapters an ordinance went into, not the sections: pass a "
                 "row's search_query to search_code to list the sections "
@@ -5238,6 +5564,470 @@ class EcodePlugin(MCPPlugin):
             "ordinances": shown,
             "total_count": len(kept),
             "within": scope,
+            "covers": covers,
+            "source": source,
+            "code_last_updated": updated,
+            "summary": summary,
+            "caveats": caveats,
+        }
+
+    # ── One ordinance: the Ordinance Disposition Table ──────────────────
+
+    @staticmethod
+    def _ordinance_number_arg(args: Dict[str, Any]) -> Tuple[str, str]:
+        """('2025-115', '2025-115(S-2)') from 'AO No. 2025-115(S-2)'.
+
+        The first is what rows are matched on; the table lists a
+        substitute or amended version under the same base number.
+        """
+        raw = args.get("ordinance")
+        example = "Pass an ordinance number such as '2025-94' or 'AO 85-8'."
+        if raw is None or isinstance(raw, (bool, list, dict)):
+            raise ToolInputError(f"ordinance is required. {example}")
+        text = " ".join(str(raw).split())
+        if not text:
+            raise ToolInputError(f"ordinance is required. {example}")
+        if len(text) > MAX_ORDINANCE_ARG_CHARS:
+            raise ToolInputError(
+                f"ordinance is too long (at most {MAX_ORDINANCE_ARG_CHARS} "
+                f"characters). {example}"
+            )
+        found = ORDINANCE_ASKED_RE.findall(text)
+        if not found:
+            raise ToolInputError(
+                f"{text!r} is not an ordinance number. {example} To search "
+                "by subject instead, use search_code or recent_ordinances."
+            )
+        if len({(a, b) for a, b, _suffix in found}) > 1:
+            raise ToolInputError(
+                f"{text!r} names more than one ordinance; pass one number "
+                "per call."
+            )
+        first, second, suffix = found[0]
+        base = f"{first}-{second}"
+        return base, base + suffix.replace(" ", "")
+
+    def _parse_ordinance_table(self, content: str) -> List[Dict[str, Any]]:
+        """§ CCT.020 as [{ordinance, base, note, entries}], in table order.
+
+        See the comment at ORDINANCE_TABLE_TITLE for the layout. Nothing
+        is guessed: a cell that does not read as a section number or a
+        date is left in the disposition, as printed.
+        """
+        text = content or ""
+        at = text.find(ORDINANCE_TABLE_HEADER)
+        if at < 0:
+            return []
+        tokens = text[at + len(ORDINANCE_TABLE_HEADER):].split(" ")
+        empty = ORDINANCE_EMPTY_CELL
+
+        starts: List[int] = []
+        for i, token in enumerate(tokens):
+            if not ORDINANCE_NUMBER_RE.match(token):
+                continue
+            prev = tokens[i - 1] if i else ""
+            after = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if i and (
+                prev == empty  # the section cell of a continuation row
+                or prev.endswith(",")  # inside a disposition ("4.c, 11-17")
+                or (starts and starts[-1] == i - 1)
+            ):
+                continue
+            # A row goes on with its section cell: a number, or empty.
+            if after != empty and not after[:1].isdigit():
+                continue
+            starts.append(i)
+
+        blocks: List[Dict[str, Any]] = []
+        for start, following in zip(starts, starts[1:] + [len(tokens)]):
+            cells = tokens[start + 1:following]
+            note = None
+            if tokens[max(start - 2, 0):start] == ["Amd.", "of"]:
+                note = "Amd. of"
+            if cells[-2:] == ["Amd.", "of"]:
+                cells = cells[:-2]  # belongs to the NEXT ordinance's row
+            match = ORDINANCE_NUMBER_RE.match(tokens[start])
+            printed, glued = tokens[start], None
+            stuck = re.fullmatch(r"(.*\))(\d+)", printed)
+            if stuck:
+                # "2000-127(S)1": the section cell typed onto the number.
+                printed, glued = stuck.group(1), stuck.group(2)
+            entries = self._parse_ordinance_cells(cells)
+            if glued and entries and not entries[0]["ordinance_section"]:
+                entries[0]["ordinance_section"] = glued
+            blocks.append(
+                {
+                    # "Amd. of 2014-137(S)" is a later ordinance amending
+                    # that one, listed under its number: kept apart.
+                    "ordinance": f"{note} {printed}" if note else printed,
+                    "base": match.group(1),
+                    "entries": entries,
+                }
+            )
+        return blocks
+
+    def _parse_ordinance_cells(self, cells: List[str]) -> List[Dict[str, Any]]:
+        """The rows of ONE ordinance, from the cells after its number."""
+        empty = ORDINANCE_EMPTY_CELL
+        entries: List[Dict[str, Any]] = []
+        i, n = 0, len(cells)
+        first = True
+        while i < n:
+            if not first and cells[i] == empty:
+                i += 1  # the empty ordinance cell of a continuation row
+            first = False
+            section: List[str] = []
+            if i < n and cells[i] == empty:
+                i += 1
+            else:
+                while i < n:
+                    cell = cells[i]
+                    if (
+                        section
+                        and cell.startswith("(")
+                        and not cell.startswith("(§")
+                    ):
+                        # "4 (Exh. A)", "1 (Prop. 9)"
+                        j = i
+                        while j < n - 1 and not cells[j].endswith(")"):
+                            j += 1
+                        section.extend(cells[i:j + 1])
+                        i = j + 1
+                        continue
+                    if ORDINANCE_SECTION_CELL_RE.match(
+                        cell
+                    ) and not ORDINANCE_DATE_CELL_RE.match(cell):
+                        section.append(cell.rstrip(empty))
+                        i += 1
+                        continue
+                    break
+            date: List[str] = []
+            if i < n and cells[i] == empty:
+                i += 1
+            elif i < n and ORDINANCE_DATE_CELL_RE.match(cells[i]):
+                date.append(cells[i])
+                i += 1
+                # "7-4-2016, 9-12-2016, 1-1-2017";
+                # "12-8-2020/election of 4-6-2021"
+                while (
+                    i < n
+                    and cells[i] != empty
+                    and (
+                        date[-1].endswith((",", "/"))
+                        or cells[i] == "of"
+                        or date[-1] == "of"
+                    )
+                ):
+                    date.append(cells[i])
+                    i += 1
+            rest: List[str] = []
+            while i < n and cells[i] != empty:
+                rest.append(cells[i])
+                i += 1
+            action = None
+            if rest and rest[0] in ORDINANCE_ACTIONS:
+                action = ORDINANCE_ACTIONS[rest[0]]
+                rest = rest[1:]
+            disposition = " ".join(rest).replace(empty, " ").strip()
+            printed_date = " ".join(date) or None
+            if not (disposition or section or printed_date):
+                continue  # a stray run of empty cells
+            if (
+                rest
+                and rest[0] == "as"
+                and action is None
+                and entries
+                and entries[-1]["action"] == "renumbered"
+                and not section
+            ):
+                # "Rnbd § 3.30.172F.7—21" / "as § 3.30.172F.8—22": one
+                # change printed on two rows.
+                entries[-1]["disposition"] += f" {disposition}"
+                entries[-1]["sections"] = self._ordinance_code_sections(
+                    entries[-1]["disposition"]
+                )
+                continue
+            entries.append(
+                {
+                    "ordinance_section": " ".join(section) or None,
+                    "effective_date": self._iso_date(printed_date),
+                    "effective_as_printed": printed_date,
+                    "action": action,
+                    "disposition": disposition,
+                    "sections": self._ordinance_code_sections(disposition),
+                }
+            )
+        return entries
+
+    @staticmethod
+    def _ordinance_code_sections(disposition: str) -> List[str]:
+        seen: List[str] = []
+        for number in ORDINANCE_CODE_SECTION_RE.findall(disposition):
+            if number not in seen:
+                seen.append(number)
+        return seen
+
+    def _format_ordinance_lookup(
+        self,
+        base: str,
+        asked: str,
+        table: Optional[Dict[str, Any]],
+        listing_node: Optional[Dict[str, Any]],
+        updated: Optional[str],
+    ) -> tuple:
+        blocks = (
+            self._parse_ordinance_table(table.get("content") or "")
+            if isinstance(table, dict)
+            else []
+        )
+        search_query = f'"AO No. {base}"'
+
+        listing = None
+        if isinstance(listing_node, dict):
+            for row in self._parse_ordinance_rows(
+                listing_node.get("content") or ""
+            ):
+                if re.match(r"\d+-\d+", row["ordinance"]).group(0) == base:
+                    listing = {
+                        key: row[key]
+                        for key in (
+                            "ordinance",
+                            "adopted",
+                            "subject",
+                            "chapters",
+                            "supplement",
+                        )
+                    }
+                    break
+
+        source = covers = None
+        if blocks:
+            guid = str(table.get("id") or table.get("guid") or "")
+            source = {
+                "guid": guid,
+                "ref": (table.get("number") or "").strip() or None,
+                "title": (table.get("title") or "").strip() or None,
+                "url": PUBLIC_URL.format(guid=guid),
+            }
+            covers = {
+                "count": len({b["ordinance"] for b in blocks}),
+                "first_ordinance": blocks[0]["ordinance"],
+                "last_ordinance": blocks[-1]["ordinance"],
+            }
+
+        # A number listed in two places, or once per version, becomes one
+        # match per printed form, rows in table order.
+        matches: List[Dict[str, Any]] = []
+        for block in blocks:
+            if block["base"] != base:
+                continue
+            match = next(
+                (m for m in matches if m["ordinance"] == block["ordinance"]),
+                None,
+            )
+            if match is None:
+                match = {"ordinance": block["ordinance"], "entries": []}
+                matches.append(match)
+            match["entries"].extend(block["entries"])
+        total = sum(len(m["entries"]) for m in matches)
+        room = MAX_ORDINANCE_ENTRIES
+        for match in matches:
+            entries = match["entries"]
+            dated = next(
+                (e for e in entries if e["effective_as_printed"]), None
+            )
+            match["effective_date"] = dated["effective_date"] if dated else None
+            match["effective_as_printed"] = (
+                dated["effective_as_printed"] if dated else None
+            )
+            match["entry_count"] = len(entries)
+            sections: List[str] = []
+            for entry in entries:
+                for number in entry["sections"]:
+                    if number not in sections:
+                        sections.append(number)
+            match["sections"] = sections
+            match["entries"] = entries[:room]
+            room -= len(match["entries"])
+        shown = sum(len(m["entries"]) for m in matches)
+
+        entries_caveats: List[tuple] = []
+        lines: List[str] = []
+        table_name = (
+            f"Ordinance Disposition Table ({source['ref'] or 'guid ' + source['guid']}, "
+            f"{source['url']})"
+            if source
+            else "Ordinance Disposition Table"
+        )
+        if matches:
+            first = matches[0]
+            when = (
+                f", effective {first['effective_date'] or first['effective_as_printed']}"
+                if first["effective_as_printed"]
+                else ""
+            )
+            summary = (
+                f"AO {first['ordinance']}{when}: {total} "
+                f"entr{'y' if total == 1 else 'ies'} in the Ordinance "
+                "Disposition Table"
+                + (
+                    f", under {len(matches)} forms of the number."
+                    if len(matches) > 1
+                    else "."
+                )
+            )
+        elif listing:
+            summary = (
+                f"AO {listing['ordinance']} is in the list of recent "
+                "ordinances, but the Ordinance Disposition Table does not "
+                "list its sections."
+            )
+        else:
+            summary = (
+                f"AO {asked} is not listed in the Ordinance Disposition "
+                "Table."
+                if blocks
+                else "The Ordinance Disposition Table could not be read."
+            )
+        lines.append(summary)
+        if listing:
+            lines.append("")
+            lines.append(
+                f"Adopted {listing['adopted'] or '(date not given)'}"
+                + (f": {listing['subject']}" if listing["subject"] else "")
+            )
+            if listing["chapters"]:
+                lines.append("Codified in: " + ", ".join(listing["chapters"]))
+
+        for match in matches:
+            lines.append("")
+            head = match["ordinance"]
+            if not head.startswith("Amd."):
+                head = f"AO {head}"
+            if match["effective_as_printed"]:
+                head += (
+                    " -- effective "
+                    + (match["effective_date"] or match["effective_as_printed"])
+                )
+            lines.append(head)
+            first_date = match["effective_as_printed"]
+            labelled = False
+            for entry in match["entries"]:
+                if entry["ordinance_section"]:
+                    label = f"ord. § {entry['ordinance_section']}"
+                    labelled = True
+                else:
+                    # Ditto under a numbered row; a plain bullet where the
+                    # table gives no ordinance sections at all (pre-2000).
+                    label = "       \"" if labelled else "-"
+                own_date = entry["effective_as_printed"]
+                lines.append(
+                    f"  {label}: "
+                    + (f"{entry['action']} " if entry["action"] else "")
+                    + (entry["disposition"] or "(nothing printed)")
+                    + (
+                        f"  [effective {entry['effective_date'] or own_date}]"
+                        if own_date and own_date != first_date
+                        else ""
+                    )
+                )
+            if match["sections"]:
+                lines.append(
+                    f"  Sections named ({len(match['sections'])}): "
+                    + ", ".join(match["sections"])
+                )
+
+        if matches:
+            entries_caveats.append(
+                (
+                    CAVEAT_ORDINANCE_TABLE_SCOPE,
+                    f"Source: the publisher's {table_name}. It is a finding "
+                    "aid, not the ordinance: it says where each section of "
+                    "the ordinance went in the code when it was codified. "
+                    "A section named here may have been amended, renumbered "
+                    "or repealed since; read it with get_sections for what "
+                    "the code says now, and check its history. Dates are "
+                    "EFFECTIVE dates as printed, not adoption dates; a row "
+                    "with no date of its own shares the date printed above "
+                    "it. A row not marked added, repealed, amended or "
+                    "renumbered changed the provision named, and the table "
+                    "does not say how. 'Old' marks a section of the "
+                    "superseded Title 21. A range (§ a—§ b) is listed by its "
+                    "two ends only.",
+                )
+            )
+            if len(matches) > 1:
+                entries_caveats.append(
+                    (
+                        CAVEAT_ORDINANCE_SEVERAL_VERSIONS,
+                        "The table lists this number under more than one "
+                        "form ("
+                        + ", ".join(m["ordinance"] for m in matches)
+                        + "): (S) is a substitute version, 'am' an amended "
+                        "one, and 'Amd. of' a later ordinance amending it. "
+                        "They are shown separately, as the table lists "
+                        "them.",
+                    )
+                )
+            if shown < total:
+                entries_caveats.append(
+                    (
+                        CAVEAT_ORDINANCE_ENTRIES_TRUNCATED,
+                        f"INCOMPLETE: {shown} of {total} entries are shown. "
+                        f"The rest are in the table itself: {source['url']}.",
+                    )
+                )
+        elif blocks:
+            newer = (
+                " The list of recent ordinances has it (above), so it is "
+                "probably too new for this table: its last entry is AO "
+                f"{covers['last_ordinance']}."
+                if listing
+                else f" The table runs from AO {covers['first_ordinance']} "
+                f"to AO {covers['last_ordinance']} and leaves out "
+                "ordinances that were repealed, superseded or not of a "
+                "general and permanent nature (budgets, rezonings, one-time "
+                "actions), so this does not show the ordinance does not "
+                "exist. Before 2000 the number came first and the year "
+                "last ('85-8', not '1985-8')."
+            )
+            entries_caveats.append(
+                (
+                    CAVEAT_ORDINANCE_NOT_IN_TABLE,
+                    f"The {table_name} has no row for {base}.{newer} To "
+                    "find the sections whose history cites it, call "
+                    f"search_code with {search_query}; for ordinances "
+                    "adopted recently, see recent_ordinances.",
+                )
+            )
+        else:
+            why = (
+                "This code's outline has no 'Ordinance Disposition Table' "
+                "section."
+                if table is None
+                else "The Ordinance Disposition Table was found but no rows "
+                "could be read from it; its layout may have changed."
+            )
+            entries_caveats.append(
+                (
+                    CAVEAT_ORDINANCE_TABLE_UNAVAILABLE,
+                    f"{why} This says nothing about the ordinance. To find "
+                    "the sections whose history cites it, call search_code "
+                    f"with {search_query}.",
+                )
+            )
+
+        caveats, caveat_lines = self._caveats(entries_caveats)
+        text = "\n".join(lines + [""] + caveat_lines).strip()
+        if updated:
+            text += f"\n\nPublished code last updated {updated}."
+        return text, {
+            "ordinance": asked,
+            "found": bool(matches),
+            "matches": matches,
+            "total_entries": total,
+            "listing": listing,
+            "search_query": search_query,
             "covers": covers,
             "source": source,
             "code_last_updated": updated,
