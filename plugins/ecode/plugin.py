@@ -19,7 +19,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote, unquote, urlsplit
 
 import httpx
@@ -1016,7 +1016,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.9.0"
+    plugin_version = "1.9.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -1613,11 +1613,14 @@ class EcodePlugin(MCPPlugin):
                 term = self._term_arg(arguments)
                 data = await self._search(f'title:"{term}"', 0)
                 hits = self._definition_hits(data, term)
+                reordered: Set[str] = set()
                 bodies = await self._fetch_definition_bodies(
-                    hits[:MAX_DEFINITIONS]
+                    hits[:MAX_DEFINITIONS], reordered
                 )
                 return self._ok(
-                    *self._format_definitions(term, data, hits, bodies)
+                    *self._format_definitions(
+                        term, data, hits, bodies, reordered
+                    )
                 )
 
             if tool_name == "find_references":
@@ -1912,13 +1915,17 @@ class EcodePlugin(MCPPlugin):
         return out
 
     async def _fetch_definition_bodies(
-        self, hits: List[Dict[str, Any]]
+        self,
+        hits: List[Dict[str, Any]],
+        reordered: Optional[Set[str]] = None,
     ) -> List[Optional[str]]:
         """Full text per definition, or None where the fetch failed.
 
         The search snippet is elided mid-sentence, so the body is read from
         the content endpoint. A failed fetch must not sink the lookup: the
-        caller falls back to the snippet and says so.
+        caller falls back to the snippet and says so. `reordered` collects
+        the guids whose text has a list this server had to place (see
+        _split_list_text), so the caller can say so as get_section does.
         """
         gate = asyncio.Semaphore(BATCH_CONCURRENCY)
 
@@ -1935,9 +1942,12 @@ class EcodePlugin(MCPPlugin):
                         "definition body fetch failed for %s: %s", guid, e
                     )
                     return None
+                notes: Dict[str, int] = {"inferred": 0, "uncertain": 0}
                 body = self._render_content_node(
-                    node, depth=0, budget=[self._UNCAPPED]
+                    node, depth=0, budget=[self._UNCAPPED], notes=notes
                 )
+                if reordered is not None and any(notes.values()):
+                    reordered.add(guid)
                 return body.strip() or None
 
         return list(await asyncio.gather(*(one(h["guid"]) for h in hits)))
@@ -2250,6 +2260,20 @@ class EcodePlugin(MCPPlugin):
         unmodified, as everywhere else.
         """
         scope = await self._resolve_scope(within)
+        hits, query_total, max_pages = await self._scan_hits(query, page)
+        text, structured = self._format_scoped_search(
+            query, page, scope, hits, query_total, max_pages
+        )
+        if page == 0 and query_total == 0:
+            text, structured = await self._zero_result_followups(
+                query, text, structured, scope=scope
+            )
+        return text, structured
+
+    async def _scan_hits(self, query: str, page: int) -> tuple:
+        """(hits, the query's total or None, upstream page count) for one
+        scan window: SCOPE_SCAN_PAGES upstream pages starting at window
+        `page`. A failed page fails the scan rather than hiding hits."""
         first_page = page * SCOPE_SCAN_PAGES
         first = await self._search(query, first_page)
         max_pages = self._as_int(first.get("maxPages", 1), default=1)
@@ -2269,9 +2293,7 @@ class EcodePlugin(MCPPlugin):
         hits: List[Dict[str, Any]] = []
         for data in [first, *rest]:
             hits.extend(data.get("results") or [])
-        return self._format_scoped_search(
-            query, page, scope, hits, query_total, max_pages
-        )
+        return hits, query_total, max_pages
 
     def _format_scoped_search(
         self,
@@ -3114,7 +3136,11 @@ class EcodePlugin(MCPPlugin):
         return entries
 
     async def _zero_result_followups(
-        self, query: str, text: str, structured: Dict[str, Any]
+        self,
+        query: str,
+        text: str,
+        structured: Dict[str, Any],
+        scope: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """For a query that is ONE quoted phrase and matched nothing: look
         the term up as a definition when the phrase reads like one, and
@@ -3123,6 +3149,11 @@ class EcodePlugin(MCPPlugin):
         Additions only. `rows` and `total_count` stay empty and 0 -- the
         phrase did not match -- and a failed follow-up is dropped, never
         allowed to sink the result the caller already has.
+
+        With `scope` (a search limited by `within`) the relaxed retry keeps
+        only hits inside the scope, checking one scan window of them. The
+        definition lookup is not scoped: a definition that governs a
+        chapter often sits in its title's general definitions section.
         """
         match = SINGLE_PHRASE_RE.match(query or "")
         if not match or "*" in match.group(1):
@@ -3141,12 +3172,14 @@ class EcodePlugin(MCPPlugin):
             else ""
         )
 
+        reordered: Set[str] = set()
+
         async def definitions() -> Optional[List[Dict[str, Any]]]:
             if not term or len(term) > MAX_TERM_CHARS:
                 return None
             data = await self._search(f'title:"{term}"', 0)
             hits = self._definition_hits(data, term)[:RELATED_DEFINITIONS]
-            bodies = await self._fetch_definition_bodies(hits)
+            bodies = await self._fetch_definition_bodies(hits, reordered)
             return [
                 {
                     "guid": hit["guid"],
@@ -3162,7 +3195,17 @@ class EcodePlugin(MCPPlugin):
         async def relaxed() -> Optional[Dict[str, Any]]:
             if not relaxed_query:
                 return None
-            return await self._search(relaxed_query, 0)
+            if scope is None:
+                return await self._search(relaxed_query, 0)
+            hits, _total, max_pages = await self._scan_hits(relaxed_query, 0)
+            kept = [h for h in hits if self._hit_in_scope(h, scope)]
+            return {
+                "results": kept,
+                # Complete only when every hit for the query was checked.
+                "totalResultCount": (
+                    len(kept) if max_pages <= SCOPE_SCAN_PAGES else None
+                ),
+            }
 
         found, loose = await asyncio.gather(
             definitions(), relaxed(), return_exceptions=True
@@ -3186,7 +3229,20 @@ class EcodePlugin(MCPPlugin):
                     "'means ...' -- which is why the phrase did not match. "
                     "A term can be defined differently in several titles: "
                     f"call find_definition({term!r}) for all of them and "
-                    "use the one for the area of law in question.",
+                    "use the one for the area of law in question."
+                    + (
+                        " This lookup covers the whole code, not only "
+                        f"{scope['display']}."
+                        if scope
+                        else ""
+                    )
+                    + (
+                        " A definition below contains a list whose "
+                        "position this server inferred; check the order at "
+                        "its link before relying on it."
+                        if reordered
+                        else ""
+                    ),
                 )
             )
             extra += ["", "DEFINITIONS (from a definition lookup, not from the search):"]
@@ -3220,6 +3276,17 @@ class EcodePlugin(MCPPlugin):
             )
             raw_total = loose.get("totalResultCount")
             total = self._as_int(raw_total) if raw_total is not None else None
+            where = f" within {scope['display']}" if scope else ""
+            if total is not None:
+                matched = f"{total} section(s) matched{where}"
+            elif scope:
+                matched = (
+                    f"{len(loose['results'])} section(s){where} matched "
+                    f"among the first {SCOPE_SCAN_PAGES * SEARCH_PAGE_SIZE} "
+                    "hits checked"
+                )
+            else:
+                matched = f"{len(rows)} section(s) matched"
             structured["relaxed_match"] = {
                 "query": relaxed_query,
                 "total_count": total,
@@ -3231,8 +3298,7 @@ class EcodePlugin(MCPPlugin):
                     "The phrase matched nothing, so the same words were "
                     "searched again without requiring them to be adjacent "
                     f"or in order ({relaxed_query}): "
-                    f"{total if total is not None else len(rows)} section(s) "
-                    f"matched, the first {len(rows)} listed below under "
+                    f"{matched}, the first {len(rows)} listed below under "
                     "RELAXED MATCHES. These are NOT matches for the phrase: "
                     "read a section with get_section before saying it "
                     "contains the wording.",
@@ -4244,6 +4310,7 @@ class EcodePlugin(MCPPlugin):
         data: Dict[str, Any],
         hits: List[Dict[str, Any]],
         bodies: List[Optional[str]],
+        reordered: Optional[Set[str]] = None,
     ) -> tuple:
         raw_total = data.get("totalResultCount")
         total_count = (
@@ -4334,6 +4401,28 @@ class EcodePlugin(MCPPlugin):
                     f"{from_snippet} definition(s) show only a search "
                     "excerpt because the full text could not be fetched; "
                     "read them in full with get_section before quoting.",
+                )
+            )
+
+        placed = [
+            str(i)
+            for i, (hit, body) in enumerate(zip(shown, bodies), 1)
+            if body and hit["guid"] in (reordered or ())
+        ]
+        if placed:
+            entries.append(
+                (
+                    CAVEAT_LIST_POSITION_INFERRED,
+                    f"Definition(s) {', '.join(placed)} above contain a "
+                    "list. The eCode360 API gives the words before a list "
+                    "and the words after it as one run of text, with the "
+                    "list items separate, so this server put the list "
+                    "after the colon that introduces it where it could. "
+                    "That placement is inferred, not supplied by the "
+                    "publisher, and words that follow the list in the "
+                    "published code may appear before it. Check the order "
+                    "at the definition's ecode360.com link before relying "
+                    "on it.",
                 )
             )
 

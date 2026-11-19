@@ -18,6 +18,7 @@ from plugins.ecode.config_schema import EcodePluginConfig
 from plugins.ecode.plugin import (
     CAVEAT_DEFINITION_TEXT_FROM_SNIPPET,
     CAVEAT_DUPLICATE_REQUESTS,
+    CAVEAT_LIST_POSITION_INFERRED,
     CAVEAT_MORE_DEFINITIONS,
     CAVEAT_MULTIPLE_DEFINITIONS,
     CAVEAT_NO_DEFINITION_FOUND,
@@ -505,3 +506,61 @@ class TestFindDefinition:
 
         assert result.success is False
         assert "HTTP 500" in result.error_message
+
+
+class TestDefinitionListPosition:
+    """A definition with a list arrives flattened, like any section: the
+    words after the list are joined to the words before it. find_definition
+    puts the list back as get_section does, so it must say so too."""
+
+    LISTED = {
+        "id": "701",
+        "number": "",
+        "title": '"Vehicle"',
+        "type": "definition",
+        "content": (
+            '"Vehicle" means every device in, upon or by which a person '
+            "may be transported upon a street, except: Devices listed "
+            "here are vehicles only while towed."
+        ),
+        "children": [
+            {"id": "7011", "number": "1.", "title": "",
+             "content": "Devices moved by human power;", "children": []},
+            {"id": "7012", "number": "2.", "title": "",
+             "content": "Electric personal mobility devices.",
+             "children": []},
+        ],
+    }
+
+    @pytest.mark.asyncio
+    async def test_an_inferred_list_position_is_reported(self):
+        p = _routed_plugin(
+            content={**VEHICLE_CONTENT, "701": self.LISTED},
+            searches={'title:"vehicle"': VEHICLE_SEARCH},
+        )
+        result = await p.execute_tool("find_definition", {"term": "vehicle"})
+
+        sc = result.structured_content
+        validate(sc, DEFINITION_OUTPUT_SCHEMA)
+        body = sc["definitions"][0]["text"]
+        # The list sits after its lead-in colon, the closing sentence last.
+        assert body.index("except:") < body.index("1. Devices moved")
+        assert body.index("2. Electric") < body.index("Devices listed here")
+        caveat = next(
+            c for c in sc["caveats"]
+            if c["code"] == CAVEAT_LIST_POSITION_INFERRED
+        )
+        # Names the definition it applies to (701 is listed first).
+        assert caveat["message"].startswith("Definition(s) 1 above")
+        assert caveat["message"] in result.content[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_no_note_when_nothing_was_placed(self):
+        p = _routed_plugin(
+            content=VEHICLE_CONTENT,
+            searches={'title:"vehicle"': VEHICLE_SEARCH},
+        )
+        result = await p.execute_tool("find_definition", {"term": "vehicle"})
+
+        codes = [c["code"] for c in result.structured_content["caveats"]]
+        assert CAVEAT_LIST_POSITION_INFERRED not in codes
