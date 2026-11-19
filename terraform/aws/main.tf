@@ -97,6 +97,9 @@ resource "aws_lambda_function" "mcp_server" {
       # or TF_VAR_ecode_api_key / TF_VAR_ecode_api_secret), never from config.yaml.
       ECODE_API_KEY    = var.ecode_api_key
       ECODE_API_SECRET = var.ecode_api_secret
+      # Shared cache for slow, rarely-changing upstream responses (see
+      # shared_cache.tf). Unset = the plugin fetches from eCode360 as before.
+      ECODE_SHARED_CACHE_BUCKET = aws_s3_bucket.shared_cache.bucket
     }
   }
 

@@ -125,6 +125,8 @@ class TestConfigCopiesInSync:
 
 
 API_GATEWAY_TF = REPO_ROOT / "terraform" / "aws" / "api_gateway.tf"
+MAIN_TF = REPO_ROOT / "terraform" / "aws" / "main.tf"
+SHARED_CACHE_TF = REPO_ROOT / "terraform" / "aws" / "shared_cache.tf"
 
 
 class TestCapacity:
@@ -208,3 +210,40 @@ class TestSinglePublicAddress:
             "aws_api_gateway_rest_api.mcp_api.disable_execute_api_endpoint"
             in deployment.group(0)
         )
+
+
+class TestSharedCacheBucket:
+    """terraform/aws/shared_cache.tf and the plugin must agree, and the
+    Lambda must hold no more than object read/write on the bucket."""
+
+    def test_lambda_gets_the_variable_the_plugin_reads(self):
+        from plugins.ecode.plugin import SHARED_CACHE_ENV
+
+        text = MAIN_TF.read_text(encoding="utf-8")
+        assert re.search(
+            rf"{SHARED_CACHE_ENV}\s*=\s*aws_s3_bucket\.shared_cache\.bucket",
+            text,
+        )
+
+    def test_role_can_only_get_and_put_objects(self):
+        text = SHARED_CACHE_TF.read_text(encoding="utf-8")
+        actions = re.findall(r'"(s3:[A-Za-z*]+)"', text)
+        assert sorted(actions) == ["s3:GetObject", "s3:PutObject"]
+        assert '"${aws_s3_bucket.shared_cache.arn}/*"' in text
+
+    def test_bucket_is_not_public(self):
+        text = SHARED_CACHE_TF.read_text(encoding="utf-8")
+        for setting in (
+            "block_public_acls",
+            "block_public_policy",
+            "ignore_public_acls",
+            "restrict_public_buckets",
+        ):
+            assert re.search(rf"{setting}\s*=\s*true", text), setting
+
+    def test_plugin_ignores_objects_before_the_bucket_expires_them(self):
+        from plugins.ecode.plugin import SHARED_CACHE_MAX_AGE_S
+
+        text = SHARED_CACHE_TF.read_text(encoding="utf-8")
+        days = int(re.search(r"expiration\s*{\s*days\s*=\s*(\d+)", text).group(1))
+        assert SHARED_CACHE_MAX_AGE_S <= days * 86400
