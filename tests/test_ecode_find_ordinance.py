@@ -435,3 +435,122 @@ class TestArgument:
         assert tool.input_schema["required"] == ["ordinance"]
         assert tool.output_schema == FIND_ORDINANCE_OUTPUT_SCHEMA
         assert "effective date" in tool.description
+
+
+# ── 1.13.1: found in the pre-rollout scan of 2026-11-19 ──────────────────
+
+
+def _toc_with_sections(*numbers):
+    toc = _toc()
+    toc["children"].append({
+        "guid": "1", "label": "Title", "number": "21", "title": "T",
+        "children": [
+            {"guid": str(100 + i), "label": "Section",
+             "number": f"§\xa0{n}", "title": "S", "children": []}
+            for i, n in enumerate(numbers)
+        ],
+    })
+    return toc
+
+
+class TestSectionsAgainstTheOutline:
+    """A disposition names a provision; the section it belongs to is
+    whatever the outline says is a section, not the first three parts."""
+
+    NUMBERS = {
+        "21.05.070", "23.10.104.15", "3.30.121", "3.30.172", "R21.20.002",
+        "9.54.005", "23.85.R317.3",
+    }
+
+    @pytest.mark.parametrize(
+        "disposition, current, gone",
+        [
+            ("§ 21.05.070D.13b.vii(C)", ["21.05.070"], []),
+            # Title 23 numbers run past three parts.
+            ("§ 23.10.104.15.1A.1", ["23.10.104.15"], []),
+            ("§ 23.85.R317.3.1", ["23.85.R317.3"], []),
+            ("§ R21.20.002A.12", ["R21.20.002"], []),
+            ("§ 3.30.172.F.7—21 as § 3.30.172.F.8—22",
+             ["3.30.172"], []),
+            # 3.30.121 is a section; 3.30.1213 is a different number.
+            ("§ 3.30.1213", [], ["3.30.1213"]),
+            # Mistyped in the table; repealed since.
+            ("§ 21.050.030B.4.a", [], ["21.050.030"]),
+            ("§ 21.45.110", [], ["21.45.110"]),
+            ("§ 9.54.005—§ 9.54.010", ["9.54.005"], ["9.54.010"]),
+            ("Ch. 21.04, (note)", [], []),
+            ("Old 21.35.020B", [], []),
+        ],
+    )
+    def test_resolution(self, disposition, current, gone):
+        assert EcodePlugin._ordinance_code_sections(
+            disposition, self.NUMBERS
+        ) == (current, gone)
+
+    def test_chapters_and_titles_are_not_sections(self):
+        toc = {"children": [
+            {"number": "21", "children": [
+                {"number": "Ch 21.05", "children": [
+                    {"number": "§\xa021.05.070"}]}]}]}
+        assert EcodePlugin._outline_section_numbers(toc) == {"21.05.070"}
+
+    @pytest.mark.asyncio
+    async def test_sections_no_longer_in_the_code_are_listed_apart(self):
+        toc = _toc_with_sections("10.90.010", "10.90.020", "21.05.010")
+        sc, text = await _find("2025-115", _plugin(toc=toc))
+        (match,) = sc["matches"]
+
+        assert match["sections"] == ["10.90.010", "10.90.020", "21.05.010"]
+        assert match["sections_not_in_code"] == ["12.20.031"]
+        assert match["entries"][1]["sections_not_in_code"] == ["12.20.031"]
+        assert "not sections of the code today (1): 12.20.031" in text
+        assert "get_sections will not find it" in text
+
+
+class TestNumberAsWritten:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("asked", ["2025-0115", "AO 2025-0115(S-2)"])
+    async def test_padded_number(self, asked):
+        sc, _ = await _find(asked)
+        assert sc["found"] is True
+        assert sc["matches"][0]["ordinance"] == "2025-115(S-2)"
+
+    @pytest.mark.asyncio
+    async def test_four_digit_year_before_2000(self):
+        sc, _ = await _find("AO 1985-8")
+
+        assert sc["found"] is True
+        assert sc["matches"][0]["ordinance"] == "85-8"
+        assert sc["search_query"] == '"AO No. 85-8"'
+
+    @pytest.mark.asyncio
+    async def test_unlisted_number_explains_the_numbering(self):
+        _, text = await _find("1991-7")
+        assert "'85-8' is no. 8 of 1985" in text
+        assert "'13-75'" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "asked", ["AR 2025-94", "AR No. 2025-94", "Resolution 2025-94"]
+    )
+    async def test_resolution_is_not_answered_as_the_ordinance(self, asked):
+        """AR 2025-94 and AO 2025-94 are different acts with one number."""
+        p = _plugin()
+        result = await p.execute_tool("find_ordinance", {"ordinance": asked})
+
+        assert result.success is False
+        assert "Assembly resolution" in result.error_message
+        assert "'AO 2025-94'" in result.error_message
+        assert p.calls == []
+
+
+class TestTableIsKeptLonger:
+    @pytest.mark.asyncio
+    async def test_table_outlives_the_five_minute_cache(self):
+        """eCode360 takes about 9 s to return the table."""
+        p = _plugin()
+        await _find("2025-115", p)
+        ecode_mod._RECENT_CACHE.clear()
+        await _find("2016-53", p)
+
+        assert sum(1 for c in p.calls if c.endswith(CCT_GUID)) == 1

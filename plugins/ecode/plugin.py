@@ -1107,6 +1107,7 @@ ORDINANCE_ASKED_RE = re.compile(
     r"(?<![\d-])(\d{1,4})\s*[-‐-―]\s*(\d{1,4})(?![\d-])"
     r"\s*(\([A-Za-z0-9 -]{1,8}\))?"
 )
+ORDINANCE_RESOLUTION_RE = re.compile(r"\bAR\b|(?i:\bresolution\b)")
 ORDINANCE_SECTION_CELL_RE = re.compile(
     r"^\d+(?:[—-]\d+)?,?\xa0?$|^\d+,\d+$|^\d+\(\S*\)$"
 )
@@ -1121,6 +1122,7 @@ ORDINANCE_ACTIONS = {
 # The code sections a disposition names, to the section level:
 # "§ 21.05.070D.13b.vii(C)" -> 21.05.070, "§ R21.20.002A.12" -> R21.20.002.
 ORDINANCE_CODE_SECTION_RE = re.compile(r"§\s*(R?\d+\.\d+\.\d+)")
+ORDINANCE_CITED_RE = re.compile(r"\u00a7\s*([A-Za-z0-9.()]+)")
 MAX_ORDINANCE_ARG_CHARS = 100
 # The largest ordinance in the table (the 2011 rewrite of Title 21) has
 # 203 rows; the cap is there so a future one cannot flood a response.
@@ -1235,9 +1237,20 @@ FIND_ORDINANCE_OUTPUT_SCHEMA = {
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "description": (
-                                        "Section numbers named in the "
-                                        "disposition ('21.05.070'); for a "
-                                        "range, its two ends only."
+                                        "Sections of the code today that "
+                                        "the disposition names "
+                                        "('21.05.070'); for a range, its "
+                                        "two ends only."
+                                    ),
+                                },
+                                "sections_not_in_code": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": (
+                                        "Section numbers it names that "
+                                        "are not sections of the code "
+                                        "today: repealed or renumbered "
+                                        "since, or mistyped in the table."
                                     ),
                                 },
                             },
@@ -1248,6 +1261,7 @@ FIND_ORDINANCE_OUTPUT_SCHEMA = {
                                 "action",
                                 "disposition",
                                 "sections",
+                                "sections_not_in_code",
                             ],
                         },
                     },
@@ -1255,9 +1269,17 @@ FIND_ORDINANCE_OUTPUT_SCHEMA = {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "Every distinct section number in the entries, "
-                            "in table order; pass up to 10 at a time to "
-                            "get_sections."
+                            "Every distinct section of the code today "
+                            "named in the entries, in table order; pass up "
+                            "to 10 at a time to get_sections."
+                        ),
+                    },
+                    "sections_not_in_code": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Section numbers named in the entries that "
+                            "are not sections of the code today."
                         ),
                     },
                 },
@@ -1268,6 +1290,7 @@ FIND_ORDINANCE_OUTPUT_SCHEMA = {
                     "entry_count",
                     "entries",
                     "sections",
+                    "sections_not_in_code",
                 ],
             },
         },
@@ -1491,7 +1514,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.11.0"
+    plugin_version = "1.11.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -1955,8 +1978,8 @@ class EcodePlugin(MCPPlugin):
                             "description": (
                                 "The ordinance number: '2025-94', "
                                 "'AO 2025-94', 'AO No. 2025-115(S-2)'. "
-                                "Before 2000 the number came first and "
-                                "the year last: '85-8'."
+                                "Years before 2000 have two digits: "
+                                "'85-8' is no. 8 of 1985."
                             ),
                         },
                     },
@@ -2215,13 +2238,19 @@ class EcodePlugin(MCPPlugin):
             if tool_name == "find_ordinance":
                 base, asked = self._ordinance_number_arg(arguments)
                 table, listing, updated = await asyncio.gather(
-                    self._fetch_section_titled(ORDINANCE_TABLE_TITLE),
+                    # The table takes eCode360 about 9 s to produce and
+                    # changes only when the code is republished, so it is
+                    # kept as long as the outline is, not for 5 minutes.
+                    self._fetch_section_titled(
+                        ORDINANCE_TABLE_TITLE, static=True
+                    ),
                     self._fetch_ordinance_list(),
                     self._code_last_updated(),
                 )
+                numbers = self._outline_section_numbers(await self._get_toc())
                 return self._ok(
                     *self._format_ordinance_lookup(
-                        base, asked, table, listing, updated
+                        base, asked, table, listing, updated, numbers
                     )
                 )
 
@@ -5338,12 +5367,13 @@ class EcodePlugin(MCPPlugin):
         return await self._fetch_section_titled(ORDINANCE_LIST_TITLE)
 
     async def _fetch_section_titled(
-        self, wanted: str
+        self, wanted: str, static: bool = False
     ) -> Optional[Dict[str, Any]]:
         """The content of the outline's section with this exact title
         (lower case, no final full stop), or None when there is none.
         Found by title, never by a guid written here: guids change when
-        the publisher republishes."""
+        the publisher republishes. `static` keeps the content for
+        STATIC_CACHE_TTL_S (per container) instead of RECENT_CACHE_TTL_S."""
         toc = await self._get_toc()
         found: Optional[str] = None
         stack = [toc]
@@ -5359,9 +5389,10 @@ class EcodePlugin(MCPPlugin):
             stack.extend(reversed(kids))
         if not found:
             return None
-        return await self._get_recent_json(
-            self._cust_path(f"/code/content/{quote(found, safe='')}")
-        )
+        path = self._cust_path(f"/code/content/{quote(found, safe='')}")
+        if static:
+            return await self._get_static_json(path)
+        return await self._get_recent_json(path)
 
     def _parse_ordinance_rows(self, content: str) -> List[Dict[str, Any]]:
         text = " ".join((content or "").split())
@@ -5603,8 +5634,19 @@ class EcodePlugin(MCPPlugin):
                 f"{text!r} names more than one ordinance; pass one number "
                 "per call."
             )
+        if ORDINANCE_RESOLUTION_RE.search(text):
+            # Resolutions are numbered like ordinances: AR 2025-94 and
+            # AO 2025-94 are different acts, and only the AO is here.
+            raise ToolInputError(
+                f"{text!r} is an Assembly resolution (AR). The Ordinance "
+                "Disposition Table lists ordinances (AO) only, and "
+                "resolutions are not part of the code. If you mean the "
+                "ordinance with that number, pass it as 'AO "
+                f"{found[0][0]}-{found[0][1]}'."
+            )
         first, second, suffix = found[0]
-        base = f"{first}-{second}"
+        # "2025-094" is 2025-94; the table never pads.
+        base = f"{first.lstrip('0') or '0'}-{second.lstrip('0') or '0'}"
         return base, base + suffix.replace(" ", "")
 
     def _parse_ordinance_table(self, content: str) -> List[Dict[str, Any]]:
@@ -5743,9 +5785,6 @@ class EcodePlugin(MCPPlugin):
                 # "Rnbd § 3.30.172F.7—21" / "as § 3.30.172F.8—22": one
                 # change printed on two rows.
                 entries[-1]["disposition"] += f" {disposition}"
-                entries[-1]["sections"] = self._ordinance_code_sections(
-                    entries[-1]["disposition"]
-                )
                 continue
             entries.append(
                 {
@@ -5754,18 +5793,61 @@ class EcodePlugin(MCPPlugin):
                     "effective_as_printed": printed_date,
                     "action": action,
                     "disposition": disposition,
-                    "sections": self._ordinance_code_sections(disposition),
                 }
             )
         return entries
 
     @staticmethod
-    def _ordinance_code_sections(disposition: str) -> List[str]:
-        seen: List[str] = []
-        for number in ORDINANCE_CODE_SECTION_RE.findall(disposition):
-            if number not in seen:
-                seen.append(number)
-        return seen
+    def _outline_section_numbers(toc: Any) -> Set[str]:
+        """Every section-level number in the outline ('21.05.070',
+        'R21.20.002', '23.10.104.15'): a number with at least two dots."""
+        numbers: Set[str] = set()
+        stack = [toc]
+        while stack:
+            node = stack.pop()
+            if not isinstance(node, dict):
+                continue
+            number = "".join(
+                str(node.get("number") or "").replace("\u00a7", "").split()
+            )
+            if number.count(".") >= 2:
+                numbers.add(number)
+            stack.extend(node.get("children") or [])
+        return numbers
+
+    @staticmethod
+    def _ordinance_code_sections(
+        disposition: str, numbers: Set[str]
+    ) -> Tuple[List[str], List[str]]:
+        """(sections of the current code, section numbers that are not).
+
+        A disposition cites a provision ('§ 21.05.070D.13b.vii(C)',
+        '§ 23.10.104.15.1A.1'); the section it belongs to is the longest
+        leading part that is a section in the outline (21.05.070,
+        23.10.104.15 -- Title 23 numbers run to five parts). One that
+        matches nothing was repealed or renumbered after the ordinance,
+        or is mistyped in the table ('§ 21.050.030B'); it is reported at
+        the usual three parts. With no outline to check against, every
+        number is reported in the first list at three parts.
+        """
+        current: List[str] = []
+        gone: List[str] = []
+        for cited in ORDINANCE_CITED_RE.findall(disposition):
+            cited = cited.rstrip(".,;(")
+            found = None
+            for end in range(len(cited), 0, -1):
+                if cited[:end] in numbers and not cited[end:end + 1].isdigit():
+                    found = cited[:end]
+                    break
+            target = current
+            if found is None:
+                short = ORDINANCE_CODE_SECTION_RE.match(f"\u00a7{cited}")
+                found = short.group(1) if short else cited
+                if numbers:
+                    target = gone
+            if found and found not in current and found not in gone:
+                target.append(found)
+        return current, gone
 
     def _format_ordinance_lookup(
         self,
@@ -5774,12 +5856,21 @@ class EcodePlugin(MCPPlugin):
         table: Optional[Dict[str, Any]],
         listing_node: Optional[Dict[str, Any]],
         updated: Optional[str],
+        numbers: Optional[Set[str]] = None,
     ) -> tuple:
         blocks = (
             self._parse_ordinance_table(table.get("content") or "")
             if isinstance(table, dict)
             else []
         )
+        numbers = numbers or set()
+        # The table writes years before 2000 with two digits: "1985-8"
+        # is listed as 85-8. Only tried when the number as given is absent.
+        long_year = re.fullmatch(r"19(\d\d)-(\d+)", base)
+        if long_year and not any(b["base"] == base for b in blocks):
+            short = f"{long_year.group(1)}-{long_year.group(2)}"
+            if any(b["base"] == short for b in blocks):
+                base = short
         search_query = f'"AO No. {base}"'
 
         listing = None
@@ -5842,11 +5933,22 @@ class EcodePlugin(MCPPlugin):
             )
             match["entry_count"] = len(entries)
             sections: List[str] = []
+            missing: List[str] = []
             for entry in entries:
+                (
+                    entry["sections"],
+                    entry["sections_not_in_code"],
+                ) = self._ordinance_code_sections(entry["disposition"], numbers)
                 for number in entry["sections"]:
                     if number not in sections:
                         sections.append(number)
+                for number in entry["sections_not_in_code"]:
+                    if number not in missing:
+                        missing.append(number)
             match["sections"] = sections
+            match["sections_not_in_code"] = [
+                n for n in missing if n not in sections
+            ]
             match["entries"] = entries[:room]
             room -= len(match["entries"])
         shown = sum(len(m["entries"]) for m in matches)
@@ -5936,6 +6038,12 @@ class EcodePlugin(MCPPlugin):
                     f"  Sections named ({len(match['sections'])}): "
                     + ", ".join(match["sections"])
                 )
+            if match["sections_not_in_code"]:
+                lines.append(
+                    "  Named but not sections of the code today "
+                    f"({len(match['sections_not_in_code'])}): "
+                    + ", ".join(match["sections_not_in_code"])
+                )
 
         if matches:
             entries_caveats.append(
@@ -5953,7 +6061,10 @@ class EcodePlugin(MCPPlugin):
                     "renumbered changed the provision named, and the table "
                     "does not say how. 'Old' marks a section of the "
                     "superseded Title 21. A range (§ a—§ b) is listed by its "
-                    "two ends only.",
+                    "two ends only. A number listed as not a section of the "
+                    "code today was repealed or renumbered after the "
+                    "ordinance, or is mistyped in the table; get_sections "
+                    "will not find it.",
                 )
             )
             if len(matches) > 1:
@@ -5988,8 +6099,9 @@ class EcodePlugin(MCPPlugin):
                 "ordinances that were repealed, superseded or not of a "
                 "general and permanent nature (budgets, rezonings, one-time "
                 "actions), so this does not show the ordinance does not "
-                "exist. Before 2000 the number came first and the year "
-                "last ('85-8', not '1985-8')."
+                "exist. Check the number: from 1977 it is year then "
+                "number ('85-8' is no. 8 of 1985; four-digit years from "
+                "2000), and for 1975-76 number then year ('13-75')."
             )
             entries_caveats.append(
                 (
