@@ -73,7 +73,7 @@ Copy `config-example.yaml` to `config.yaml`. Enable exactly one plugin. Config d
 
 Two AWS sizing values are read from `config.yaml` in preference to `terraform/aws/prod.tfvars` — `lambda_memory` and `lambda_timeout` (see the `locals` block in `terraform/aws/main.tf`). Editing them in the tfvars alone silently does nothing. `lambda_name` uses the opposite precedence, so check `main.tf` per variable rather than assuming.
 
-**`terraform/aws/config.yaml` is a BUILD ARTIFACT, not a source file.** `scripts/deploy.sh` (line 307) copies the repo-root `config.yaml` over it during packaging, and it is gitignored. Two consequences: edits made directly to it vanish on the next deploy, and a bare `terraform plan` run inside `terraform/aws/` (without the packaging steps) reads the STALE copy — so a config change shows up as nothing but a code-hash diff, and a "timeout fix" can appear to apply while changing nothing. Always go through `./scripts/deploy.sh -e prod`, which repackages before planning.
+**`terraform/aws/config.yaml` is a BUILD ARTIFACT, not a source file.** `scripts/deploy.sh` copies the repo-root `config.yaml` over it during packaging, and it is gitignored. Two consequences: edits made directly to it vanish on the next deploy, and a bare `terraform plan` run inside `terraform/aws/` (without the packaging steps) reads the STALE copy — so a config change shows up as nothing but a code-hash diff, and a "timeout fix" can appear to apply while changing nothing. Always go through `./scripts/deploy.sh -e prod`, which repackages before planning.
 
 **Timeout ladder** — each layer must sit under the one above it:
 
@@ -84,6 +84,8 @@ Two AWS sizing values are read from `config.yaml` in preference to `terraform/aw
 | Plugin HTTP (`plugins.ecode.timeout`) | 20s | a hung upstream returns a readable tool error instead of the Lambda being killed mid-flight |
 
 `tests/test_deployment_config.py` pins this ordering so it cannot silently invert again.
+
+**Deploys are built from a commit and from `uv.lock`.** `scripts/deploy.sh` refuses a dirty working tree (`--allow-dirty` overrides, for emergencies), installs the exact versions in `uv.lock` (it needs `uv`, on `PATH` or as `python -m uv`; without it, it warns and falls back to `pip` and the lower bounds in `requirements.txt`), and writes `BUILD_INFO.json` (commit, dirty, locked) into the package. So commit before deploying, and to move a library version: `uv lock --upgrade-package <name>`, run the tests, commit `uv.lock`. Moving the `opencontext-core` pin means `requirements.txt`, `pyproject.toml` and `uv lock`.
 
 ## CI
 

@@ -25,12 +25,23 @@ associations, and to read and write the Terraform state bucket.
 
 The script:
 
-1. Validates `config.yaml` (exactly one plugin enabled)
-2. Builds the Lambda package: `plugins/`, `config.yaml` and the dependencies
-   in `requirements.txt`, including `opencontext-core`
-3. Selects the Terraform workspace (`anchorage-ecode-prod`)
-4. Runs `terraform plan` with `prod.tfvars` and saves the plan
-5. Asks for confirmation, then applies the saved plan
+1. Refuses to run if the working tree has uncommitted changes, so what is
+   deployed is always a commit (`--allow-dirty` overrides, for emergencies)
+2. Validates `config.yaml` (exactly one plugin enabled)
+3. Builds the Lambda package: `plugins/`, `config.yaml` and the dependencies
+   at the exact versions in `uv.lock`, including `opencontext-core`. It also
+   writes `BUILD_INFO.json` into the package: the commit, whether the tree
+   was dirty, and whether the versions came from the lock
+4. Selects the Terraform workspace (`anchorage-ecode-prod`)
+5. Runs `terraform plan` with `prod.tfvars` and saves the plan
+6. Asks for confirmation, then applies the saved plan
+
+The locked install needs `uv` (on `PATH`, or as a module of the Python the
+script finds: `python -m pip install uv`). Without it the script warns and
+falls back to `pip` and `requirements.txt`, which only gives lower bounds, so
+the versions shipped are whatever is newest that day. To take newer library
+versions on purpose: `uv lock --upgrade`, run the tests, commit `uv.lock`,
+then deploy.
 
 Read the plan before confirming. A code-only change shows one in-place update
 of the Lambda function with a new `source_code_hash`.
