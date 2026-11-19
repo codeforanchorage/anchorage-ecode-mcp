@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.9.0"
+server_version: "1.10.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -27,7 +27,8 @@ instructions: |
      phrases matches every section containing ANY of them -- often
      hundreds. Write precise queries by default: quote exact phrases, join
      terms that must all appear with AND (or +term), exclude with NOT.
-     Parentheses group; proximity ("a b"~3) is NOT supported.
+     Parentheses group; proximity ("a b"~3) is NOT supported. A trailing
+     * is a wildcard; write it without quotes (indemnif*, not "indemnif*").
      title:word matches words in a section's heading; it is not a filter
      on Title number (title:9 does not mean Title 9).
      To search only one part of the code, pass within, e.g.
@@ -49,7 +50,9 @@ instructions: |
      or saying what the section does not contain. Quote the controlling language;
      don't paraphrase legal requirements loosely. When you need more than one section, call
      get_sections([...]) once (up to 10 guids or numbers) instead of
-     get_section repeatedly.
+     get_section repeatedly. Every section result states the date the
+     published code was last updated; you do not need get_customer_info
+     to check how current a section is.
   3. To orient within the code's structure, use get_table_of_contents, then
      browse_structure(guid) to walk chapters/articles → sections.
   4. For "what does X mean" / "how is X defined", use find_definition(term)
@@ -57,8 +60,13 @@ instructions: |
      titles and each definition applies only within its own chapter or
      title: use the one for the area of law in question and cite its
      section.
+  5. For "what is the fine / penalty for violating a section" or "what
+     refers to this section", use find_references(section number), e.g.
+     find_references("9.14.040"). It finds the fine schedule row, penalty
+     sections and other sections that cite it, including citations to
+     its subsections, which a quoted search for the number misses.
 
-  5. Some tables are published only as PDF attachments -- notably the
+  6. Some tables are published only as PDF attachments -- notably the
      Title 21 zoning tables (Table 21.05-1, Table of Allowed Uses). A
      search result with is_pdf=true, or an attachment listed by
      get_section, has a url: pass it to read_attachment(url) to read the
