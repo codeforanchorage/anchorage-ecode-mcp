@@ -1238,7 +1238,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.10.0"
+    plugin_version = "1.10.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2778,15 +2778,35 @@ class EcodePlugin(MCPPlugin):
             return None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise EcodeAPIError(
-                f"eCode360 did not answer within this call's "
-                f"{TOOL_CALL_BUDGET_S:g}s budget. The service may be slow "
-                "right now; try again shortly.",
-                504,
-            )
+            raise self._budget_spent()
         if remaining < self.plugin_config.timeout:
             return remaining
         return None
+
+    @staticmethod
+    def _budget_spent() -> EcodeAPIError:
+        return EcodeAPIError(
+            f"eCode360 did not answer within this call's "
+            f"{TOOL_CALL_BUDGET_S:g}s budget. The service may be slow "
+            "right now; try again shortly.",
+            504,
+        )
+
+    @staticmethod
+    def _hard_limit() -> Optional[float]:
+        """Seconds left in the call, as a wall-clock limit on one request.
+
+        The httpx timeout is per phase (connect, each read, write, pool),
+        not for the whole request: a server that keeps sending a few bytes
+        inside every read window never trips it, so a slow trickle could
+        run past the budget and into the Lambda timeout. Each request is
+        therefore also wrapped in asyncio.timeout(this). None outside a
+        tool call (no limit).
+        """
+        deadline = _call_deadline.get()
+        if deadline is None:
+            return None
+        return max(deadline - time.monotonic(), 0.0)
 
     async def _get_json(
         self, path: str, params: Optional[Dict[str, Any]] = None
@@ -2808,8 +2828,16 @@ class EcodePlugin(MCPPlugin):
             if timeout is not None:
                 kwargs["timeout"] = timeout
             try:
-                resp = await self.client.get(path, **kwargs)
+                async with asyncio.timeout(self._hard_limit()) as scope:
+                    resp = await self.client.get(path, **kwargs)
                 resp.raise_for_status()
+            except TimeoutError as e:
+                # httpx timeouts are not TimeoutError subclasses, so this
+                # is the call deadline -- or a cancellation from outside,
+                # which is passed on untouched.
+                if not scope.expired():
+                    raise
+                raise self._budget_spent() from e
             except httpx.TimeoutException as e:
                 seconds = timeout or self.plugin_config.timeout
                 raise EcodeAPIError(
@@ -4304,7 +4332,11 @@ class EcodePlugin(MCPPlugin):
             return cached
         timeout = self._request_timeout() or self.plugin_config.timeout
         try:
-            async with httpx.AsyncClient(
+            # The download is read chunk by chunk, so the per-read httpx
+            # timeout alone would let a slow trickle run past the budget.
+            async with asyncio.timeout(
+                self._hard_limit()
+            ) as scope, httpx.AsyncClient(
                 timeout=timeout,
                 follow_redirects=False,
                 transport=self._attachment_transport,
@@ -4337,6 +4369,15 @@ class EcodePlugin(MCPPlugin):
                                 413,
                             )
                         chunks.append(chunk)
+        except TimeoutError as e:
+            if not scope.expired():
+                raise
+            raise EcodeAPIError(
+                "eCode360 did not finish delivering the attachment within "
+                f"this call's {TOOL_CALL_BUDGET_S:g}s budget. Try again "
+                "shortly.",
+                504,
+            ) from e
         except httpx.TimeoutException as e:
             raise EcodeAPIError(
                 f"eCode360 did not deliver the attachment within "
