@@ -10,7 +10,7 @@ Deployment script that validates configuration and deploys the MCP server to AWS
 
 **Usage:**
 ```bash
-./scripts/deploy.sh --environment <staging|prod> [--tfworkspace <name>]
+./scripts/deploy.sh --environment <staging|prod> [--tfworkspace <name>] [--allow-dirty]
 ```
 
 **Options:**
@@ -19,6 +19,7 @@ Deployment script that validates configuration and deploys the MCP server to AWS
 |------|-------|----------|-------------|
 | `--environment` | `-e` | Yes | `staging` or `prod` |
 | `--tfworkspace` | `-w` | No | Terraform workspace name (default: `anchorage-ecode-staging` or `anchorage-ecode-prod`) |
+| `--allow-dirty` | | No | Package the working tree even with uncommitted changes (emergencies only; the build is stamped as dirty) |
 | `--help` | `-h` | No | Show help |
 
 **Examples:**
