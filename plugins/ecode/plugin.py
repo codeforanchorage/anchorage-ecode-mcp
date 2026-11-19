@@ -132,6 +132,37 @@ STATIC_CACHE_TTL_S = 3600.0
 # customer id, so two differently-configured plugins cannot share entries.
 _STATIC_CACHE: Dict[Tuple[str, str], Tuple[float, Any]] = {}
 
+# ── Shared cache (2026-11-19) ───────────────────────────────────────────
+#
+# _STATIC_CACHE lives in one Lambda container. eCode360 takes about 9 s to
+# return the Ordinance Disposition Table, so every new container made one
+# caller wait that long, and a burst of simultaneous lookups landed on new
+# containers that all fetched it at once (14-16 s each, measured). When
+# ECODE_SHARED_CACHE_BUCKET names an S3 bucket, that one response is also
+# kept there, where every container can read it in tens of milliseconds.
+#
+# An object is used only if it was stored under the code's CURRENT
+# last-updated date (the table is part of the code, so it cannot change
+# without that date changing) and is younger than SHARED_CACHE_MAX_AGE_S.
+# The bucket is an optimisation and never a dependency: unset, unreachable,
+# slow, or holding something unexpected, the table is fetched from
+# eCode360 exactly as before and the call does not fail.
+SHARED_CACHE_ENV = "ECODE_SHARED_CACHE_BUCKET"
+SHARED_CACHE_VERSION = 1
+SHARED_CACHE_MAX_AGE_S = 7 * 24 * 3600.0
+# Total wait for one S3 call before giving up on the shared cache.
+SHARED_CACHE_TIMEOUT_S = 4.0
+SHARED_CACHE_MAX_BYTES = 5_000_000
+# (bucket, client) once built; False once known to be unavailable. Module
+# level for the same reason as the caches: the plugin is rebuilt per call.
+_SHARED_CACHE_CLIENT: Dict[str, Any] = {}
+
+
+class _SharedCacheUnusable(Exception):
+    """A shared-cache object or payload that must not be used. Internal:
+    always caught where it is raised and logged, never shown to a caller.
+    """
+
 # Search pages, section text and structure nodes are cached for a few
 # minutes, also per container. A conversation re-reads the same things in
 # bursts: get_section after a search resolved its number, each `offset`
@@ -1513,7 +1544,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.11.1"
+    plugin_version = "1.12.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -3338,6 +3369,162 @@ class EcodePlugin(MCPPlugin):
                 data,
             )
             return data
+
+    @staticmethod
+    def _shared_cache_client() -> Optional[Tuple[Any, str]]:
+        """(S3 client, bucket) when a shared cache is configured and boto3
+        is importable, else None. Built once per container."""
+        bucket = (os.environ.get(SHARED_CACHE_ENV) or "").strip()
+        if not bucket:
+            return None
+        cached = _SHARED_CACHE_CLIENT.get(bucket)
+        if cached is not None:
+            return (cached, bucket) if cached else None
+        try:
+            # Imported here: boto3 costs a few hundred ms to import and
+            # is only needed on a container's first ordinance lookup. It
+            # is part of the Lambda runtime, not of requirements.txt.
+            import boto3
+            from botocore.config import Config
+
+            client = boto3.client(
+                "s3",
+                config=Config(
+                    connect_timeout=2,
+                    read_timeout=3,
+                    retries={"max_attempts": 1},
+                ),
+            )
+        except Exception as e:  # noqa: BLE001 - never fail a tool call
+            logger.warning("shared cache disabled: %s: %s", type(e).__name__, e)
+            _SHARED_CACHE_CLIENT[bucket] = False
+            return None
+        _SHARED_CACHE_CLIENT[bucket] = client
+        return client, bucket
+
+    @staticmethod
+    def _shared_cache_key(path: str) -> str:
+        return f"v{SHARED_CACHE_VERSION}/{path.strip('/')}.json"
+
+    async def _shared_cache_get(
+        self, shared: Tuple[Any, str], path: str, code_date: str
+    ) -> Optional[Dict[str, Any]]:
+        """The stored response for `path`, if it is current. Never raises."""
+        client, bucket = shared
+        key = self._shared_cache_key(path)
+
+        def read() -> bytes:
+            body = client.get_object(Bucket=bucket, Key=key)["Body"]
+            return body.read(SHARED_CACHE_MAX_BYTES + 1)
+
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(read), SHARED_CACHE_TIMEOUT_S
+            )
+            if len(raw) > SHARED_CACHE_MAX_BYTES:
+                raise _SharedCacheUnusable("object larger than expected")
+            stored = json.loads(raw)
+            age = time.time() - float(stored["fetched_at"])
+            data = stored["data"]
+            if (
+                stored.get("version") != SHARED_CACHE_VERSION
+                or stored.get("path") != path
+                or not isinstance(data, dict)
+                or not isinstance(data.get("content"), str)
+            ):
+                raise _SharedCacheUnusable("unexpected object shape")
+        except Exception as e:  # noqa: BLE001 - never fail a tool call
+            missing = type(e).__name__ == "NoSuchKey" or "NoSuchKey" in str(e)
+            logger.log(
+                logging.INFO if missing else logging.WARNING,
+                "shared cache read of %s: %s: %s",
+                key,
+                type(e).__name__,
+                e or "timed out",
+            )
+            return None
+        if stored.get("code_last_updated") != code_date:
+            logger.info(
+                "shared cache %s is for code dated %s, now %s; refetching",
+                key,
+                stored.get("code_last_updated"),
+                code_date,
+            )
+            return None
+        if not -300 <= age <= SHARED_CACHE_MAX_AGE_S:
+            logger.info("shared cache %s is %.0f s old; refetching", key, age)
+            return None
+        logger.info("shared cache hit for %s (%.0f s old)", key, age)
+        return data
+
+    async def _shared_cache_put(
+        self, shared: Tuple[Any, str], path: str, code_date: str, data: Any
+    ) -> None:
+        """Store a response for the other containers. Never raises."""
+        client, bucket = shared
+        key = self._shared_cache_key(path)
+        try:
+            body = json.dumps(
+                {
+                    "version": SHARED_CACHE_VERSION,
+                    "path": path,
+                    "code_last_updated": code_date,
+                    "fetched_at": time.time(),
+                    "data": data,
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            if len(body) > SHARED_CACHE_MAX_BYTES:
+                raise _SharedCacheUnusable("response too large to share")
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.put_object,
+                    Bucket=bucket,
+                    Key=key,
+                    Body=body,
+                    ContentType="application/json",
+                ),
+                SHARED_CACHE_TIMEOUT_S,
+            )
+            logger.info("shared cache stored %s (%d bytes)", key, len(body))
+        except Exception as e:  # noqa: BLE001 - never fail a tool call
+            logger.warning(
+                "shared cache write of %s: %s: %s",
+                key,
+                type(e).__name__,
+                e or "timed out",
+            )
+
+    async def _get_shared_static_json(self, path: str) -> Any:
+        """_get_static_json, with the shared cache between this
+        container's memory and eCode360. See SHARED_CACHE_ENV."""
+        key = (self.plugin_config.base_url, path)
+        hit = _STATIC_CACHE.get(key)
+        if hit and hit[0] > time.monotonic():
+            return hit[1]
+        shared = self._shared_cache_client()
+        # Before the lock: the date lookup takes the same lock. Without a
+        # date there is nothing to check a stored object against, so the
+        # shared cache is left alone -- neither read nor written.
+        code_date = await self._code_last_updated() if shared else None
+        if not code_date:
+            return await self._get_static_json(path)
+        stored = False
+        async with self._static_lock:
+            hit = _STATIC_CACHE.get(key)
+            if hit and hit[0] > time.monotonic():
+                return hit[1]
+            data = await self._shared_cache_get(shared, path, code_date)
+            if data is None:
+                data = await self._get_json(path)
+                stored = True
+            _STATIC_CACHE[key] = (
+                time.monotonic() + STATIC_CACHE_TTL_S,
+                data,
+            )
+        if stored:
+            await self._shared_cache_put(shared, path, code_date, data)
+        return data
 
     async def _get_recent_json(
         self, path: str, params: Optional[Dict[str, Any]] = None
@@ -5390,7 +5577,7 @@ class EcodePlugin(MCPPlugin):
             return None
         path = self._cust_path(f"/code/content/{quote(found, safe='')}")
         if static:
-            return await self._get_static_json(path)
+            return await self._get_shared_static_json(path)
         return await self._get_recent_json(path)
 
     def _parse_ordinance_rows(self, content: str) -> List[Dict[str, Any]]:

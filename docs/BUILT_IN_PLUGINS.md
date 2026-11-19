@@ -243,7 +243,12 @@ mistyped in the table), which `get_sections` would not find.
 - If the table is missing or no row can be read, the result has an
   `ordinance_table_unavailable` caveat.
 - eCode360 takes about 9 seconds to return this table, so it is cached for an
-  hour per Lambda container; the first lookup after a cold start is slow.
+  hour per Lambda container, and a copy is kept in the shared cache bucket
+  (`ECODE_SHARED_CACHE_BUCKET`, created by `terraform/aws/shared_cache.tf`)
+  so a new container reads it from S3 instead of waiting on eCode360. A
+  stored copy is used only if it was saved under the code's current
+  last-updated date and is under 7 days old. Without the bucket (local
+  development) the table is fetched from eCode360 as before.
 
 ### `find_references(section, page=0)`
 

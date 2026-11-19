@@ -185,6 +185,30 @@ refusals.
   `KEY=VALUE` file (`.ecode.env.txt`). It only fills vars that are not
   already set, so real env vars always win.
 
+## Shared cache bucket
+
+`terraform/aws/shared_cache.tf` creates one private S3 bucket,
+`<lambda name>-cache-<account id>`, and passes its name to the Lambda as
+`ECODE_SHARED_CACHE_BUCKET`. The plugin stores one thing in it: eCode360's
+response for the Ordinance Disposition Table, which takes about 9 seconds to
+fetch and which every new Lambda container would otherwise fetch again.
+
+- **Contents.** Published code text only, the same text ecode360.com serves
+  to anyone. No credentials, no caller input, no logs. Nothing a caller sends
+  chooses the object key: it is built from the configured library and the
+  table's guid from the table of contents.
+- **Access.** All public access is blocked, objects are encrypted at rest
+  (SSE-S3), and the Lambda role may only `s3:GetObject` and `s3:PutObject` on
+  the bucket's objects. It cannot list, delete or change the bucket.
+- **Trust.** An object is read with a size cap, parsed as JSON and used only
+  if it has the expected shape, was stored under the code's current
+  last-updated date and is under 7 days old. Anything else is ignored and the
+  table is fetched from eCode360. Someone able to write to the bucket could
+  change what `find_ordinance` reports, which is why only the Lambda role can.
+- **Failure.** The bucket is never a dependency. Missing, unreachable or slow
+  (4 second limit per call), the plugin fetches from eCode360 as before and
+  logs a warning. Objects expire after 30 days.
+
 ## Architectural invariants
 
 Enforced by code today; do not relax without explicit discussion.
