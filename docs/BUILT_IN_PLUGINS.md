@@ -77,11 +77,17 @@ one quoted phrase, two follow-ups are added to the result, both kept apart
 from `rows` and `total_count`:
 
 - `relaxed_match`: the phrase's words required in any order, with a
-  `relaxed_match` caveat. These are not matches for the phrase.
+  `relaxed_match` caveat. These are not matches for the phrase. With
+  `within`, only relaxed hits inside the scope are kept: the first 200 hits
+  for the relaxed query are checked, and its `total_count` is `null` when
+  the query has more.
 - `related_definitions`: when the phrase reads like a definition lookup
   (`"labor agreement means"`), what `find_definition` returns for the term,
   with a `definition_lookup` caveat. A definition is its own entry whose
   heading is the term, so a phrase never spans the term and its text.
+  This lookup covers the whole code even with `within`, because a
+  chapter's governing definition often sits in its title's general
+  definitions section; the caveat says so.
 
 ### `get_table_of_contents()`
 
@@ -146,6 +152,12 @@ from.
 How the code defines a term: the defined term, its full text, and the section
 it is defined in. A term defined in more than one place returns up to 8
 definitions with a `multiple_definitions` caveat.
+
+A definition that contains a list is rendered as `get_section` renders it:
+the list is placed after the colon that introduces it. When that placement
+was inferred, or could not be worked out, the result carries a
+`list_position_inferred` caveat naming the definition(s) by their number in
+the result.
 
 ### `find_references(section, page=0)`
 

@@ -20,6 +20,7 @@ from plugins.ecode.plugin import (
     CAVEAT_NO_MATCH_IN_CODE,
     CAVEAT_NO_MATCH_IN_SCOPE,
     CAVEAT_PAGE_PAST_END,
+    CAVEAT_RELAXED_MATCH,
     CAVEAT_SCOPE_SCAN_PARTIAL,
     CAVEAT_SCOPE_UNPLACED_HITS,
     CAVEAT_TITLE_FIELD_IS_HEADING,
@@ -451,3 +452,100 @@ class TestGuidancePointsAtWithin:
         assert "within" in tool.input_schema["properties"]
         assert tool.input_schema["required"] == ["query"]
         assert "within" in tool.description
+
+
+def _by_query(plugin, answers):
+    """Route /search by query text: `answers` maps a query to
+    (pages, max_pages); any other query matches nothing."""
+    inner = plugin.client.get.side_effect
+
+    async def fake_get(path, params=None, **kw):
+        if not path.endswith("/search"):
+            return await inner(path, params, **kw)
+        plugin.calls.append((path, dict(params or {})))
+        pages, max_pages = answers.get(params["query"], ({}, 0))
+        page = int(params["page"])
+        return _json({
+            "results": pages.get(page, []),
+            "page": str(page),
+            "maxPages": max_pages,
+            "totalResultCount": sum(len(v) for v in pages.values()),
+        })
+
+    plugin.client.get = AsyncMock(side_effect=fake_get)
+    return plugin
+
+
+PHRASE = '"operating under the influence"'
+RELAXED = '"operating" AND "under" AND "the" AND "influence"'
+
+
+class TestRelaxedRetryWithinScope:
+    """A quoted phrase that matches nothing gets the same any-order retry
+    with `within` as without it, limited to the scope."""
+
+    @pytest.mark.asyncio
+    async def test_relaxed_rows_are_limited_to_the_scope(self):
+        p = _by_query(
+            _plugin({}), {RELAXED: ({0: [ZONING, DUI, DEF_LOT, DEFS_9]}, 1)}
+        )
+        sc, text = await _run(p, "Title 9", query=PHRASE)
+
+        # The phrase still matched nothing.
+        assert sc["rows"] == [] and sc["total_count"] == 0
+        assert _codes(sc) == [CAVEAT_NO_MATCH_IN_CODE, CAVEAT_RELAXED_MATCH]
+        relaxed = sc["relaxed_match"]
+        assert relaxed["query"] == RELAXED
+        assert [r["guid"] for r in relaxed["rows"]] == ["s928020", "s904010"]
+        assert relaxed["total_count"] == 2
+        message = sc["caveats"][1]["message"]
+        assert "2 section(s) matched within Title 9" in message
+        assert "RELAXED MATCHES" in text
+
+    @pytest.mark.asyncio
+    async def test_relaxed_matches_only_outside_the_scope_add_nothing(self):
+        p = _by_query(_plugin({}), {RELAXED: ({0: [ZONING, DEF_LOT]}, 1)})
+        sc, _ = await _run(p, "Title 9", query=PHRASE)
+
+        assert "relaxed_match" not in sc
+        assert _codes(sc) == [CAVEAT_NO_MATCH_IN_CODE]
+
+    @pytest.mark.asyncio
+    async def test_partial_scan_gives_no_total(self):
+        pages = {n: [ZONING] * 20 for n in range(SCOPE_SCAN_PAGES + 2)}
+        pages[3] = [DUI] + [ZONING] * 19
+        p = _by_query(_plugin({}), {RELAXED: (pages, SCOPE_SCAN_PAGES + 2)})
+        sc, _ = await _run(p, "Title 9", query=PHRASE)
+
+        relaxed = sc["relaxed_match"]
+        assert relaxed["total_count"] is None
+        assert [r["guid"] for r in relaxed["rows"]] == ["s928020"]
+        assert "among the first 200 hits checked" in sc["caveats"][1]["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_retry_keeps_the_original_answer(self):
+        p = _by_query(_plugin({}), {})
+        routed = p.client.get.side_effect
+
+        async def fake_get(path, params=None, **kw):
+            if path.endswith("/search") and params["query"] == RELAXED:
+                return _json({"message": "boom"}, 500)
+            return await routed(path, params, **kw)
+
+        p.client.get = AsyncMock(side_effect=fake_get)
+        sc, _ = await _run(p, "Title 9", query=PHRASE)
+
+        assert "relaxed_match" not in sc
+        assert _codes(sc) == [CAVEAT_NO_MATCH_IN_CODE]
+
+    @pytest.mark.asyncio
+    async def test_no_retry_when_the_phrase_matched_outside_the_scope(self):
+        p = _by_query(_plugin({}), {PHRASE: ({0: [ZONING]}, 1)})
+        sc, _ = await _run(p, "Title 9", query=PHRASE)
+
+        assert "relaxed_match" not in sc
+        assert _codes(sc) == [CAVEAT_NO_MATCH_IN_SCOPE]
+        assert RELAXED not in [
+            params["query"] for path, params in p.calls
+            if path.endswith("/search")
+        ]
