@@ -184,3 +184,27 @@ class TestAbuseGuards:
             text,
             re.MULTILINE,
         )
+
+
+class TestSinglePublicAddress:
+    """With a custom domain, the default execute-api URL must stay off."""
+
+    def test_default_endpoint_is_disabled_and_redeployed(self):
+        text = API_GATEWAY_TF.read_text(encoding="utf-8")
+        assert re.search(
+            r'disable_execute_api_endpoint\s*=\s*var\.custom_domain != ""',
+            text,
+        )
+        # API Gateway applies the flag only on a new deployment, so the
+        # deployment's trigger hash has to include it.
+        deployment = re.search(
+            r'resource "aws_api_gateway_deployment" "mcp_deployment" \{'
+            r".*?\n\}",
+            text,
+            re.DOTALL,
+        )
+        assert deployment
+        assert (
+            "aws_api_gateway_rest_api.mcp_api.disable_execute_api_endpoint"
+            in deployment.group(0)
+        )

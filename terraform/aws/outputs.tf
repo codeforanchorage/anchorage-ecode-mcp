@@ -19,8 +19,8 @@ output "api_gateway_access_log_group" {
 }
 
 output "api_gateway_url" {
-  description = "API Gateway URL for MCP server (public production endpoint)"
-  value       = "${aws_api_gateway_stage.prod.invoke_url}/mcp"
+  description = "Public URL of the MCP server: the custom domain when one is set (the default execute-api URL is then disabled), else the stage URL"
+  value       = var.custom_domain != "" ? "https://${var.custom_domain}/mcp" : "${aws_api_gateway_stage.prod.invoke_url}/mcp"
 }
 
 # ── Custom domain outputs (only populated when var.custom_domain is set) ────

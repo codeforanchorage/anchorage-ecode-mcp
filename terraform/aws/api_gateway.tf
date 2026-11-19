@@ -3,6 +3,15 @@ resource "aws_api_gateway_rest_api" "mcp_api" {
   name        = "${local.lambda_name}-api"
   description = "API Gateway for OpenContext MCP Server"
 
+  # With a custom domain, that is the only public address: the default
+  # https://<api-id>.execute-api.<region>.amazonaws.com URL is switched off
+  # so there is one way in. Verified before the change (2026-11-18): no
+  # request used the default URL in the previous 7 days of Lambda logs.
+  # Without a custom domain the default URL is the endpoint and stays on.
+  # API Gateway applies this only on the next deployment, hence the trigger
+  # in aws_api_gateway_deployment below.
+  disable_execute_api_endpoint = var.custom_domain != ""
+
   endpoint_configuration {
     types = ["REGIONAL"]
   }
@@ -149,6 +158,8 @@ resource "aws_api_gateway_deployment" "mcp_deployment" {
       # Lambda ARN: a Lambda rename updates integration URI in place; without
       # this, the deployment snapshot keeps pointing at the old function.
       aws_lambda_function.mcp_server.arn,
+      # Takes effect only when the API is redeployed.
+      aws_api_gateway_rest_api.mcp_api.disable_execute_api_endpoint,
     ]))
   }
 
