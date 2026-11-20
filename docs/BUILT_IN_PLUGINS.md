@@ -186,8 +186,10 @@ Each row has the `ordinance` number as printed, the `adopted` date, the
 `subject`, the `chapters` it was codified in (`21.05`, `R11.10` for a
 regulation, `Charter`), the `supplement` number when printed, a `search_query`
 and the row as printed. The table names chapters, not sections: passing the
-`search_query` (`"AO No. 2026-40"`) to `search_code` lists the sections whose
-history note cites the ordinance.
+`search_query` (`"2026-40"`, the number in quotes) to `search_code` lists the
+sections whose history note cites the ordinance. It is the bare number, not
+`"AO No. 2026-40"`: history notes of 2012 to 2014 write `AO 2013-117` with no
+"No.", which that phrase misses (1 section against 68, checked live).
 
 - `within` keeps the ordinances codified in a title or chapter: `Title 21`,
   `Chapter 21.05`, `21`, `R21` or `Charter`. A section number narrows to its
@@ -254,6 +256,17 @@ mistyped in the table), which `get_sections` would not find.
   `effective_date` null.
 - When the ordinance is also in the Ordinance List (`§ OL.010`), `listing`
   carries its adoption date, subject and chapters.
+- When the table does not list the ordinance (usually because it is too new),
+  `citing_sections` lists the sections of the code that cite it, found by one
+  search for its number. A section cites an ordinance in its history note, so
+  these are the sections it enacted or amended. Each has `cited_as`, the
+  citation as printed (`AO No. 2025-112, § 12, 10-21-2025`: the ordinance's
+  own section, then its adoption date). A hit is kept only when its snippet
+  shows the number after "AO", which leaves out the ordinance tables, PDFs
+  and resolutions with the same number. Up to 60 hits are checked;
+  `citing_sections_complete` is false when there were more. The result carries
+  an `ordinance_citing_sections` caveat, and its summary says how many
+  sections cite the ordinance.
 - When the publisher holds the ordinance itself as a PDF (adopted, not yet
   codified), `ordinance_pdfs` gives its title and a `url` for
   `read_attachment`, with an `ordinance_pdf_available` caveat. It is matched
@@ -357,6 +370,7 @@ code and a message. The ones seen most often:
 | `proximity_ignored` | The query used `"a b"~N`. eCode360 has no proximity search, so the phrase was matched exactly; the message suggests the words joined with `AND` |
 | `ordinance_pdf` | `read_attachment` read an ordinance PDF: it is not code text, and extraction loses the marks that show deleted language |
 | `ordinance_pdf_available` | `find_ordinance`: the publisher holds this ordinance as a PDF; the message gives the link |
+| `ordinance_citing_sections` | `find_ordinance`: the table does not list the ordinance, so the sections that cite it were found by search; the message lists them with their citations |
 | `ordinances_not_yet_codified` | `recent_ordinances`: ordinances adopted but not yet in the code text, newer than the whole list, with their PDF links |
 | `title_field_is_heading` | A search used `title:` with a number; `title:` matches headings, and `within` is the way to limit a search to a Title |
 | `scope_scan_partial` | A `within` search checked 200 hits and the query has more; the in-scope count is not complete |

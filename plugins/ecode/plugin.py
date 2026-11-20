@@ -265,6 +265,21 @@ PENDING_ORDINANCE_PAGES = 3
 # questions). Checked on the three live PDFs that day: the title starts at
 # "AN ORDINANCE", runs to a full stop at the end of a line, and each line
 # ends with its drafting line number (1, 2, 3 ...), which is dropped.
+# Sections that cite an ordinance, for one the disposition table does not
+# list (too new, usually). A section's history note is where it is cited:
+# "(AO No. 2025-112, § 12, 10-21-2025; ...)". Checked live 2026-11-20:
+# notes of 2012-2014 write "AO 2013-117" with no "No.", so the phrase
+# "AO No. 2013-117" finds 1 section where the quoted number finds 68; the
+# quoted number alone is an exact match ("2026-4" does not match 2026-40)
+# but also returns the ordinance tables and any PDF that mentions it, so a
+# hit is kept only when its snippet shows the number after "AO".
+ORDINANCE_CITING_PAGES = 3
+# The citation runs to the next ";" or ")", past a version suffix such as
+# "(S-1)" whose own bracket must not end it.
+ORDINANCE_CITATION_TEMPLATE = (
+    r"AO\s+(?:No\.\s*)?{base}(?!\d)(?:\([A-Za-z0-9-]+\))?[^;)\]]{{0,80}}"
+)
+
 ORDINANCE_TITLE_START_RE = re.compile(r"\bAN\s+ORDINANCE\b")
 ORDINANCE_TITLE_END_RE = re.compile(
     r"\.\s*(?:\n|$)|\(\s*AM\b|\bWHEREAS\b"
@@ -336,6 +351,7 @@ CAVEAT_MORE_ATTACHMENT_PAGES = "more_attachment_pages"
 CAVEAT_ATTACHMENT_PAGE_TRUNCATED = "attachment_page_truncated"
 CAVEAT_ORDINANCE_PDF = "ordinance_pdf"
 CAVEAT_ORDINANCE_PDF_AVAILABLE = "ordinance_pdf_available"
+CAVEAT_ORDINANCE_CITING_SECTIONS = "ordinance_citing_sections"
 CAVEAT_ORDINANCES_NOT_YET_CODIFIED = "ordinances_not_yet_codified"
 CAVEAT_PROXIMITY_IGNORED = "proximity_ignored"
 CAVEAT_NO_TEXT_LAYER = "no_text_layer"
@@ -1487,6 +1503,43 @@ FIND_ORDINANCE_OUTPUT_SCHEMA = {
                 "note cites this ordinance."
             ),
         },
+        "citing_sections": {
+            "type": "array",
+            "description": (
+                "Only when the table does not list the ordinance: the "
+                "sections of the code that cite it, found by searching for "
+                "its number. A section cites an ordinance in its history "
+                "note, so these are the sections it enacted or amended. "
+                "Empty when the table lists it (use `matches`), when "
+                "nothing cites it, or when the search could not be made."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "guid": {"type": "string"},
+                    "ref": {"type": ["string", "null"]},
+                    "title": {"type": ["string", "null"]},
+                    "url": {"type": "string"},
+                    "cited_as": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "The citation as the section prints it, e.g. "
+                            "'AO No. 2025-112, \u00a7 12, 10-21-2025': the "
+                            "\u00a7 is the ordinance's own section, the "
+                            "date its adoption date."
+                        ),
+                    },
+                },
+                "required": ["guid", "ref", "title", "url", "cited_as"],
+            },
+        },
+        "citing_sections_complete": {
+            "type": "boolean",
+            "description": (
+                "false when there were more search hits than were checked "
+                "(60), so `citing_sections` may be missing some."
+            ),
+        },
         "ordinance_pdfs": {
             "type": "array",
             "description": (
@@ -1529,6 +1582,8 @@ FIND_ORDINANCE_OUTPUT_SCHEMA = {
         "total_entries",
         "listing",
         "search_query",
+        "citing_sections",
+        "citing_sections_complete",
         "ordinance_pdfs",
         "covers",
         "source",
@@ -1698,7 +1753,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.16.0"
+    plugin_version = "1.17.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2150,7 +2205,9 @@ class EcodePlugin(MCPPlugin):
                     "recent ordinance it also returns the subject and "
                     "adoption date, and for one adopted but not yet in "
                     "the code text, a link to the ordinance itself for "
-                    "read_attachment. The table is a finding aid, not the "
+                    "read_attachment. For an ordinance the table does not "
+                    "list yet, it returns the sections of the code that "
+                    "cite it. The table is a finding aid, not the "
                     "ordinance's text: read the sections it names with "
                     "get_sections to see what the code says now. An "
                     "ordinance that is not listed may still exist (too "
@@ -2451,14 +2508,24 @@ class EcodePlugin(MCPPlugin):
                 # and this short search must not be the one left waiting.
                 pending = await self._pending_ordinances()
                 numbers = self._outline_section_numbers(await self._get_toc())
-                return self._ok(
-                    *self._with_ordinance_pdfs(
-                        *self._format_ordinance_lookup(
-                            base, asked, table, listing, updated, numbers
-                        ),
-                        base,
-                        pending,
+                text, structured = self._format_ordinance_lookup(
+                    base, asked, table, listing, updated, numbers
+                )
+                # The table has no row (too new, usually): find the
+                # sections that cite it, which is the search a caller ran
+                # next anyway (prod, 2026-11-20).
+                citing = (
+                    None
+                    if structured["found"]
+                    else await self._citing_sections(
+                        structured["search_query"].strip('"')
                     )
+                )
+                text, structured = self._with_citing_sections(
+                    text, structured, citing
+                )
+                return self._ok(
+                    *self._with_ordinance_pdfs(text, structured, base, pending)
                 )
 
             if tool_name == "read_attachment":
@@ -6051,7 +6118,7 @@ class EcodePlugin(MCPPlugin):
                     "subject": subject or None,
                     "chapters": chapters,
                     "supplement": supplement,
-                    "search_query": f'"AO No. {base}"',
+                    "search_query": self._ordinance_search_query(base),
                     "text": text[match.start():end].strip(),
                 }
             )
@@ -6094,8 +6161,8 @@ class EcodePlugin(MCPPlugin):
                         f"{why} This is not evidence that nothing changed. "
                         "To check one section, read it with get_section and "
                         "look at its history; to look for an ordinance, "
-                        "search_code for its number, e.g. "
-                        '"AO No. 2026-40".',
+                        "search_code for its number in quotes, e.g. "
+                        '"2026-40".',
                     )
                 ]
             )
@@ -6223,6 +6290,130 @@ class EcodePlugin(MCPPlugin):
             "summary": summary,
             "caveats": caveats,
         }
+
+    @staticmethod
+    def _ordinance_search_query(base: str) -> str:
+        """The search that lists sections citing an ordinance: its number,
+        quoted. Not '"AO No. <number>"': older history notes write
+        "AO 2013-117", which that phrase misses (1 section against 68)."""
+        return f'"{base}"'
+
+    async def _citing_sections(
+        self, base: str
+    ) -> Optional[Tuple[List[Dict[str, Any]], bool]]:
+        """(sections that cite the ordinance, whether every hit was
+        checked), or None when the search could not be made. Decorates a
+        result and never fails one."""
+        cited = re.compile(
+            ORDINANCE_CITATION_TEMPLATE.format(base=re.escape(base))
+        )
+        rows: List[Dict[str, Any]] = []
+        complete = True
+        try:
+            for page in range(ORDINANCE_CITING_PAGES):
+                data = await self._search(
+                    self._ordinance_search_query(base), page
+                )
+                results = (data or {}).get("results") or []
+                for hit in results:
+                    if hit.get("pdf") or hit.get("type") in ("doc", "law"):
+                        continue
+                    found = cited.search(
+                        self._strip_html(hit.get("text") or "")
+                    )
+                    if not found:
+                        continue  # an ordinance table, or another mention
+                    guid = str(
+                        hit.get("id")
+                        or self._guid_from_url(hit.get("url", ""))
+                    )
+                    if not guid or any(r["guid"] == guid for r in rows):
+                        continue
+                    ref = " ".join((hit.get("number") or "").split()) or None
+                    title = self._strip_html(hit.get("title") or "").strip()
+                    cited_as = re.sub(
+                        r"\s+([,;.)])", r"\1", " ".join(found.group(0).split())
+                    ).rstrip(" ,.")
+                    # A snippet can join two excerpts with "..."; the
+                    # citation ends at its date when it has one.
+                    cited_as = cited_as.split("...")[0].rstrip(" ,.")
+                    dated = re.match(r".*?\d{1,2}-\d{1,2}-\d{4}", cited_as)
+                    if dated:
+                        cited_as = dated.group(0)
+                    rows.append(
+                        {
+                            "guid": guid,
+                            "ref": ref,
+                            "title": title or None,
+                            "url": PUBLIC_URL.format(guid=guid),
+                            "cited_as": cited_as or None,
+                        }
+                    )
+                if len(results) < 20:
+                    break
+            else:
+                total = self._as_int((data or {}).get("totalResultCount"))
+                complete = total <= ORDINANCE_CITING_PAGES * 20
+        except (EcodeAPIError, ToolInputError) as e:
+            logger.warning("could not search for sections citing %s: %s", base, e)
+            return None
+        return rows, complete
+
+    def _with_citing_sections(
+        self,
+        text: str,
+        structured: Dict[str, Any],
+        citing: Optional[Tuple[List[Dict[str, Any]], bool]],
+    ) -> tuple:
+        rows, complete = citing if citing else ([], True)
+        structured = {
+            **structured,
+            "citing_sections": rows,
+            "citing_sections_complete": complete,
+        }
+        if not rows:
+            return text, structured
+        count = f"{len(rows)}{'' if complete else ' or more'}"
+        old = structured.get("summary") or ""
+        lead = (
+            f"AO {structured['listing']['ordinance']} is in the list of "
+            "recent ordinances; the Ordinance Disposition Table does not "
+            "list it yet, but"
+            if structured.get("listing")
+            else f"AO {structured['ordinance']} is not in the Ordinance "
+            "Disposition Table, but"
+        )
+        summary = f"{lead} {count} section(s) of the code cite it."
+        if old and text.startswith(old):
+            text = summary + text[len(old):]
+        structured["summary"] = summary
+        listed = "\n".join(
+            f"- {r['ref'] or 'guid ' + r['guid']}"
+            + (f" {r['title']}" if r["title"] else "")
+            + (f" -- {r['cited_as']}" if r["cited_as"] else "")
+            for r in rows
+        )
+        text = self._append_note(
+            text,
+            structured,
+            CAVEAT_ORDINANCE_CITING_SECTIONS,
+            f"These {count} section(s) cite the ordinance, found by "
+            f"searching the code for {structured['search_query']}. A "
+            "section cites an ordinance in its history note, so these are "
+            "the sections it enacted or amended; the citation is shown as "
+            "printed, where '\u00a7 n' is the ordinance's own section and "
+            "the date is its adoption date. It does not say what changed: "
+            "read the sections with get_sections."
+            + (
+                ""
+                if complete
+                else " Only the first "
+                f"{ORDINANCE_CITING_PAGES * 20} search hits were checked: "
+                "pass the same query to search_code for the rest."
+            )
+            + f"\n{listed}",
+        )
+        return text, structured
 
     # ── Ordinances held as PDFs: adopted, not yet codified ───────────────
 
@@ -6777,7 +6968,7 @@ class EcodePlugin(MCPPlugin):
             short = f"{long_year.group(1)}-{long_year.group(2)}"
             if any(b["base"] == short for b in blocks):
                 base = short
-        search_query = f'"AO No. {base}"'
+        search_query = self._ordinance_search_query(base)
 
         listing = None
         if isinstance(listing_node, dict):
