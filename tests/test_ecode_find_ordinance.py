@@ -165,7 +165,7 @@ class TestLookup:
             "title": "Ordinance Disposition Table.",
             "url": f"https://ecode360.com/{CCT_GUID}",
         }
-        assert sc["search_query"] == '"AO No. 2025-115"'
+        assert sc["search_query"] == '"2025-115"'
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -343,7 +343,7 @@ class TestNotListed:
             "last_ordinance": "2026-47",
         }
         assert "does not show the ordinance does not exist" in text
-        assert '"AO No. 2031-5"' in text
+        assert '"2031-5"' in text
 
     @pytest.mark.asyncio
     async def test_recent_ordinance_comes_from_the_list(self):
@@ -521,7 +521,7 @@ class TestNumberAsWritten:
 
         assert sc["found"] is True
         assert sc["matches"][0]["ordinance"] == "85-8"
-        assert sc["search_query"] == '"AO No. 85-8"'
+        assert sc["search_query"] == '"85-8"'
 
     @pytest.mark.asyncio
     async def test_unlisted_number_explains_the_numbering(self):
@@ -630,7 +630,12 @@ class TestOrdinanceItselfAsPdf:
         assert sc["summary"].startswith("AO No. 2026-108(S) has been adopted")
         assert text.startswith(sc["summary"])
         assert PDF_108 in text and "read_attachment" in text
-        assert p.queries == [{"query": PENDING_ORDINANCE_QUERY, "page": 0}]
+        # One search for the ordinance PDFs, one for sections citing it.
+        assert p.queries == [
+            {"query": PENDING_ORDINANCE_QUERY, "page": 0},
+            {"query": '"2026-108"', "page": 0},
+        ]
+        assert sc["citing_sections"] == []
 
     @pytest.mark.asyncio
     async def test_matched_on_the_title_not_on_a_mention(self):
@@ -910,3 +915,183 @@ class TestPendingOrdinanceTitles:
 
         assert len(sc["not_yet_codified"]) == 2
         assert all(o["subject"] is None for o in sc["not_yet_codified"])
+
+
+# ── 1.19.0: sections that cite an ordinance the table does not list ──────
+
+from plugins.ecode.plugin import CAVEAT_ORDINANCE_CITING_SECTIONS  # noqa: E402
+
+
+def _cite_hit(guid, number, title, text, **extra):
+    return {"id": guid, "number": number, "title": title, "text": text,
+            "type": "code", "pdf": False, **extra}
+
+
+# The live search for "2026-40" (2026-11-20): six sections whose history
+# note cites it, the Ordinance List row, and an ordinance PDF that only
+# mentions the number.
+CITING_2026_40 = [
+    _cite_hit("s71", "§\xa07.10.010", "General provisions.",
+              '...(S) Amended , 1-13-2026 ; AO No. <em class="highlight">'
+              "2026-40</em>(S-1) Amended , 6-23-2026 )"),
+    _cite_hit("s72", "§\xa07.20.120", "Emergency procurements.",
+              "...to support the annual report. ( AO No. 2026-40(S-1) "
+              "Amended , 6-23-2026 ) [..."),
+    _cite_hit("ol", "§\xa0OL.010", "Ordinance List and Disposition Table",
+              "...Ch. 7.20 0.1 2026-40(S-1) Amended 6-23-2026 Amends..."),
+    {"id": "LF2907762", "type": "law", "pdf": True, "number": "",
+     "title": "AO No. 2026-108(S)", "text": "...as amended by AO No. 2026-40...",
+     "url": "https://live.ecode360.com/AN6998/laws/LF2907762.pdf"},
+    _cite_hit("s73", "§\xa07.20.070", "Sole source.",
+              "...-37 , § 16, 5-16-2025 ; AO No. 2026-40(S-1) Amended , "
+              "6-23-2026 )"),
+]
+
+
+def _plugin_citing(hits_by_query, total=None, **kwargs):
+    """`hits_by_query`: {query: [hits]}; pages of 20; any other search
+    returns nothing."""
+    p = _plugin(**kwargs)
+    inner = p.client.get.side_effect
+    queries = []
+
+    async def fake_get(path, params=None, **kw):
+        if path.endswith("/search"):
+            queries.append((params["query"], int(params["page"])))
+            hits = hits_by_query.get(params["query"], [])
+            page = int(params["page"])
+            return httpx.Response(200, request=REQ, json={
+                "results": hits[page * 20:(page + 1) * 20],
+                "page": str(page), "maxPages": 9,
+                "totalResultCount": len(hits) if total is None else total})
+        return await inner(path, params=params, **kw)
+
+    p.client.get = AsyncMock(side_effect=fake_get)
+    p.queries = queries
+    return p
+
+
+class TestCitingSections:
+    """For an ordinance in the recent list but not yet in the table, the
+    lookup said 'sections not listed yet' and left the caller to search
+    for the number to find the sections that cite it."""
+
+    @pytest.mark.asyncio
+    async def test_recent_ordinance_gets_the_sections_that_cite_it(self):
+        p = _plugin_citing({'"2026-40"': CITING_2026_40})
+        sc, text = await _find("AO 2026-40", p)
+
+        assert sc["found"] is False
+        assert [r["guid"] for r in sc["citing_sections"]] == ["s71", "s72", "s73"]
+        first = sc["citing_sections"][0]
+        assert first == {
+            "guid": "s71",
+            "ref": "§ 7.10.010",
+            "title": "General provisions.",
+            "url": "https://ecode360.com/s71",
+            "cited_as": "AO No. 2026-40(S-1) Amended, 6-23-2026",
+        }
+        assert sc["citing_sections_complete"] is True
+        assert sc["summary"] == (
+            "AO 2026-40(S-1) Amended is in the list of recent ordinances; "
+            "the Ordinance Disposition Table does not list it yet, but 3 "
+            "section(s) of the code cite it."
+        )
+        assert text.startswith(sc["summary"])
+        assert CAVEAT_ORDINANCE_CITING_SECTIONS in _codes(sc)
+        assert "- § 7.20.070 Sole source. -- AO No. 2026-40(S-1) Amended, 6-23-2026" in text
+        assert sc["listing"]["adopted"] == "2026-06-23"
+
+    @pytest.mark.asyncio
+    async def test_tables_pdfs_and_bare_mentions_are_not_sections(self):
+        p = _plugin_citing({'"2026-40"': CITING_2026_40})
+        sc, _ = await _find("2026-40", p)
+        guids = [r["guid"] for r in sc["citing_sections"]]
+
+        assert "ol" not in guids  # the Ordinance List row: no "AO" before it
+        assert "LF2907762" not in guids  # a PDF
+
+    @pytest.mark.asyncio
+    async def test_older_citation_form_without_no_is_found(self):
+        """2012-2014 notes write 'AO 2013-117'; the old suggested search,
+        '"AO No. 2013-117"', found 1 section where the number finds 68."""
+        hits = [_cite_hit("a", "§\xa021.02.040", "T",
+                          "...2012-124(S) , 2-26-2013 ; AO 2031-7 , 12-3-2031 )")]
+        sc, _ = await _find("2031-7", _plugin_citing({'"2031-7"': hits}))
+
+        assert sc["search_query"] == '"2031-7"'
+        assert sc["citing_sections"][0]["cited_as"] == "AO 2031-7, 12-3-2031"
+        assert sc["summary"] == (
+            "AO 2031-7 is not in the Ordinance Disposition Table, but 1 "
+            "section(s) of the code cite it."
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_longer_number_is_not_this_ordinance(self):
+        hits = [_cite_hit("a", "§\xa01.05.010", "T", "( AO No. 2031-70 , 1-1-2031 )"),
+                _cite_hit("b", "§\xa01.05.020", "T", "( AR No. 2031-7 , 1-1-2031 )")]
+        sc, _ = await _find("2031-7", _plugin_citing({'"2031-7"': hits}))
+
+        assert sc["citing_sections"] == []
+        assert CAVEAT_ORDINANCE_CITING_SECTIONS not in _codes(sc)
+
+    @pytest.mark.asyncio
+    async def test_no_search_when_the_table_lists_it(self):
+        p = _plugin_citing({'"2025-115"': CITING_2026_40})
+        sc, _ = await _find("2025-115", p)
+
+        assert sc["found"] is True
+        assert sc["citing_sections"] == []
+        assert ('"2025-115"', 0) not in p.queries
+
+    @pytest.mark.asyncio
+    async def test_more_hits_than_are_checked_says_so(self):
+        hits = [
+            _cite_hit(f"g{i}", f"§\xa01.05.{i:03d}", "T",
+                      "( AO No. 2031-7 , 1-1-2031 )")
+            for i in range(75)
+        ]
+        p = _plugin_citing({'"2031-7"': hits})
+        sc, text = await _find("2031-7", p)
+
+        assert len(sc["citing_sections"]) == 60
+        assert sc["citing_sections_complete"] is False
+        assert "60 or more section(s)" in sc["summary"]
+        assert "Only the first 60 search hits were checked" in text
+        assert [q for q in p.queries if q[0] == '"2031-7"'] == [
+            ('"2031-7"', 0), ('"2031-7"', 1), ('"2031-7"', 2),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_exactly_three_full_pages_is_complete(self):
+        hits = [
+            _cite_hit(f"g{i}", f"§\xa01.05.{i:03d}", "T",
+                      "( AO No. 2031-7 , 1-1-2031 )")
+            for i in range(60)
+        ]
+        sc, _ = await _find("2031-7", _plugin_citing({'"2031-7"': hits}))
+
+        assert len(sc["citing_sections"]) == 60
+        assert sc["citing_sections_complete"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_failed_search_changes_nothing(self):
+        sc, text = await _find("2031-5")  # this plugin's searches 404
+
+        assert sc["citing_sections"] == []
+        assert sc["citing_sections_complete"] is True
+        assert sc["summary"] == (
+            "AO 2031-5 is not listed in the Ordinance Disposition Table."
+        )
+
+    @pytest.mark.asyncio
+    async def test_citation_stops_at_its_date(self):
+        """A snippet can join two excerpts: '... AO No. 2031-7 , 10-20-2031
+        Spenard Corridor Plan.... 2031-6 , 10-7-2031'."""
+        hits = [_cite_hit("a", "§\xa021.01.080", "Comprehensive plan.",
+                          "... ; AO No. 2031-7 , 10-20-2031 Spenard Corridor "
+                          "Plan.... 2031-6 , 10-7-2031 ; AO No. 2031-7 , "
+                          "10-20-2031 )")]
+        sc, _ = await _find("2031-7", _plugin_citing({'"2031-7"': hits}))
+
+        assert sc["citing_sections"][0]["cited_as"] == "AO No. 2031-7, 10-20-2031"

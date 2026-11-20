@@ -174,7 +174,7 @@ class TestOrdinanceRows:
             "subject": "Amends Land Use Planning: General Provisions",
             "chapters": ["21.01"],
             "supplement": "0.4",
-            "search_query": '"AO No. 2026-118"',
+            "search_query": '"2026-118"',
             "text": "2026-118 10-20-2026 Amends Land Use Planning: General "
                     "Provisions Ch. 21.01 0.4",
         }
@@ -212,13 +212,13 @@ class TestOrdinanceRows:
 
     @pytest.mark.asyncio
     async def test_the_search_query_drops_the_version_suffix(self):
-        """Verified live: '"AO No. 2026-27"' finds the sections whose note
-        reads 'AO No. 2026-27(S) Amended'."""
+        """The quoted number finds the sections whose note reads
+        'AO No. 2026-27(S) Amended' -- and, unlike '"AO No. 2026-27"', the
+        older notes that write 'AO 2013-117' with no 'No.' (verified live
+        2026-11-20: 68 sections against 1)."""
         sc, text = await _run(_plugin())
-        assert _row(sc, "2026-27(S) Amended")["search_query"] == (
-            '"AO No. 2026-27"'
-        )
-        assert 'search_code("AO No. 2026-27")' in text
+        assert _row(sc, "2026-27(S) Amended")["search_query"] == '"2026-27"'
+        assert 'search_code("2026-27")' in text
 
     @pytest.mark.asyncio
     async def test_rows_without_a_date_are_kept_and_flagged(self):
