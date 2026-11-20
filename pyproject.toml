@@ -55,6 +55,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "code_date: let get_section / get_sections look up the code's last-updated date (off by default in tests)",
+    "outline_sections: let a section number be resolved from the table of contents before search (off by default in tests)",
 ]
 
 [tool.coverage.run]

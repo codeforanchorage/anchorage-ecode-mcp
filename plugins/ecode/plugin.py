@@ -78,6 +78,10 @@ REF_WITH_KIND_RE = re.compile(
     r"([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)$",
     re.IGNORECASE,
 )
+# Look a section number up in the table of contents before falling back
+# to search (see _resolve_reference). A switch only so tests that script
+# the upstream responses in order can keep the search path.
+RESOLVE_SECTIONS_FROM_OUTLINE = True
 KIND_TITLE = "title"
 KIND_CHAPTER = "chapter"
 KIND_SECTION = "section"
@@ -1638,7 +1642,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.14.1"
+    plugin_version = "1.15.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2616,9 +2620,28 @@ class EcodePlugin(MCPPlugin):
             resolved_from: Optional[str] = (
                 number if kind is None and not charter_only else shown
             )
-            data = await self._get_recent_json(
-                self._cust_path(f"/code/content/{quote(guid, safe='')}")
-            )
+            try:
+                data = await self._get_recent_json(
+                    self._cust_path(f"/code/content/{quote(guid, safe='')}")
+                )
+            except EcodeNotFoundError:
+                # The outline is kept for an hour. If the code was
+                # republished in that time a guid taken from it may be
+                # gone: ask search, which is current, before giving up.
+                if kind is not None or charter_only or number.count(".") < 2:
+                    raise
+                fresh = await self._resolve_section_number(number)
+                if fresh == guid:
+                    raise
+                logger.warning(
+                    "outline guid %s for %s is stale; search gave %s",
+                    guid,
+                    number,
+                    fresh,
+                )
+                data = await self._get_recent_json(
+                    self._cust_path(f"/code/content/{quote(fresh, safe='')}")
+                )
             if subsection:
                 # A copy: cached responses are shared and read-only.
                 data = {**data, "_subsection": subsection}
@@ -2793,6 +2816,24 @@ class EcodePlugin(MCPPlugin):
         """
         explicit = kind in (KIND_TITLE, KIND_CHAPTER) or charter_only
         if not explicit and number.count(".") != 1:
+            # The outline first: it is already in memory and lists every
+            # section, while a search costs an upstream call that stalls
+            # for about 5 s one time in eight. Prod, 2026-11-20: reads by
+            # section number took 4 s or more in 13 of 30 calls, reads by
+            # guid in 0 of 9, and 92 of the 93 numbers asked for were in
+            # the outline (the 93rd does not exist). Search still answers
+            # when the outline is unavailable, does not list the number
+            # (a building-code part, a subsection), or lists it twice.
+            listed: List[Dict[str, Any]] = []
+            if RESOLVE_SECTIONS_FROM_OUTLINE:
+                try:
+                    listed = self._outline_matches(
+                        await self._get_toc(), KIND_SECTION, number, False
+                    )
+                except EcodeAPIError:
+                    listed = []
+            if len(listed) == 1:
+                return listed[0]["guid"]
             return await self._resolve_section_number(number)
 
         try:
