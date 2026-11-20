@@ -80,6 +80,26 @@ def section_numbers_by_search(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_ordinance_title_download(request, monkeypatch):
+    """Stop find_ordinance / recent_ordinances from downloading ordinance
+    PDFs to read their titles, unless the test is marked `ordinance_titles`.
+
+    The download goes to the publisher's public site through a client the
+    usual mocks do not cover, so an unmarked test would reach the network.
+    """
+    from plugins.ecode import plugin as ecode_plugin
+
+    ecode_plugin._ORDINANCE_TITLE_CACHE.clear()
+    if request.node.get_closest_marker("ordinance_titles"):
+        return
+
+    async def unread(self, url):
+        return None
+
+    monkeypatch.setattr(ecode_plugin.EcodePlugin, "_ordinance_title", unread)
+
+
+@pytest.fixture(autouse=True)
 def reset_http_handler_globals():
     """Snapshot and restore ``server.http_handler``'s module globals.
 

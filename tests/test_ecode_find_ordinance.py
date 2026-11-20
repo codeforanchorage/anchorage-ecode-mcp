@@ -621,7 +621,8 @@ class TestOrdinanceItselfAsPdf:
 
         assert sc["found"] is False
         assert sc["ordinance_pdfs"] == [
-            {"ordinance": "AO No. 2026-108(S)", "url": PDF_108}
+            {"ordinance": "AO No. 2026-108(S)", "url": PDF_108,
+             "subject": None, "amends": []}
         ]
         assert _codes(sc) == [
             CAVEAT_ORDINANCE_NOT_IN_TABLE, CAVEAT_ORDINANCE_PDF_AVAILABLE,
@@ -645,7 +646,7 @@ class TestOrdinanceItselfAsPdf:
         sc, _ = await _find("2026-98", _plugin_with_pdfs())
         (pdf,) = sc["ordinance_pdfs"]
 
-        assert pdf == {"ordinance": "AO No. 2026-98(S-1)", "url": PDF_98}
+        assert (pdf["ordinance"], pdf["url"]) == ("AO No. 2026-98(S-1)", PDF_98)
         p = _plugin()
         assert p._attachment_url_arg({"url": pdf["url"]}) == PDF_98
 
@@ -679,10 +680,13 @@ class TestRecentOrdinancesNotYetCodified:
     async def test_lists_what_is_newer_than_the_list(self):
         sc, text = await self._recent(_plugin_with_pdfs())
 
-        assert sc["not_yet_codified"] == [
-            {"ordinance": "AO No. 2026-108(S)", "url": PDF_108},
-            {"ordinance": "AO No. 2026-98(S-1)", "url": PDF_98},
+        assert [(o["ordinance"], o["url"]) for o in sc["not_yet_codified"]] == [
+            ("AO No. 2026-108(S)", PDF_108),
+            ("AO No. 2026-98(S-1)", PDF_98),
         ]
+        # Titles are not read in this test (see conftest): reported as such.
+        assert all(o["subject"] is None for o in sc["not_yet_codified"])
+        assert "(title not read)" in text
         assert _codes(sc)[-1] == CAVEAT_ORDINANCES_NOT_YET_CODIFIED
         assert "NEWER than everything listed above: 2 ordinance(s)" in text
         assert sc["ordinances"]  # the list itself is unchanged
@@ -700,3 +704,210 @@ class TestRecentOrdinancesNotYetCodified:
             sc, _ = await self._recent(p)
             assert sc["not_yet_codified"] == []
             assert CAVEAT_ORDINANCES_NOT_YET_CODIFIED not in _codes(sc)
+
+
+# ── 1.18.0: each pending ordinance carries its own title ─────────────────
+
+from tests.test_ecode_chapters_and_attachments import make_pdf  # noqa: E402
+
+# First pages of the three live ordinance PDFs, as pypdf returned them on
+# 2026-11-20 (cut after the title). Each line ends with its drafting line
+# number.
+PAGE_108 = (
+    " \n \nSubmitted by: Mayor LaFrance and \nAssembly Members \n"
+    "Prepared by: Dept. of Law \nFor reading:  September 15, 2026 \n  \n"
+    "ANCHORAGE, ALASKA \nAO No. 2026-108(S), As Amended \n \n"
+    "(NOTE: This substitute version is presented without legislative "
+    "drafting markup, except to \nthe title, from the text of the original "
+    "AO. It is written as a new ordinance. See the AM for a \nsummary of "
+    "changes.) \n \n"
+    "AN ORDINANCE OF THE ANCHORAGE MUNICIPAL ASSEMBLY AMENDING 1 \n"
+    "[REPEALING AND REPLACING] ANCHORAGE MUNICIPAL CODE CHAPTER 2 \n"
+    "3.102 AND AMENDING AMC SECTION 7.15.040 TO IMPOSE NEW 3 \n"
+    "RESTRICTIONS ON THE USE OF SURVEILLANCE TECHNOLOGY. 4 \n 5 \n"
+    "WHEREAS, the Assembly finds 6 \n"
+)
+PAGE_98 = (
+    " \n Submitted by: Assembly Chair Brawley \n For reading: October 20, "
+    "2026 \n \nANCHORAGE, ALASKA \nAO No. 2026-98(S-1), As Amended \n \n"
+    "AN ORDINANCE OF THE ANCHORAGE MUNICIPAL ASSEMBLY AMENDING 1 \n"
+    "ANCHORAGE MUNICIPAL CODE CHAPTER 4.60 AND 27.30.085 TO ENACT A 2 \n"
+    "NEW SECTION 4.60.310 AND ESTABLISH THE CHUGACH STATE PARK 3 \n"
+    "ACCESS ADVISORY BOARD. 4 \n 5 \n"
+    "WHEREAS, the natural beauty and recreational amenities of Chugach "
+    "State 6 \nPark 7 \n"
+)
+PAGE_127 = (
+    " \n     Submitted by: Chair of the Assembly at the  \n  Request of the "
+    "Mayor \n      For reading: October 6, 2026    \n \nANCHORAGE, ALASKA "
+    "\nAO No. 2026-127  \n \n"
+    "AN ORDINANCE OF THE ANCHORAGE ASSEMBLY AMENDING ANCHORAGE 1 \n"
+    "MUNICIPAL CODE CHAPTERS 1.35, 3.20, AND 3.30 RELATING TO THE 2 \n"
+    "ORGANIZATION OF THE EXECUTIVE BRANCH. 3 \n 4 \n 5 \n"
+    "WHEREAS, as outlined  in its 120 -day budget memorandum 6 \n"
+)
+
+
+class TestOrdinanceTitleFromPage:
+    def test_line_numbers_are_dropped_and_the_title_kept_whole(self):
+        assert EcodePlugin._ordinance_title_from_page(PAGE_98) == (
+            "AN ORDINANCE OF THE ANCHORAGE MUNICIPAL ASSEMBLY AMENDING "
+            "ANCHORAGE MUNICIPAL CODE CHAPTER 4.60 AND 27.30.085 TO ENACT A "
+            "NEW SECTION 4.60.310 AND ESTABLISH THE CHUGACH STATE PARK "
+            "ACCESS ADVISORY BOARD."
+        )
+
+    def test_a_chapter_number_split_across_lines_survives(self):
+        """'... CODE CHAPTER 2' / '3.102 AND ...': the 2 is a line number,
+        the chapter is 3.102."""
+        title = EcodePlugin._ordinance_title_from_page(PAGE_108)
+
+        assert "MUNICIPAL CODE CHAPTER 3.102 AND AMENDING" in title
+        # Deleted words stay, in their brackets: nothing is edited out.
+        assert "AMENDING [REPEALING AND REPLACING] ANCHORAGE" in title
+        assert title.endswith("SURVEILLANCE TECHNOLOGY.")
+
+    def test_stops_at_the_end_of_the_title(self):
+        title = EcodePlugin._ordinance_title_from_page(PAGE_127)
+
+        assert title.endswith("ORGANIZATION OF THE EXECUTIVE BRANCH.")
+        assert "WHEREAS" not in title and "120" not in title
+
+    def test_a_trailing_number_that_is_not_a_line_number_is_kept(self):
+        page = (
+            "AN ORDINANCE AMENDING ANCHORAGE MUNICIPAL CODE TITLE 21\n"
+            "TO DO THINGS.\n"
+        )
+        assert EcodePlugin._ordinance_title_from_page(page) == (
+            "AN ORDINANCE AMENDING ANCHORAGE MUNICIPAL CODE TITLE 21 TO DO "
+            "THINGS."
+        )
+
+    @pytest.mark.parametrize(
+        "page",
+        ["", "A RESOLUTION OF THE ASSEMBLY.\n", "AN ORDINANCE with no end",
+         "AN ORDINANCE.\n", "AN ORDINANCE " + "X " * 2000 + ".\n"],
+    )
+    def test_anything_else_is_not_guessed_at(self, page):
+        assert EcodePlugin._ordinance_title_from_page(page) is None
+
+
+@pytest.mark.ordinance_titles
+class TestPendingOrdinanceTitles:
+    """Prod, 2026-11-20: asked what changed in Title 7 and then Title 25,
+    Claude read all three ordinance PDFs in full, twice, because the list
+    gave only their numbers."""
+
+    TITLES = {
+        PDF_108: "AN ORDINANCE AMENDING CHAPTER 3.102 AND SECTION 7.15.040.",
+        PDF_98: "AN ORDINANCE AMENDING CHAPTER 4.60 AND 27.30.085.",
+    }
+
+    def _plugin(self, fail=()):
+        p = _plugin_with_pdfs()
+        # Downloaded PDFs are kept at module level; start each test empty.
+        ecode_mod._ATTACHMENT_CACHE.clear()
+        fetched = []
+
+        def handler(request):
+            url = str(request.url)
+            fetched.append(url)
+            if url in fail:
+                return httpx.Response(500)
+            return httpx.Response(200, content=make_pdf([self.TITLES[url]]))
+
+        p._attachment_transport = httpx.MockTransport(handler)
+        p.fetched = fetched
+        return p
+
+    async def _recent(self, plugin, **args):
+        result = await plugin.execute_tool("recent_ordinances", args)
+        assert result.success, result.error_message
+        sc = result.structured_content
+        validate(sc, ORDINANCES_OUTPUT_SCHEMA)
+        text = result.content[0]["text"]
+        for caveat in sc["caveats"]:
+            assert caveat["message"] in text
+        return sc, text
+
+    @pytest.mark.asyncio
+    async def test_each_comes_with_its_title_and_what_it_names(self):
+        sc, text = await self._recent(self._plugin())
+        first, second = sc["not_yet_codified"]
+
+        assert first["subject"] == self.TITLES[PDF_108]
+        assert first["amends"] == ["3.102", "7.15.040"]
+        assert second["amends"] == ["4.60", "27.30.085"]
+        assert first["in_scope"] is None  # no `within`
+        assert f"AO No. 2026-108(S) ({PDF_108}): {self.TITLES[PDF_108]}" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "within, naming",
+        [("Title 7", "AO No. 2026-108(S)"),
+         ("Chapter 3.102", "AO No. 2026-108(S)"),
+         ("Title 27", "AO No. 2026-98(S-1)"),
+         ("Chapter 4.60", "AO No. 2026-98(S-1)")],
+    )
+    async def test_within_marks_the_ones_whose_title_names_it(
+        self, within, naming
+    ):
+        sc, text = await self._recent(self._plugin(), within=within)
+        first, second = sc["not_yet_codified"]
+
+        # Shown first, and the other is still listed.
+        assert (first["ordinance"], first["in_scope"]) == (naming, True)
+        assert second["in_scope"] is False
+        assert f"- [names it] {naming}" in text
+        assert "can still amend it" in text
+
+    @pytest.mark.asyncio
+    async def test_within_a_title_none_of_them_names(self):
+        sc, text = await self._recent(self._plugin(), within="Title 21")
+
+        assert [o["in_scope"] for o in sc["not_yet_codified"]] == [False, False]
+        assert "0 of them name(s) Title 21" in text
+
+    @pytest.mark.asyncio
+    async def test_a_pdf_that_cannot_be_read_is_listed_without_a_title(self):
+        sc, text = await self._recent(
+            self._plugin(fail={PDF_98}), within="Title 4"
+        )
+        by_name = {o["ordinance"]: o for o in sc["not_yet_codified"]}
+
+        assert by_name["AO No. 2026-98(S-1)"]["subject"] is None
+        assert by_name["AO No. 2026-98(S-1)"]["in_scope"] is None
+        assert by_name["AO No. 2026-108(S)"]["in_scope"] is False
+        assert "(title not read)" in text
+
+    @pytest.mark.asyncio
+    async def test_titles_are_read_once_per_container(self):
+        p = self._plugin()
+        await self._recent(p)
+        await self._recent(p, within="Title 7")
+        await _find("2026-108", p)
+
+        assert sorted(p.fetched) == sorted([PDF_108, PDF_98])
+
+    @pytest.mark.asyncio
+    async def test_find_ordinance_shows_the_title(self):
+        sc, text = await _find("AO 2026-108(S)", self._plugin())
+        (pdf,) = sc["ordinance_pdfs"]
+
+        assert pdf["subject"] == self.TITLES[PDF_108]
+        assert pdf["amends"] == ["3.102", "7.15.040"]
+        assert f"its title: {self.TITLES[PDF_108]}" in text
+
+    @pytest.mark.asyncio
+    async def test_slow_titles_never_hold_up_the_result(self, monkeypatch):
+        import asyncio as aio
+
+        async def slow(self, url):
+            await aio.sleep(30)
+
+        monkeypatch.setattr(EcodePlugin, "_ordinance_title", slow)
+        monkeypatch.setattr(ecode_mod, "ORDINANCE_TITLES_TIMEOUT_S", 0.1)
+        sc, _ = await self._recent(self._plugin())
+
+        assert len(sc["not_yet_codified"]) == 2
+        assert all(o["subject"] is None for o in sc["not_yet_codified"])

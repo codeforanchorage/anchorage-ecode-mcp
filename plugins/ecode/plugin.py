@@ -257,6 +257,28 @@ LAW_PATH_TEMPLATE = r"^/{customer}/laws/LF\d+\.pdf$"
 # returns PDFs that merely mention it.
 PENDING_ORDINANCE_QUERY = 'title:"AO No"'
 PENDING_ORDINANCE_PAGES = 3
+# Each of those ordinances states what it does in its own title, on the
+# first page: "AN ORDINANCE OF THE ANCHORAGE MUNICIPAL ASSEMBLY AMENDING
+# ANCHORAGE MUNICIPAL CODE CHAPTER 4.60 AND 27.30.085 TO ENACT ...". The
+# list gave only numbers, so to answer "what changed in Title 7" a model
+# read every PDF in full (prod, 2026-11-20: six whole-PDF reads for two
+# questions). Checked on the three live PDFs that day: the title starts at
+# "AN ORDINANCE", runs to a full stop at the end of a line, and each line
+# ends with its drafting line number (1, 2, 3 ...), which is dropped.
+ORDINANCE_TITLE_START_RE = re.compile(r"\bAN\s+ORDINANCE\b")
+ORDINANCE_TITLE_END_RE = re.compile(
+    r"\.\s*(?:\n|$)|\(\s*AM\b|\bWHEREAS\b"
+    r"|\bTHE\s+ANCHORAGE\s+ASSEMBLY\s+ORDAINS\b"
+)
+ORDINANCE_TITLE_NUMBER_RE = re.compile(
+    r"(?<![\d.])R?\d{1,2}\.\d{1,3}(?:\.\d{1,4})?(?![\d.]*\d)"
+)
+ORDINANCE_TITLE_MAX_CHARS = 1500
+# All the titles together must not hold a result up for longer than this.
+ORDINANCE_TITLES_TIMEOUT_S = 8.0
+# url -> title ("" = read, none found). A PDF never changes under its url.
+_ORDINANCE_TITLE_CACHE: Dict[str, str] = {}
+ORDINANCE_TITLE_CACHE_ENTRIES = 100
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 # Rendered text per call. Layout mode pads columns with spaces, so one page
 # of a wide table runs ~16,000 characters.
@@ -1034,6 +1056,25 @@ ORDINANCE_WITHIN_RE = re.compile(
 DEFAULT_ORDINANCES = 25
 MAX_ORDINANCES = 100
 
+_ORDINANCE_SUBJECT_SCHEMA = {
+    "type": ["string", "null"],
+    "description": (
+        "The ordinance's own title, read from the first page of its PDF: "
+        "'AN ORDINANCE ... AMENDING ANCHORAGE MUNICIPAL CODE CHAPTER ...'. "
+        "Words in [brackets] are deletions from an earlier version of the "
+        "title. null when it could not be read."
+    ),
+}
+_ORDINANCE_AMENDS_SCHEMA = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": (
+        "The chapter and section numbers that title names ('3.102', "
+        "'7.15.040'). What the drafter chose to name, not a complete "
+        "list of what the ordinance changes."
+    ),
+}
+
 ORDINANCES_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1123,8 +1164,21 @@ ORDINANCES_OUTPUT_SCHEMA = {
                         "description": "As titled, e.g. 'AO No. 2026-108(S)'.",
                     },
                     "url": {"type": "string"},
+                    "subject": _ORDINANCE_SUBJECT_SCHEMA,
+                    "amends": _ORDINANCE_AMENDS_SCHEMA,
+                    "in_scope": {
+                        "type": ["boolean", "null"],
+                        "description": (
+                            "With `within`: whether the ordinance's TITLE "
+                            "names that title or chapter. false means only "
+                            "that its title does not; an ordinance can "
+                            "amend sections its title does not list. null "
+                            "without `within`, or when the title could "
+                            "not be read."
+                        ),
+                    },
                 },
-                "required": ["ordinance", "url"],
+                "required": ["ordinance", "url", "subject", "amends", "in_scope"],
             },
         },
         "covers": {
@@ -1447,8 +1501,10 @@ FIND_ORDINANCE_OUTPUT_SCHEMA = {
                 "properties": {
                     "ordinance": {"type": "string"},
                     "url": {"type": "string"},
+                    "subject": _ORDINANCE_SUBJECT_SCHEMA,
+                    "amends": _ORDINANCE_AMENDS_SCHEMA,
                 },
-                "required": ["ordinance", "url"],
+                "required": ["ordinance", "url", "subject", "amends"],
             },
         },
         "covers": {
@@ -1642,7 +1698,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.15.0"
+    plugin_version = "1.16.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2375,6 +2431,7 @@ class EcodePlugin(MCPPlugin):
                     *self._with_pending_ordinances(
                         *self._format_ordinances(node, scope, limit, updated),
                         pending,
+                        scope,
                     )
                 )
 
@@ -6200,7 +6257,118 @@ class EcodePlugin(MCPPlugin):
         except (EcodeAPIError, ToolInputError) as e:
             logger.warning("could not list the ordinance PDFs: %s", e)
             return None
+        await self._add_ordinance_titles(found)
         return found
+
+    async def _add_ordinance_titles(self, found: List[Dict[str, Any]]) -> None:
+        """Set `subject` and `amends` on each ordinance, from its PDF.
+        Bounded and never raises: an unread title is simply null."""
+        titles: List[Any] = [None] * len(found)
+        try:
+            titles = await asyncio.wait_for(
+                asyncio.gather(
+                    *(self._ordinance_title(o["url"]) for o in found),
+                    return_exceptions=True,
+                ),
+                ORDINANCE_TITLES_TIMEOUT_S,
+            )
+        except Exception as e:  # noqa: BLE001 - decorates a result
+            logger.warning(
+                "ordinance titles not read: %s: %s",
+                type(e).__name__,
+                str(e) or "timed out",
+            )
+        for ordinance, title in zip(found, titles):
+            subject = title if isinstance(title, str) and title else None
+            ordinance["subject"] = subject
+            ordinance["amends"] = list(
+                dict.fromkeys(
+                    n.upper()
+                    for n in ORDINANCE_TITLE_NUMBER_RE.findall(subject or "")
+                )
+            )
+
+    async def _ordinance_title(self, url: str) -> Optional[str]:
+        """The title of the ordinance at `url` ('' when its first page has
+        none), from memory, the shared cache, or the PDF itself. None when
+        the PDF could not be read; that is not remembered."""
+        if url in _ORDINANCE_TITLE_CACHE:
+            return _ORDINANCE_TITLE_CACHE[url]
+        path = "/laws-title/" + url.rsplit("/", 1)[-1]
+        shared = self._shared_cache_client()
+        code_date = await self._code_last_updated() if shared else None
+        title: Optional[str] = None
+        if shared and code_date:
+            stored = await self._shared_cache_get(shared, path, code_date)
+            if stored is not None:
+                title = stored["content"]
+        if title is None:
+            try:
+                pdf = await self._download_attachment(url)
+                page = await asyncio.to_thread(self._first_page_text, pdf)
+            except (EcodeAPIError, ToolInputError) as e:
+                logger.warning("ordinance title of %s not read: %s", url, e)
+                return None
+            title = self._ordinance_title_from_page(page) or ""
+            if shared and code_date:
+                await self._shared_cache_put(
+                    shared, path, code_date, {"content": title}
+                )
+        while len(_ORDINANCE_TITLE_CACHE) >= ORDINANCE_TITLE_CACHE_ENTRIES:
+            _ORDINANCE_TITLE_CACHE.pop(next(iter(_ORDINANCE_TITLE_CACHE)))
+        _ORDINANCE_TITLE_CACHE[url] = title
+        return title
+
+    @staticmethod
+    def _first_page_text(data: bytes) -> str:
+        """Synchronous; called through asyncio.to_thread."""
+        from pypdf import PdfReader
+
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            if reader.is_encrypted:
+                reader.decrypt("")
+            return reader.pages[0].extract_text() or ""
+        except Exception as e:
+            raise EcodeAPIError(
+                f"The ordinance PDF could not be opened ({type(e).__name__}).",
+                502,
+            ) from e
+
+    @staticmethod
+    def _ordinance_title_from_page(page_text: str) -> Optional[str]:
+        """'AN ORDINANCE ... .' from the first page, as printed, with the
+        drafting line numbers at the ends of its lines removed. None when
+        the page does not have that shape: nothing is guessed."""
+        start = ORDINANCE_TITLE_START_RE.search(page_text or "")
+        if not start:
+            return None
+        lines = page_text[start.start():start.start() + 4000].split("\n")
+        expected: Optional[int] = None
+        kept: List[str] = []
+        for line in lines:
+            line = line.rstrip()
+            numbered = re.search(r"(?:^|\s)(\d{1,2})$", line)
+            if numbered:
+                value = int(numbered.group(1))
+                # Line numbers count up from the title's first line; a
+                # trailing number that does not fit is part of the title
+                # ("... CHAPTER 9" with the line number missing).
+                if (expected is None and value <= 3) or value == expected:
+                    expected = value + 1
+                    line = line[: numbered.start()].rstrip()
+            kept.append(line)
+        text = "\n".join(kept)
+        end = ORDINANCE_TITLE_END_RE.search(text)
+        if not end:
+            return None
+        title = text[: end.start()]
+        if text[end.start()] == ".":
+            title += "."
+        title = " ".join(title.split())
+        if not 20 <= len(title) <= ORDINANCE_TITLE_MAX_CHARS:
+            return None
+        return title
 
     @staticmethod
     def _append_note(
@@ -6215,27 +6383,76 @@ class EcodePlugin(MCPPlugin):
         head, sep, tail = text.partition(trailer)
         return f"{head}\nNote: {message}{sep}{tail}"
 
+    @staticmethod
+    def _title_names_scope(ordinance: Dict[str, Any], scope: str) -> bool:
+        """Does the ordinance's title name this title or chapter?"""
+        if scope == "Charter":
+            return "CHARTER" in (ordinance.get("subject") or "").upper()
+        for number in ordinance.get("amends") or []:
+            if "." in scope:
+                if number == scope or number.startswith(scope + "."):
+                    return True
+            elif number.split(".")[0] == scope:
+                return True
+        return False
+
     def _with_pending_ordinances(
         self,
         text: str,
         structured: Dict[str, Any],
-        pending: Optional[List[Dict[str, str]]],
+        pending: Optional[List[Dict[str, Any]]],
+        scope: Optional[str] = None,
     ) -> tuple:
         """recent_ordinances: add what is newer than the whole list."""
-        structured = {**structured, "not_yet_codified": list(pending or [])}
-        if pending:
-            listed = "; ".join(f"{o['ordinance']} ({o['url']})" for o in pending)
+        listed_items: List[Dict[str, Any]] = []
+        for ordinance in pending or []:
+            item = dict(ordinance)
+            item.setdefault("subject", None)
+            item.setdefault("amends", [])
+            item["in_scope"] = (
+                self._title_names_scope(item, scope)
+                if scope and item["subject"]
+                else None
+            )
+            listed_items.append(item)
+        # Stable: those whose title names the scope first.
+        listed_items.sort(key=lambda o: o["in_scope"] is not True)
+        structured = {**structured, "not_yet_codified": listed_items}
+        if listed_items:
+            rows = "\n".join(
+                f"- {'[names it] ' if o['in_scope'] else ''}"
+                f"{o['ordinance']} ({o['url']}): "
+                + (o["subject"] or "(title not read)")
+                for o in listed_items
+            )
+            if scope:
+                kind = (
+                    "the Charter"
+                    if scope == "Charter"
+                    else f"{'Chapter' if '.' in scope else 'Title'} {scope}"
+                )
+                naming = sum(1 for o in listed_items if o["in_scope"])
+                where = (
+                    f" `within` does not filter them. Judged from the "
+                    f"titles alone, {naming} of them name(s) {kind} (marked "
+                    "[names it]); a title lists what its drafter chose to, "
+                    "so one that does not name it can still amend it."
+                )
+            else:
+                where = ""
             text = self._append_note(
                 text,
                 structured,
                 CAVEAT_ORDINANCES_NOT_YET_CODIFIED,
-                f"NEWER than everything listed above: {len(pending)} "
+                f"NEWER than everything listed above: {len(listed_items)} "
                 "ordinance(s) adopted but not yet worked into the code "
-                f"text, held by the publisher as PDFs: {listed}. The "
-                "sections they amend still show their earlier wording, and "
-                "nothing here says which chapters they touch, so `within` "
-                "does not filter them: read one with read_attachment to "
-                "find out. Mention them when asked what changed recently.",
+                "text, held by the publisher as PDFs. The sections they "
+                "amend still show their earlier wording. Each is shown "
+                "with its own title, read from the first page of its PDF; "
+                "words in [brackets] are deletions from an earlier version "
+                "of the title. Use the titles to decide which to read with "
+                "read_attachment, and mention them when asked what changed "
+                f"recently.{where}\n{rows}",
             )
         return text, structured
 
@@ -6254,7 +6471,21 @@ class EcodePlugin(MCPPlugin):
         structured = {**structured, "ordinance_pdfs": pdfs}
         if not pdfs:
             return text, structured
-        listed = "; ".join(f"{o['ordinance']} ({o['url']})" for o in pdfs)
+        pdfs = [
+            {
+                "ordinance": o["ordinance"],
+                "url": o["url"],
+                "subject": o.get("subject"),
+                "amends": list(o.get("amends") or []),
+            }
+            for o in pdfs
+        ]
+        structured["ordinance_pdfs"] = pdfs
+        listed = "; ".join(
+            f"{o['ordinance']} ({o['url']})"
+            + (f" -- its title: {o['subject']}" if o["subject"] else "")
+            for o in pdfs
+        )
         if not structured.get("found"):
             summary = (
                 f"{pdfs[0]['ordinance']} has been adopted but is not in the "
@@ -6272,7 +6503,8 @@ class EcodePlugin(MCPPlugin):
             f"The ordinance itself is available as a PDF: {listed}. Read "
             "it with read_attachment to see what it changes. It has not "
             "been worked into the code text yet, so the sections it amends "
-            "may still show their earlier wording.",
+            "may still show their earlier wording. Words in [brackets] in "
+            "a title are deletions from an earlier version of it.",
         )
         return text, structured
 
