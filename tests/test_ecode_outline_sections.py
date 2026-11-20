@@ -220,3 +220,29 @@ class TestStaleOutline:
 
         assert result.success is False
         assert _searches(p) == []
+
+
+class TestTrailingPunctuation:
+    """'21.05.010.' -- copied from the end of a sentence -- was taken for
+    a guid and refused as 'not alphanumeric'."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "ref", ["9.28.020.", "9.28.020,", "§ 9.28.020;", "Section 9.28.020.", "9.28.020. "]
+    )
+    async def test_section_number(self, ref):
+        p = _plugin()
+        result = await p.execute_tool("get_section", {"guid": ref})
+
+        assert result.success, result.error_message
+        assert _contents(p) == ["s928020"]
+
+    @pytest.mark.asyncio
+    async def test_chapter_and_scope(self):
+        p = _plugin()
+        assert (await p.execute_tool("browse_structure", {"guid": "Chapter 9.28."})).success
+        assert p.calls[-1].endswith("/structure/ch928")
+
+    def test_a_guid_is_untouched(self):
+        assert EcodePlugin._parse_ref("49401992") is None
+        assert EcodePlugin._parse_ref("49401992.") is None
