@@ -94,9 +94,14 @@ limits. The main design points:
   cached the same way for five minutes (`RECENT_CACHE_TTL_S`), bounded in
   size, so a section amended upstream can read stale for up to five
   minutes in a warm container. Failures are never cached.
-- **References resolved from the outline.** Chapter and title references are
-  looked up in the cached table of contents; three-part section numbers are
-  resolved by search.
+- **References resolved from the outline.** Chapter, title and section
+  references are all looked up in the cached table of contents. A section
+  number falls back to a search only when the outline is unavailable, does not
+  list the number, or lists it twice; search is the slow part of eCode360
+  (about one call in eight stalls for five seconds), and a batch read used to
+  make one search per section. If a guid taken from the outline turns out to
+  be gone (a republish inside the hour the outline is cached), search is asked
+  before the read fails.
 - **Credentials from the environment.** The plugin reads `ECODE_API_KEY` and
   `ECODE_API_SECRET`. They are never in `config.yaml`.
 

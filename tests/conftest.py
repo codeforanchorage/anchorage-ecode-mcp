@@ -63,6 +63,23 @@ def no_code_date_lookup(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def section_numbers_by_search(request, monkeypatch):
+    """Resolve section numbers by search, as before 1.17.0, unless the
+    test is marked `outline_sections`.
+
+    Since 1.17.0 a number is looked up in the table of contents first,
+    which is one more upstream call ahead of the ones most tests script
+    in order. The search path is still the fallback in production, so
+    those tests keep covering real behaviour.
+    """
+    if request.node.get_closest_marker("outline_sections"):
+        return
+    from plugins.ecode import plugin as ecode_plugin
+
+    monkeypatch.setattr(ecode_plugin, "RESOLVE_SECTIONS_FROM_OUTLINE", False)
+
+
+@pytest.fixture(autouse=True)
 def reset_http_handler_globals():
     """Snapshot and restore ``server.http_handler``'s module globals.
 
