@@ -208,6 +208,18 @@ history note cites the ordinance.
   for `read_attachment`, and the result carries an
   `ordinances_not_yet_codified` caveat. If the search fails the list is empty
   and the rest of the result is unaffected.
+- Each of those ordinances also has a `subject`, the ordinance's own title
+  read from the first page of its PDF ("AN ORDINANCE ... AMENDING ANCHORAGE
+  MUNICIPAL CODE CHAPTER ..."), and `amends`, the chapter and section numbers
+  that title names. With `within`, `in_scope` says whether the title names
+  that title or chapter, and those that do are listed first. This lets a
+  caller pick which PDFs to read; before it, finding the ones that touch a
+  given title meant reading every PDF in full. A title lists what its drafter
+  chose to, so `in_scope: false` is not proof an ordinance leaves that part
+  of the code alone. Titles are cached per container and in the shared cache
+  bucket; one that cannot be read is null and nothing else is affected.
+  `find_ordinance` returns the same `subject` and `amends` in
+  `ordinance_pdfs`.
 - If the table is missing or its layout changes so that no row can be read, the
   result is empty with an `ordinance_list_unavailable` caveat, which is not
   evidence that nothing changed.
