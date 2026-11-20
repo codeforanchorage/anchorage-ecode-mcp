@@ -1751,7 +1751,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.17.0"
+    plugin_version = "1.17.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2902,7 +2902,10 @@ class EcodePlugin(MCPPlugin):
         """
         if not isinstance(raw, str):
             return None
-        match = REF_WITH_KIND_RE.match(raw.strip())
+        # "21.05.010." -- a number copied from the end of a sentence. The
+        # full stop is not part of it; left on, the whole thing was taken
+        # for a guid and refused.
+        match = REF_WITH_KIND_RE.match(raw.strip().rstrip(".,;:").rstrip())
         if not match:
             return None
         word = " ".join((match.group(1) or "").lower().split()).rstrip(".")
@@ -6740,6 +6743,13 @@ class EcodePlugin(MCPPlugin):
                 f"{found[0][0]}-{found[0][1]}'."
             )
         first, second, suffix = found[0]
+        # Before 2000 the year is written with two digits everywhere: in
+        # the disposition table and in every history note ("AO No. 94-113").
+        # "1994-113" is that ordinance, and looked up as typed it matched
+        # nothing, table or citations.
+        century = re.fullmatch(r"19(\d\d)", first)
+        if century:
+            first = century.group(1)
         # "2025-094" is 2025-94; the table never pads.
         base = f"{first.lstrip('0') or '0'}-{second.lstrip('0') or '0'}"
         return base, base + suffix.replace(" ", "")

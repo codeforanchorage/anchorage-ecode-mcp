@@ -1095,3 +1095,30 @@ class TestCitingSections:
         sc, _ = await _find("2031-7", _plugin_citing({'"2031-7"': hits}))
 
         assert sc["citing_sections"][0]["cited_as"] == "AO No. 2031-7, 10-20-2031"
+
+
+# ── 1.19.1 ───────────────────────────────────────────────────────────────
+
+
+class TestFourDigitYearEverywhere:
+    """'1994-113' found nothing while '94-113' found the section that cites
+    it: the short year was only tried against the table."""
+
+    @pytest.mark.parametrize(
+        "asked, base",
+        [("AO 1994-113", "94-113"), ("1985-8", "85-8"), ("1977-407", "77-407"),
+         ("AO No. 1999-91(S)", "99-91"), ("2000-4", "2000-4"), ("94-113", "94-113")],
+    )
+    def test_number_is_looked_up_with_the_short_year(self, asked, base):
+        assert EcodePlugin._ordinance_number_arg({"ordinance": asked})[0] == base
+
+    @pytest.mark.asyncio
+    async def test_citing_sections_are_found_for_the_long_form(self):
+        hits = [_cite_hit("a", "§\xa03.20.090", "T",
+                          "( AO No. 79-63 ; AO No. 94-113 , 8-25-1994 )")]
+        p = _plugin_citing({'"94-113"': hits})
+        sc, _ = await _find("AO 1994-113", p)
+
+        assert sc["search_query"] == '"94-113"'
+        assert [r["guid"] for r in sc["citing_sections"]] == ["a"]
+        assert sc["citing_sections"][0]["cited_as"] == "AO No. 94-113, 8-25-1994"
