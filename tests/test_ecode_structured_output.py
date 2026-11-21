@@ -471,6 +471,50 @@ class TestSectionStructure:
         validate(structured, SECTION_OUTPUT_SCHEMA)
         assert structured["has_attachment"] is True
 
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "(Reserved)",
+            "Reserved",
+            "Repealed.",
+            "(Repealed).",
+            "(REPEALED)",
+            "Penalty (Repealed).",
+            "Penalty (Reserved).",
+            "Runaway overnight shelter license (Reserved).",
+            "through § 19.20.170. (Reserved)",
+            "Anchorage Telephone Utility. (Repealed)",
+            "Repealed by AO No. 98-51(S)",
+            "Superseded by Ord. 2020-1",
+        ],
+    )
+    def test_headings_the_code_uses_for_a_dead_section(self, title):
+        assert EcodePlugin._inactive_marker("§ 4.1", title)
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            # Every one of these is in force on the published code. The
+            # marker was a substring match, so § 9.30.235 -- the disabled
+            # parking rule, with its fine -- came back "marked RESERVED...
+            # not operative law".
+            "Parking reserved for persons with disabilities.",
+            '"Reserved area"',
+            '"Reserve strips."',
+            "Reservation of funds due under contract.",
+            "Reservations, use and disinterment of burial sites.",
+            "Limousines—Reservation service.",
+            "Signs in residential districts and the development reserve "
+            "district (DR).",
+            "Effect of repeal of ordinances.",
+            "Repeal or amendment.",
+            "Rights reserved by the municipality.",
+            "Ordinances repealed or superseded; effect.",
+        ],
+    )
+    def test_headings_that_only_contain_the_word(self, title):
+        assert EcodePlugin._inactive_marker("§ 9.30.235", title) is None
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "title", ["(Reserved)", "Repealed", "Superseded by Ord. 2020-1"]

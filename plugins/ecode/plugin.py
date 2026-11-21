@@ -524,6 +524,23 @@ INACTIVE_TITLE_MARKERS = (
     "superseded",
     "rescinded",
 )
+# The word alone is not enough: "Parking reserved for persons with
+# disabilities" (§ 9.30.235) is in force, as is the definition of "Reserved
+# area". The published code marks a dead heading in one of three ways, and
+# only these count (surveyed 2026-11-20 across every heading containing one
+# of the words):
+#   in parentheses    "(Reserved)", "Penalty (Repealed).", "(REPEALED)",
+#                     "through § 19.20.170. (Reserved)"
+#   as the whole heading            "Repealed.", "Reserved"
+#   leading, then who or what did it    "Repealed by AO No. 98-51(S)",
+#                                       "Superseded by Ord. 2020-1"
+_INACTIVE_WORDS = "|".join(INACTIVE_TITLE_MARKERS)
+INACTIVE_TITLE_RE = re.compile(
+    rf"\(\s*(?P<paren>{_INACTIVE_WORDS})\b[^)]*\)"
+    rf"|^\W*(?P<whole>{_INACTIVE_WORDS})\W*$"
+    rf"|^\W*(?P<lead>{_INACTIVE_WORDS})\s+(?:by|per|under|pursuant)\b",
+    re.IGNORECASE,
+)
 
 _CAVEAT_SCHEMA = {
     "type": "array",
@@ -5814,10 +5831,12 @@ class EcodePlugin(MCPPlugin):
         that are perfectly in force -- an ordinance repealing something else
         -- so matching content would cry wolf on ordinary law.
         """
-        heading = f"{ref or ''} {title or ''}".lower()
-        for marker in INACTIVE_TITLE_MARKERS:
-            if marker in heading:
-                return marker
+        for heading in (title, ref):
+            match = INACTIVE_TITLE_RE.search(" ".join((heading or "").split()))
+            if match:
+                return (
+                    match.group("paren") or match.group("whole") or match.group("lead")
+                ).lower()
         return None
 
     @staticmethod
