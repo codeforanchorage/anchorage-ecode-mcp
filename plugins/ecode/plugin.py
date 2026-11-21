@@ -432,6 +432,9 @@ REFERENCE_NUMBER_RE = re.compile(
     r"^([A-Za-z]{0,2}\d{1,3}\.\d{1,3}\.\d{1,4})([A-Za-z0-9.()]*)$"
 )
 REFERENCE_PREFIX_RE = re.compile(r"(?i)^(?:§+|sec(?:tion|\.)?)\s*")
+# A subsection as the published code writes it: levels joined by full
+# stops, the first one directly after the number ("B", "B.2", "A.3.a").
+REFERENCE_SUBSECTION_RE = re.compile(r"^[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
 REFERENCE_TABLE_REF_RE = re.compile(r"^[A-Z]{2,}\.")
 FINE_OR_PENALTY_TITLE_RE = re.compile(r"(?i)\b(fines?|penalt(?:y|ies))\b")
 REFERENCE_TABLE_TITLE_RE = re.compile(
@@ -4616,7 +4619,34 @@ class EcodePlugin(MCPPlugin):
                 "or title is cited too widely to list: use search_code for "
                 "that."
             )
-        return number, match.group(1)
+        # The code writes a subsection as "9.28.019B.2". People, and
+        # other codes, write "9.28.019(B)(2)" -- and in a search query
+        # parentheses are GROUPING, so "9.28.019(B)*" was read as
+        # "9.28.019 OR B*": 8,289 sections for a number cited by 3. So a
+        # suffix is rewritten to the code's own form before it is searched
+        # for, and one that cannot be is refused, never sent as it is.
+        base, suffix = match.group(1), match.group(2)
+        levels = [
+            part
+            for part in re.split(r"[().]+", suffix)
+            if part
+        ]
+        subsection = ".".join(levels)
+        balanced = suffix.count("(") == suffix.count(")") and "()" not in suffix
+        if subsection and not (
+            balanced and REFERENCE_SUBSECTION_RE.match(subsection)
+        ):
+            raise ToolInputError(
+                f"{text!r} is not a section number this tool can search "
+                "for. Write a subsection as the code does, e.g. "
+                "'9.28.019B.2', or as '9.28.019(B)(2)'."
+            )
+        if suffix and not subsection:
+            raise ToolInputError(
+                f"{text!r} is not a section number. Pass a full section "
+                "number such as '9.14.040' or '9.28.019B'."
+            )
+        return base + subsection, base
 
     @staticmethod
     def _reference_kind(

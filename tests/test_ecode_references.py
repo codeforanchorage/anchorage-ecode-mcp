@@ -120,6 +120,41 @@ class TestFindReferences:
         assert sc["section"] == number
         assert _sent_query(plugin) == number + "*"
 
+    @pytest.mark.parametrize(
+        "given, number",
+        [
+            # Parentheses are grouping in a search query: "9.28.019(B)*"
+            # was read as "9.28.019 OR B*" and matched 8,289 sections.
+            # The code itself writes "9.28.019B.2".
+            ("9.28.019(B)", "9.28.019B"),
+            ("9.28.019(B)(2)", "9.28.019B.2"),
+            ("§ 9.14.040(A)(3)(a)", "9.14.040A.3.a"),
+            ("9.28.019B(2)", "9.28.019B.2"),
+            ("9.28.019.B.2", "9.28.019B.2"),
+            ("9.28.019(B).", "9.28.019B"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_parenthesised_subsection_is_rewritten(self, plugin, given, number):
+        _wire(plugin, [])
+        sc, _ = await _refs(plugin, {"section": given})
+        assert sc["section"] == number
+        sent = _sent_query(plugin)
+        assert sent == number + "*"
+        assert "(" not in sent and ")" not in sent
+
+    @pytest.mark.parametrize(
+        "given", ["9.28.019(B", "9.28.019B)", "9.28.019()", "9.28.019((B))x)"]
+    )
+    @pytest.mark.asyncio
+    async def test_a_suffix_that_cannot_be_rewritten_is_refused(self, plugin, given):
+        _wire(plugin, [])
+        result = await plugin.execute_tool("find_references", {"section": given})
+        assert result.success is False
+        assert "section number" in result.error_message
+        # Nothing was searched for.
+        assert plugin.client.get.await_count == 0
+
     @pytest.mark.asyncio
     async def test_subsection_drops_every_node_of_its_section(self, plugin):
         _wire(plugin, [
