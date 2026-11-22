@@ -285,6 +285,25 @@ class TestNoMatchInCode:
         )
         assert _codes(sc) == [CAVEAT_PAGE_PAST_END]
 
+    @pytest.mark.parametrize("tool, args", [
+        ("search_code", {"query": "dog license"}),
+        ("search_code", {"query": "dog license", "within": "Title 17"}),
+        ("find_references", {"section": "9.28.019"}),
+    ])
+    @pytest.mark.parametrize("page", [100_001, 2**31 - 1, 10**20])
+    @pytest.mark.asyncio
+    async def test_absurd_page_is_refused_without_a_request(
+        self, plugin, tool, args, page
+    ):
+        """eCode360 answers 500 once page x 20 overflows 32 bits; that was
+        retried three times and logged as a server fault. It is a caller
+        mistake and never goes upstream."""
+        _wire(plugin, {})
+        result = await plugin.execute_tool(tool, {**args, "page": page})
+        assert result.success is False
+        assert "page must be at most" in result.error_message
+        plugin.client.get.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_unmeasured_total_is_not_no_match(self, plugin):
         """Rows but no totalResultCount is an UNMEASURED total (null), not a

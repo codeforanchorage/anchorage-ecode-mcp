@@ -215,6 +215,12 @@ MAX_TERM_CHARS = 100
 # (a scoped search sends the query up to SCOPE_SCAN_PAGES times).
 MAX_QUERY_CHARS = 2000
 MAX_WITHIN_CHARS = 200
+# Highest search page accepted. eCode360 answers HTTP 500 once
+# page x 20 overflows a 32-bit integer (about page 107 million), which
+# was retried three times and logged as a server fault. No query has
+# anywhere near this many pages: one matching every node in the code
+# is under 300.
+MAX_SEARCH_PAGE = 100_000
 
 # A whole chapter or title can be read by guid or number ("Title 21" is
 # 1.9 million characters, 3.5 MB of JSON -- measured 2026-11-15), and a
@@ -1771,7 +1777,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.17.1"
+    plugin_version = "1.17.4"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2376,12 +2382,7 @@ class EcodePlugin(MCPPlugin):
                         f"characters, got {len(query)}). Search for a "
                         "phrase or a few terms joined with AND."
                     )
-                page = self._int_arg(arguments, "page", 0)
-                if page < 0:
-                    raise ToolInputError(
-                        f"page must be 0 or greater (got {page}); results are "
-                        "0-indexed, 20 per page."
-                    )
+                page = self._search_page_arg(arguments)
                 within = arguments.get("within")
                 if within is not None and str(within).strip():
                     if len(str(within).strip()) > MAX_WITHIN_CHARS:
@@ -2478,12 +2479,7 @@ class EcodePlugin(MCPPlugin):
 
             if tool_name == "find_references":
                 number, base = self._reference_arg(arguments)
-                page = self._int_arg(arguments, "page", 0)
-                if page < 0:
-                    raise ToolInputError(
-                        f"page must be 0 or greater (got {page}); results are "
-                        "0-indexed, 20 per page."
-                    )
+                page = self._search_page_arg(arguments)
                 data = await self._search(f"{number}*", page)
                 return self._ok(
                     *self._format_references(number, base, data, page)
@@ -2623,6 +2619,23 @@ class EcodePlugin(MCPPlugin):
             return int(raw)
         except (TypeError, ValueError, OverflowError) as exc:
             raise refused from exc
+
+    @classmethod
+    def _search_page_arg(cls, args: Dict[str, Any]) -> int:
+        """The 0-indexed `page` of a search, checked at both ends."""
+        page = cls._int_arg(args, "page", 0)
+        if page < 0:
+            raise ToolInputError(
+                f"page must be 0 or greater (got {page}); results are "
+                "0-indexed, 20 per page."
+            )
+        if page > MAX_SEARCH_PAGE:
+            raise ToolInputError(
+                f"page must be at most {MAX_SEARCH_PAGE} (got {page}); "
+                "results are 0-indexed, 20 per page, and the result says "
+                "how many pages a query has."
+            )
+        return page
 
     @staticmethod
     def _guid_arg(
