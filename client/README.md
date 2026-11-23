@@ -1,92 +1,62 @@
-# OpenContext Client
+# Stdio client
 
-Stdio client for connecting Claude Desktop to OpenContext MCP servers.
+A small Go program that lets an MCP client which only speaks stdio (for
+example Claude Desktop through its config file) talk to this server over
+HTTP. It is optional: the usual way to connect is a custom connector, which
+needs nothing installed. See the [Quick Start](../docs/QUICKSTART.md).
 
-## Installation
+The client comes from upstream OpenContext and keeps its names
+(`opencontext-client`, `OPENCONTEXT_*`).
 
-### Download Binary
+## Build
 
-Download the latest binary for your platform from the [Releases](https://github.com/thealphacubicle/OpenContext/releases) page.
-
-- macOS (Intel): `opencontext-client-darwin-amd64`
-- macOS (Apple Silicon): `opencontext-client-darwin-arm64`
-- Linux (Intel): `opencontext-client-linux-amd64`
-- Windows: `opencontext-client-windows-amd64.exe`
-
-Make the binary executable:
-
-```bash
-chmod +x opencontext-client-darwin-arm64
-mv opencontext-client-darwin-arm64 opencontext-client
-```
-
-### Build from Source
-
-Requirements: Go 1.21+
-
-**Build for your platform:**
+There are no prebuilt binaries for this repo. Build from source with Go 1.21
+or newer:
 
 ```bash
 cd client
-make build
+make build        # this platform
+make build-all    # macOS (Intel/ARM), Linux (amd64/arm64), Windows (amd64)
 ```
 
-**Build for all platforms (cross-compilation):**
+## Use
+
+Give it the server address. `/mcp` is added if the address does not already
+end with it.
 
 ```bash
-cd client
-make build-all
+./opencontext-client https://anchorage-ecode.codeforanchorage.org/mcp
+
+# or
+export OPENCONTEXT_LAMBDA_URL=https://anchorage-ecode.codeforanchorage.org/mcp
+./opencontext-client
 ```
 
-This produces binaries for macOS (Intel/ARM), Linux (amd64/arm64), and Windows (amd64).
+For your own deployment, use the address printed by
+`terraform output -raw api_gateway_url`; for a local server,
+`http://localhost:8000/mcp`.
 
-## Usage
-
-### Connecting to Claude
-
-**Recommended: Claude Connectors** (same on Claude.ai and Claude Desktop)
-
-1. Go to **Settings** → **Connectors** (or **Customize** → **Connectors** on claude.ai)
-2. Click **Add custom connector**
-3. Enter a name and your API Gateway or Lambda URL (e.g. `https://xxx.execute-api.us-east-1.amazonaws.com/staging/mcp`)
-
-**Alternative: Go client with Claude Desktop config**
-
-If you prefer the config file approach, add to `claude_desktop_config.json`:
+### Claude Desktop config file
 
 ```json
 {
   "mcpServers": {
-    "my-mcp-server": {
+    "anchorage-municipal-code": {
       "command": "/path/to/opencontext-client",
-      "args": ["https://your-lambda-url.lambda-url.us-east-1.on.aws"]
+      "args": ["https://anchorage-ecode.codeforanchorage.org/mcp"]
     }
   }
 }
 ```
 
-The client automatically appends `/mcp` to the Lambda URL.
+## Environment variables
 
-### Command Line
+- `OPENCONTEXT_LAMBDA_URL`: the server address, if not given as an argument.
+  The name is historical; any address of this server works.
+- `OPENCONTEXT_TIMEOUT`: HTTP request timeout in seconds (default 30)
 
-```bash
-# Using Lambda URL as argument
-./opencontext-client https://your-lambda-url.lambda-url.us-east-1.on.aws
+## How it works
 
-# Using environment variable
-export OPENCONTEXT_LAMBDA_URL=https://your-lambda-url.lambda-url.us-east-1.on.aws
-./opencontext-client
-```
-
-## Environment Variables
-
-- `OPENCONTEXT_LAMBDA_URL`: Lambda Function URL (required if not provided as argument)
-- `OPENCONTEXT_TIMEOUT`: HTTP request timeout in seconds (default: 30)
-
-## How It Works
-
-The client reads MCP JSON-RPC messages from stdin and forwards them to the Lambda Function URL's `/mcp` endpoint via HTTP POST. Responses are written to stdout in the same JSON-RPC format.
-
-This allows Claude Desktop to communicate with OpenContext MCP servers running on AWS Lambda using the stdio transport protocol, bridging it to HTTP.
-
-**Note:** The recommended way to connect is via [Claude Connectors](https://claude.ai/customize/connectors) (works on both Claude.ai and Claude Desktop). The Go client is an alternative for the config file approach.
+The client reads MCP JSON-RPC messages from stdin, sends each to the server's
+`/mcp` endpoint with an HTTP POST, and writes the responses to stdout.
+`stdio_bridge.py` in the repo root does the same job in Python.

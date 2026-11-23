@@ -1,9 +1,10 @@
 [project]
-name = "opencontext"
+name = "anchorage-ecode-mcp"
 version = "1.1.0"
-description = "Extensible MCP framework template for civic data platforms"
+description = "MCP server for the Municipality of Anchorage municipal code, as published on eCode360"
+# Started from OpenContext by Srihari Raman, City of Boston (see README).
 authors = [
-    {name = "Srihari Raman", email = "srihari.raman@boston.gov"}
+    {name = "Code for Anchorage"}
 ]
 license = {text = "MIT"}
 readme = "README.md"
@@ -39,9 +40,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/thealphacubicle/OpenContext"
-Documentation = "https://github.com/thealphacubicle/OpenContext/blob/main/README.md"
-Repository = "https://github.com/thealphacubicle/OpenContext"
+Homepage = "https://github.com/codeforanchorage/anchorage-ecode-mcp"
+Documentation = "https://github.com/codeforanchorage/anchorage-ecode-mcp/blob/main/docs/GETTING_STARTED.md"
+Repository = "https://github.com/codeforanchorage/anchorage-ecode-mcp"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
