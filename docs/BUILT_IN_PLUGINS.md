@@ -71,7 +71,10 @@ requested node.
 - `total_count` is the number of hits inside the scope when every hit for the
   query was checked, and `null` otherwise, with a `scope_scan_partial` caveat.
 - PDF documents have no place in the outline and are left out, with a
-  `scope_unplaced_hits` caveat.
+  `scope_unplaced_hits` caveat. The exception is a PDF attached to a whole
+  title (the Charter Commission Commentary, the Title 21 use tables): it is
+  kept when `within` takes in that title, and left out with the caveat when
+  `within` is a chapter or section of it.
 - A scope that matches more than one node (`17.05` is both a chapter and a
   Charter section) is refused with the candidates listed.
 - `title:` in a query is a different thing: it matches words in a section's

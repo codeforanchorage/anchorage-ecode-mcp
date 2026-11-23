@@ -1847,7 +1847,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.18.0"
+    plugin_version = "1.18.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -3458,14 +3458,29 @@ class EcodePlugin(MCPPlugin):
         all_guids: set = set()
         by_number: Dict[str, set] = {}
         found: List[Dict[str, Any]] = []
+        # Title index number ("ttl cha") -> that title's guid, and the
+        # title the scope sits inside, for placing a title's attachments.
+        titles: Dict[str, str] = {}
+        inside_title: List[str] = []
 
-        def walk(node: Any, inside: bool) -> None:
+        def walk(node: Any, inside: bool, title: str = "") -> None:
             if not isinstance(node, dict):
                 return
             node_guid = str(node.get("guid") or "")
+            is_title = (node.get("label") or "").strip().lower() == "title"
+            if is_title and node_guid:
+                index_num = " ".join(
+                    (node.get("indexNum") or "").lower().split()
+                )
+                if index_num:
+                    titles[index_num] = node_guid
             if node_guid == guid and not found:
                 found.append(node)
                 inside = True
+                if title:
+                    inside_title.append(title)
+            if is_title and node_guid:
+                title = node_guid
             if node_guid:
                 all_guids.add(node_guid)
                 if inside:
@@ -3475,7 +3490,7 @@ class EcodePlugin(MCPPlugin):
                     if number:
                         by_number.setdefault(number, set()).add(node_guid)
             for child in node.get("children") or []:
-                walk(child, inside)
+                walk(child, inside, title)
 
         walk(toc, False)
         if not found:
@@ -3505,15 +3520,35 @@ class EcodePlugin(MCPPlugin):
             "in_scope": in_scope,
             "all_guids": all_guids,
             "by_number": by_number,
+            "titles": titles,
+            "inside_title": inside_title[0] if inside_title else "",
         }
 
     def _hit_in_scope(
         self, hit: Dict[str, Any], scope: Dict[str, Any]
     ) -> Optional[bool]:
         """True / False when the hit can be placed, None when it cannot
-        (a PDF document, or a node unknown to the outline)."""
+        (a PDF document, or a node unknown to the outline).
+
+        One kind of PDF can be placed: an attachment to a whole title,
+        whose id starts with the title's index number ("Ttl CHA: ...").
+        It belongs to that title and to nothing smaller, so it is in a
+        scope that takes in the title, out of a scope elsewhere, and
+        unplaced when the scope is a part of that same title."""
         if hit.get("pdf") or hit.get("type") == "doc":
-            return None
+            match = TITLE_ATTACHMENT_ID_RE.match(str(hit.get("id") or ""))
+            if not match:
+                return None
+            title_guid = (scope.get("titles") or {}).get(
+                " ".join(match.group(1).lower().split())
+            )
+            if not title_guid:
+                return None
+            if title_guid in scope["in_scope"]:
+                return True
+            if title_guid == scope.get("inside_title"):
+                return None
+            return False
         guid = str(hit.get("id") or self._guid_from_url(hit.get("url", "")))
         if guid in scope["all_guids"]:
             return guid in scope["in_scope"]
@@ -3684,7 +3719,14 @@ class EcodePlugin(MCPPlugin):
                 (
                     CAVEAT_SCOPE_UNPLACED_HITS,
                     f"{what} cannot be assigned to a title or chapter and "
-                    "were left out. Search without `within` to see them.",
+                    "were left out"
+                    + (
+                        " (a PDF attached to a whole title is shown only "
+                        "when `within` takes in that title)"
+                        if documents
+                        else ""
+                    )
+                    + ". Search without `within` to see them.",
                 )
             )
         title_caveat = self._title_number_caveat(query)

@@ -605,6 +605,19 @@ except Exception as e:
           False, repr(e))
 
 try:
+    r = call_tool("search_code", {"query": "commentary", "within": "Charter"})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__search_code", sc)
+    check("search within the Charter keeps the PDF attached to that title",
+          ok and any("Commentary" in (row.get("title") or "")
+                     and ".pdf" in (row.get("url") or "").lower()
+                     for row in sc.get("rows") or []),
+          why or text_of(r)[:120])
+except Exception as e:
+    check("search within the Charter keeps the PDF attached to that title",
+          False, repr(e))
+
+try:
     r = call_tool("read_attachment",
                   {"url": "https://example.com/attachment/1/a.pdf"})
     check("read_attachment: a non-eCode360 url is refused",

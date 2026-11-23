@@ -115,6 +115,18 @@ PDF = _hit("753304506", None, "Anchorage OLD Title 21", pdf=True,
            type="doc",
            url="https://live.ecode360.com/documents/AN6998/public/x.pdf")
 ORPHAN = _hit("zz9", "Appendix Q", "Not in the outline")
+# A PDF attached to a whole title: its id starts with the title's index
+# number.
+COMMENTARY = _hit(
+    "Ttl CHA: AN6998-CHAb Commission Commentary.pdf", None,
+    "Attachment 2 - Commission Commentary", pdf=True, type="doc",
+    url="https://live.ecode360.com/attachment/339626/"
+        "AN6998-CHAb Commission Commentary.pdf")
+USE_TABLE = _hit(
+    "Ttl 21: AN6998-021a Table 21.05-1.pdf", None,
+    "Attachment 1 - Table 21.05-1", pdf=True, type="doc",
+    url="https://live.ecode360.com/attachment/339626/"
+        "AN6998-021a Table 21.05-1.pdf")
 
 MIXED = [DEF_VEHICLE, ZONING, DUI, PDF, DEF_LOT, CH_928, DEFS_9]
 
@@ -784,3 +796,54 @@ class TestNamedPartsInOtherTools:
         )
         assert result.success is False
         assert not any("/code/content/" in c for c in p.calls)
+
+
+class TestTitleAttachmentsInScope:
+    """A PDF attached to a whole title is a hit of that title."""
+
+    @pytest.mark.asyncio
+    async def test_kept_when_the_scope_is_its_title(self):
+        sc, text = await _run(
+            _plugin({0: [COMMENTARY, USE_TABLE, DUI, PDF]}), "Charter")
+        assert [r["title"] for r in sc["rows"]] == [
+            "Attachment 2 - Commission Commentary"]
+        assert sc["total_count"] == 1
+        assert sc["rows"][0]["url"].endswith(".pdf")
+        # The other title's table is elsewhere, not unplaced; the loose
+        # document still cannot be placed.
+        note = next(c["message"] for c in sc["caveats"]
+                    if c["code"] == "scope_unplaced_hits")
+        assert "1 PDF document hit(s)" in note
+
+    @pytest.mark.asyncio
+    async def test_by_title_number(self):
+        sc, _ = await _run(_plugin({0: [COMMENTARY, USE_TABLE]}), "Title 21")
+        assert [r["title"] for r in sc["rows"]] == [
+            "Attachment 1 - Table 21.05-1"]
+        assert "scope_unplaced_hits" not in [
+            c["code"] for c in sc["caveats"]]
+
+    @pytest.mark.asyncio
+    async def test_unplaced_when_the_scope_is_a_part_of_its_title(self):
+        """Attached to the title, not to this chapter: said, not guessed."""
+        sc, _ = await _run(
+            _plugin({0: [USE_TABLE, ZONING]}), "Chapter 21.15")
+        assert [r["guid"] for r in sc["rows"]] == ["s2115040"]
+        note = next(c["message"] for c in sc["caveats"]
+                    if c["code"] == "scope_unplaced_hits")
+        assert "1 PDF document hit(s)" in note
+        assert "takes in that title" in note
+
+    @pytest.mark.asyncio
+    async def test_out_of_scope_elsewhere_is_not_reported(self):
+        sc, _ = await _run(_plugin({0: [USE_TABLE, DUI]}), "Chapter 9.28")
+        assert [r["guid"] for r in sc["rows"]] == ["s928020"]
+        assert "scope_unplaced_hits" not in [
+            c["code"] for c in sc["caveats"]]
+
+    @pytest.mark.asyncio
+    async def test_unknown_title_prefix_stays_unplaced(self):
+        odd = dict(COMMENTARY, id="Ttl ZZ: AN6998-ZZa Something.pdf")
+        sc, _ = await _run(_plugin({0: [odd, DUI]}), "Title 9")
+        assert [r["guid"] for r in sc["rows"]] == ["s928020"]
+        assert "scope_unplaced_hits" in [c["code"] for c in sc["caveats"]]
