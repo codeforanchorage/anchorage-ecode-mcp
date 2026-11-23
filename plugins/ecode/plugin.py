@@ -261,6 +261,30 @@ LAW_PATH_TEMPLATE = r"^/{customer}/laws/LF\d+\.pdf$"
 # returns PDFs that merely mention it.
 PENDING_ORDINANCE_QUERY = 'title:"AO No"'
 PENDING_ORDINANCE_PAGES = 3
+# Some PDFs are attached to a whole TITLE, not to a section: the Charter
+# Commission Commentary, the Title 21 use tables, the community council
+# bylaws. A section that relies on one says so in a note ("... is included
+# as an attachment to this title") but its content carries no link, and
+# neither does the title's structure node. Checked live 2026-11-22: 33
+# sections have such a note (16 in the Charter, 13 in Title 21) and every
+# one came back with `attachments` empty. The PDFs are reachable only by
+# search, where each is a hit titled "Attachment <n> - <name>" whose id
+# starts with its title's index number ("Ttl CHA: AN6998-CHAb Commission
+# Commentary on Anchorage Municipal Charter.pdf"); this one query lists
+# them all (15 PDFs across six titles).
+TITLE_ATTACHMENT_NOTE_RE = re.compile(
+    r"included\s+as\s+(?:an\s+)?attachments?\s+to\s+this\s+title",
+    re.IGNORECASE,
+)
+TITLE_ATTACHMENT_QUERY = "title:attachment"
+TITLE_ATTACHMENT_PAGES = 3
+TITLE_ATTACHMENT_ID_RE = re.compile(r"^(Ttl\s+\S+?):\s")
+# "AN6998-CHAb Commission Commentary on Anchorage Municipal Charter.pdf"
+# -> "Commission Commentary on Anchorage Municipal Charter".
+TITLE_ATTACHMENT_FILE_RE = re.compile(
+    r"^[A-Z0-9]+-\S+\s+(.+?)\.pdf$", re.IGNORECASE
+)
+_TITLE_ATTACHMENTS_KEY = "title-attachments"
 # Each of those ordinances states what it does in its own title, on the
 # first page: "AN ORDINANCE OF THE ANCHORAGE MUNICIPAL ASSEMBLY AMENDING
 # ANCHORAGE MUNICIPAL CODE CHAPTER 4.60 AND 27.30.085 TO ENACT ...". The
@@ -361,6 +385,7 @@ CAVEAT_PROXIMITY_IGNORED = "proximity_ignored"
 CAVEAT_NO_TEXT_LAYER = "no_text_layer"
 CAVEAT_NO_REFERENCES_FOUND = "no_references_found"
 CAVEAT_LIST_POSITION_INFERRED = "list_position_inferred"
+CAVEAT_TITLE_ATTACHMENTS = "title_attachments"
 CAVEAT_SUBSECTION_OF_SECTION = "subsection_read_as_whole_section"
 CAVEAT_DEFINITION_LOOKUP = "definition_lookup"
 CAVEAT_RELAXED_MATCH = "relaxed_match"
@@ -465,6 +490,39 @@ REFERENCE_KIND_ORDER = ("fine_or_penalty", "section", "document", "reference_tab
 # assembly shall ...") is not a list lead-in. Surveyed on six chapters
 # (743 nodes with children): 15 had such a colon, 6 of them headings.
 LIST_LEAD_IN_RE = re.compile(r':\s+(?=["\u201c(]?[A-Z])')
+# The content endpoint also flattens footnotes: an editor's note arrives
+# inside the text at the place its footnote mark stood, with nothing to
+# show where it stops. Charter Section 3.01 read "Editor's Notes \u2013 There
+# are Charter Commission Commentary notes on this section. Said Commentary
+# is included as an attachment to this title. The municipality may
+# exercise all legislative powers ..." -- note and law as one paragraph.
+#
+# Surveyed 2026-11-22 on all 553 sections that have such a note (627
+# notes). The end of a note can be told in two cases only, and those are
+# the ones put on a line of their own:
+#   - it ends "... included as an attachment to this title." (45 notes);
+#   - it stood in the middle of a sentence, which leaves a full stop and
+#     TWO spaces where the sentence resumes ("See AS 23.40.205.  any
+#     federal or state regulation", 12 notes). Two spaces alone prove
+#     nothing (492 in those sections, 13 after a note), so the note must
+#     also be short.
+# The rest either run to the end of their node (450, already unambiguous
+# to a reader), sit inside the history note (78), or are followed by law
+# after a single space with no mark at all; those are left as published.
+_EDITOR_NOTE_START = r"Editor[\u2019']s\s+[Nn]otes?\s*(?:[\u2013\u2014-]|:)\s"
+EDITOR_NOTE_RE = re.compile(
+    r"\s*("
+    + _EDITOR_NOTE_START
+    + r"(?:(?!Editor[\u2019']s\s+[Nn]ote).){0,400}?"
+    r"attachments?\s+to\s+this\s+title\s*\."
+    r"|"
+    + _EDITOR_NOTE_START
+    + r"(?:(?!Editor[\u2019']s\s+[Nn]ote).){0,300}?\.(?=  +\S)"
+    r")\s*",
+    re.DOTALL,
+)
+# The quotation marks a defined term is published in.
+_TERM_QUOTES = '"\u201c\u201d'
 LEAD_IN_MIN_WORDS = 10
 # The history note that closes a section: "(AO No. 69-75; AO No. 2023-63,
 # § 1, 6-6-2023)", "(CAC 10.48.200; ...)", "(AR No. 97-180, ...)".
@@ -625,6 +683,16 @@ _ATTACHMENTS_SCHEMA = {
         },
         "required": ["name", "url"],
     },
+}
+
+_TITLE_ATTACHMENTS_SCHEMA = {
+    **_ATTACHMENTS_SCHEMA,
+    "description": (
+        "PDFs attached to the whole title this node belongs to, listed "
+        "only when a note in the text says something is 'included as an "
+        "attachment to this title' (a table, an exhibit, the Charter "
+        "Commission Commentary). Empty otherwise."
+    ),
 }
 
 _SEARCH_ROW_SCHEMA = {
@@ -884,6 +952,7 @@ SECTION_OUTPUT_SCHEMA = {
         "history": _HISTORY_SCHEMA,
         "has_attachment": {"type": "boolean"},
         "attachments": _ATTACHMENTS_SCHEMA,
+        "title_attachments": _TITLE_ATTACHMENTS_SCHEMA,
         "is_pdf": {"type": "boolean"},
         "code_last_updated": _CODE_LAST_UPDATED_SCHEMA,
         "caveats": _CAVEAT_SCHEMA,
@@ -930,6 +999,7 @@ SECTIONS_OUTPUT_SCHEMA = {
                     "history": _HISTORY_SCHEMA,
                     "has_attachment": {"type": "boolean"},
                     "attachments": _ATTACHMENTS_SCHEMA,
+                    "title_attachments": _TITLE_ATTACHMENTS_SCHEMA,
                     "is_pdf": {"type": "boolean"},
                     "caveats": _CAVEAT_SCHEMA,
                 },
@@ -1777,7 +1847,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.17.4"
+    plugin_version = "1.18.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -1785,7 +1855,11 @@ class EcodePlugin(MCPPlugin):
         self.client: Optional[httpx.AsyncClient] = None
         # Serialises the first fetch of a cached document so a batch of
         # chapter numbers triggers one table-of-contents download, not ten.
-        self._static_lock = asyncio.Lock()
+        # One lock per document: with a single lock the library record and
+        # the table of contents, which a section read asks for together,
+        # were fetched one after the other (prod, 2026-11-22: 1.5 s then
+        # 0.6 s at the head of a 3.3 s call, each time the hour was up).
+        self._static_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
         # Test seam for the attachment download client.
         self._attachment_transport: Optional[httpx.AsyncBaseTransport] = None
 
@@ -2025,6 +2099,10 @@ class EcodePlugin(MCPPlugin):
                     "list its sections and read the ones you need. Also "
                     "lists any PDF attachments (with a url for "
                     "read_attachment) and the public ecode360.com link. "
+                    "When a note in the text says something is 'included "
+                    "as an attachment to this title' (a use table, an "
+                    "exhibit, the Charter Commission Commentary), the "
+                    "PDFs attached to that title are listed too. "
                     f"Up to {MAX_CONTENT_CHARS:,} characters of text are "
                     "returned per call; a longer section says so and "
                     "gives the `offset` to call again with for the rest "
@@ -2800,14 +2878,119 @@ class EcodePlugin(MCPPlugin):
             if subsection:
                 # A copy: cached responses are shared and read-only.
                 data = {**data, "_subsection": subsection}
-            return data, resolved_from
+            return await self._with_title_attachments(data), resolved_from
         else:
             guid = self._guid_arg({"guid": raw})
             resolved_from = None
         data = await self._get_recent_json(
             self._cust_path(f"/code/content/{quote(guid, safe='')}")
         )
-        return data, resolved_from
+        return await self._with_title_attachments(data), resolved_from
+
+    # ── Attachments of a whole title ────────────────────────────────────
+
+    def _mentions_title_attachment(self, node: Any) -> bool:
+        if not isinstance(node, dict):
+            return False
+        content = node.get("content")
+        if isinstance(content, str) and TITLE_ATTACHMENT_NOTE_RE.search(
+            content
+        ):
+            return True
+        return any(
+            self._mentions_title_attachment(child)
+            for child in node.get("children") or []
+        )
+
+    @staticmethod
+    def _title_of(toc: Any, guid: str) -> Optional[Dict[str, Any]]:
+        """The outline's Title node that is, or contains, node `guid`."""
+        found: List[Optional[Dict[str, Any]]] = []
+
+        def walk(node: Any, title: Optional[Dict[str, Any]]) -> bool:
+            if not isinstance(node, dict):
+                return False
+            if (node.get("label") or "").strip().lower() == "title":
+                title = node
+            if str(node.get("guid") or "") == guid:
+                found.append(title)
+                return True
+            return any(
+                walk(child, title) for child in node.get("children") or []
+            )
+
+        walk(toc, None)
+        return found[0] if found else None
+
+    async def _title_attachment_index(
+        self,
+    ) -> Dict[str, List[Dict[str, str]]]:
+        """{title index number, lower case: [{name, url}]} for every PDF
+        attached to a title. See TITLE_ATTACHMENT_QUERY. Kept as long as
+        the outline is."""
+        key = (self.plugin_config.base_url, _TITLE_ATTACHMENTS_KEY)
+        cached = _STATIC_CACHE.get(key)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+        index: Dict[str, List[Dict[str, str]]] = {}
+        for page in range(TITLE_ATTACHMENT_PAGES):
+            data = await self._search(TITLE_ATTACHMENT_QUERY, page)
+            for hit in data.get("results", []) or []:
+                url = hit.get("url")
+                match = TITLE_ATTACHMENT_ID_RE.match(str(hit.get("id") or ""))
+                if not (
+                    match
+                    and hit.get("pdf")
+                    and isinstance(url, str)
+                    and url.strip()
+                ):
+                    continue
+                url = url.strip().replace(" ", "%20")
+                filename = unquote(url.rsplit("/", 1)[-1])
+                named = TITLE_ATTACHMENT_FILE_RE.match(filename)
+                name = named.group(1).strip() if named else filename
+                rows = index.setdefault(
+                    " ".join(match.group(1).lower().split()), []
+                )
+                if all(row["url"] != url for row in rows):
+                    rows.append({"name": name, "url": url})
+            if page + 1 >= self._as_int(data.get("maxPages", 1), default=1):
+                break
+        for rows in index.values():
+            rows.sort(key=lambda row: row["url"])
+        _STATIC_CACHE[key] = (time.monotonic() + STATIC_CACHE_TTL_S, index)
+        return index
+
+    async def _with_title_attachments(self, data: Any) -> Any:
+        """`data` with the PDFs attached to its title, when a note in its
+        text points to one. Decorates a read and must never fail one."""
+        if not self._mentions_title_attachment(data):
+            return data
+        try:
+            title = self._title_of(
+                await self._get_toc(), str(data.get("id") or "")
+            )
+            if not title:
+                return data
+            index = await self._title_attachment_index()
+        except (EcodeAPIError, ToolInputError) as e:
+            logger.warning("could not list the title's attachments: %s", e)
+            return data
+        index_num = " ".join((title.get("indexNum") or "").lower().split())
+        found = index.get(index_num)
+        if not found:
+            return data
+        number = (title.get("number") or "").strip()
+        name = (title.get("title") or "").strip()
+        if index_num == CHARTER_INDEX_NUM:
+            display = "the Charter"
+        else:
+            display = f"Title {number}" + (f" ({name})" if name else "")
+        # A copy: cached responses are shared and read-only.
+        return {
+            **data,
+            "_title_attachments": {"title": display, "items": found},
+        }
 
     async def _fetch_sections(self, requested: List[str]) -> List[Any]:
         """One outcome per request, in order: a (data, ref) pair or the
@@ -3785,6 +3968,13 @@ class EcodePlugin(MCPPlugin):
         )
         await asyncio.sleep(RETRY_BACKOFF_S * attempt)
 
+    def _static_lock(self, key: Tuple[str, str]) -> asyncio.Lock:
+        """The lock for one cached document (see __init__)."""
+        lock = self._static_locks.get(key)
+        if lock is None:
+            lock = self._static_locks[key] = asyncio.Lock()
+        return lock
+
     async def _get_static_json(self, path: str) -> Any:
         """_get_json for data that only changes on a code republish.
 
@@ -3796,7 +3986,7 @@ class EcodePlugin(MCPPlugin):
         hit = _STATIC_CACHE.get(key)
         if hit and hit[0] > time.monotonic():
             return hit[1]
-        async with self._static_lock:
+        async with self._static_lock(key):
             # Re-check: a concurrent request in the same batch may have
             # filled it while this one waited.
             hit = _STATIC_CACHE.get(key)
@@ -3942,14 +4132,14 @@ class EcodePlugin(MCPPlugin):
         if hit and hit[0] > time.monotonic():
             return hit[1]
         shared = self._shared_cache_client()
-        # Before the lock: the date lookup takes the same lock. Without a
+        # Before the lock, so the two are never held together. Without a
         # date there is nothing to check a stored object against, so the
         # shared cache is left alone -- neither read nor written.
         code_date = await self._code_last_updated() if shared else None
         if not code_date:
             return await self._get_static_json(path)
         stored = False
-        async with self._static_lock:
+        async with self._static_lock(key):
             hit = _STATIC_CACHE.get(key)
             if hit and hit[0] > time.monotonic():
                 return hit[1]
@@ -5093,6 +5283,13 @@ class EcodePlugin(MCPPlugin):
         is_pdf = bool(data.get("pdf"))
         has_attachment = bool(attachments) or bool(images)
         attachment_list = self._attachment_list(attachments)
+        of_title = data.get("_title_attachments") or {}
+        own_urls = {item["url"] for item in attachment_list}
+        title_attachments = [
+            dict(item)
+            for item in of_title.get("items") or []
+            if item["url"] not in own_urls
+        ]
         total_chars = self._content_chars(data)
         too_large = total_chars > max_structured_chars
 
@@ -5243,6 +5440,21 @@ class EcodePlugin(MCPPlugin):
                 )
             )
 
+        if title_attachments:
+            entries.append(
+                (
+                    CAVEAT_TITLE_ATTACHMENTS,
+                    "A note in this text says that something is \"included "
+                    "as an attachment to this title\". The publisher does "
+                    "not link it from the section, so the "
+                    f"{len(title_attachments)} PDF(s) attached to "
+                    f"{of_title.get('title') or 'the title'} are listed "
+                    "below as `title attachment`: pick the one the note "
+                    "names and read it with read_attachment(url). It is "
+                    "part of the published code but not of this text.",
+                )
+            )
+
         caveats, caveat_lines = self._caveats(entries)
         history = self._parse_history(data.get("content"))
 
@@ -5253,9 +5465,10 @@ class EcodePlugin(MCPPlugin):
             f"link: {url}" if url else "",
         ]
         if history and history["latest_date"]:
+            count = len(history["entries"])
             head.append(
-                f"history: {len(history['entries'])} entries in the "
-                "history note; the newest dated one is "
+                f"history: {count} {'entry' if count == 1 else 'entries'} "
+                "in the history note; the newest dated one is "
                 f"{history['latest_citation']}, {history['latest_date']} "
                 "(adoption date as printed)"
             )
@@ -5263,7 +5476,9 @@ class EcodePlugin(MCPPlugin):
             head.append(f"images: {len(images)} (relative links on ecode360.com)")
         for item in attachment_list:
             head.append(f"attachment: {item['name']} — {item['url']}")
-        if attachment_list:
+        for item in title_attachments:
+            head.append(f"title attachment: {item['name']} — {item['url']}")
+        if attachment_list or title_attachments:
             head.append(
                 "(attachments are PDFs; read one with read_attachment(url))"
             )
@@ -5288,6 +5503,7 @@ class EcodePlugin(MCPPlugin):
             "history": history,
             "has_attachment": has_attachment,
             "attachments": attachment_list,
+            "title_attachments": title_attachments,
             "is_pdf": is_pdf,
             "caveats": caveats,
         }
@@ -5699,6 +5915,7 @@ class EcodePlugin(MCPPlugin):
                         "text": None,
                         "has_attachment": False,
                         "attachments": [],
+                        "title_attachments": [],
                         "is_pdf": False,
                         "caveats": [],
                     }
@@ -5909,6 +6126,47 @@ class EcodePlugin(MCPPlugin):
             return text, "", "uncertain"
         return text[: cuts[0].start() + 1], text[cuts[0].end():], "inferred"
 
+    @staticmethod
+    def _term_opens_text(title: str, text: str) -> bool:
+        """Whether `title` is a quoted term that `text` starts with."""
+        return (
+            len(title) > 2
+            and title[0] in _TERM_QUOTES
+            and title[-1] in _TERM_QUOTES
+            and text.startswith(title)
+        )
+
+    @staticmethod
+    def _notes_on_own_lines(text: str) -> str:
+        """Put each editor's note whose end is known on a line of its own.
+
+        See EDITOR_NOTE_RE. A note whose end cannot be told from the text
+        is left where it is: guessing would put words of the law inside
+        the note, or the reverse.
+        """
+        if "ote" not in text:
+            return text
+        lines: List[str] = []
+        done = 0
+        for match in EDITOR_NOTE_RE.finditer(text):
+            before = text[: match.start()]
+            if before.count("(") > before.count(")"):
+                # Inside a parenthesis, which is the history note: that
+                # stays one run of text, as _parse_history reads it.
+                continue
+            lines += [text[done : match.start()], match.group(1)]
+            done = match.end()
+            # The footnote mark stood before the sentence's own stop
+            # ("as depicted below[1]."): keep that stop with its sentence
+            # rather than opening the next line with it.
+            if lines[-2].strip() and text[done : done + 1] in (".", ",", ";"):
+                lines[-2] = lines[-2].rstrip() + text[done]
+                done += 1
+        if not done:
+            return text
+        lines.append(text[done:])
+        return "\n".join(line.strip() for line in lines if line.strip())
+
     def _render_content_node(
         self,
         node: Dict[str, Any],
@@ -5973,9 +6231,17 @@ class EcodePlugin(MCPPlugin):
             out += [f"{indent}{row}" for row in rows[1:]]
             return "\n".join(out)
 
+        lead = self._notes_on_own_lines(lead)
+        after = self._notes_on_own_lines(after)
+
         parts: List[str] = []
         lead = take(lead)
-        if own_heading:
+        if own_heading and self._term_opens_text(title, lead):
+            # A defined term: its heading is the quoted term and its text
+            # opens with the same quoted term, so the heading line only
+            # printed every term twice.
+            parts.append(block(lead, f"{number} " if number else ""))
+        elif own_heading:
             parts.append(f"{indent}{' '.join(p for p in [number, title] if p)}")
             if lead:
                 parts.append(block(lead))

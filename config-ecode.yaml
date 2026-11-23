@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.19.4"
+server_version: "1.20.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -93,6 +93,13 @@ instructions: |
      get_section, has a url: pass it to read_attachment(url) to read the
      table. Read cells by lining marks up under the column headers, say
      the reading came from extracted PDF text, and give the PDF link.
+     Some PDFs belong to a whole title rather than one section: the
+     Charter Commission Commentary, the Title 21 use tables, exhibits.
+     When a section's note says something is "included as an attachment
+     to this title", get_section lists that title's PDFs as `title
+     attachment` lines; read the one the note names. The Commentary is
+     the Charter Commission's own explanation of a Charter section:
+     read it when a question turns on what a Charter section means.
      A search can also return a recently adopted ORDINANCE as a PDF
      (marked "Ordinance PDF"): read_attachment reads it too. It is the
      ordinance, not the code, and has not been worked into the code

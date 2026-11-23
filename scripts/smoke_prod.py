@@ -575,6 +575,35 @@ except Exception as e:
     check("read_attachment: Table 21.05-1 PDF found by search and read",
           False, repr(e))
 
+# A PDF attached to a whole title is listed on a section whose note
+# points to it (the Charter Commission Commentary on Charter § 3.01).
+try:
+    r = call_tool("get_section", {"guid": "Charter Section 3.01"})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__get_section", sc)
+    listed = sc.get("title_attachments") or []
+    commentary = [a for a in listed if "Commentary" in a.get("name", "")]
+    lines = (sc.get("text") or "").splitlines()
+    check(
+        "get_section: Charter 3.01 lists the Commission Commentary PDF",
+        ok
+        and len(commentary) == 1
+        and any(c["code"] == "title_attachments" for c in sc["caveats"])
+        # ... and the editor's note is a line of its own, not run into
+        # the law.
+        and len(lines) == 2
+        and lines[0].endswith("attachment to this title.")
+        and lines[1].startswith("The municipality may exercise"),
+        why or f"listed={[a.get('name') for a in listed]} lines={len(lines)}",
+    )
+    r = call_tool("read_attachment", {"url": commentary[0]["url"]})
+    first = ((structured_of(r) or {}).get("pages") or [{}])[0].get("text", "")
+    check("read_attachment: the Commission Commentary url is readable",
+          "COMMISSION COMMENTARY" in first.upper(), text_of(r)[:80])
+except Exception as e:
+    check("get_section: Charter 3.01 lists the Commission Commentary PDF",
+          False, repr(e))
+
 try:
     r = call_tool("read_attachment",
                   {"url": "https://example.com/attachment/1/a.pdf"})

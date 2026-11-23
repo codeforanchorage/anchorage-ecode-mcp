@@ -121,6 +121,21 @@ A bare two-part number such as `17.05` can be ambiguous, because the Charter
 has a Section 17.05 and the code has a Chapter 17.05. In that case the tool
 returns an error naming both, and the caller picks one.
 
+Some PDFs are attached to a whole title rather than to a section: the Charter
+Commission Commentary, the Title 21 use tables, the community council bylaws.
+A section that relies on one says so in a note ("... is included as an
+attachment to this title") but eCode360 gives the section no link to it. When
+the text has such a note, the result lists that title's PDFs in
+`title_attachments` (each with a `url` for `read_attachment`) and carries a
+`title_attachments` caveat. The list is every PDF of the title, so the caller
+picks the one the note names.
+
+An editor's note arrives from eCode360 inside the text, at the place its
+footnote mark stood. Where the end of the note can be told (it ends
+"... included as an attachment to this title.", or it stood in the middle of
+a sentence) it is shown on a line of its own. Other notes are left as
+published.
+
 The text block holds up to 40,000 characters. A longer section is marked
 `INCOMPLETE` with a `rendered_text_truncated` caveat that gives the character
 range shown and the `offset` to pass on the next call; each part ends on a
@@ -368,6 +383,7 @@ code and a message. The ones seen most often:
 | `node_too_large` | A whole chapter or title exceeded 200,000 characters and was cut; read its parts individually |
 | `wildcard_in_quotes` | An empty search had a `*` inside double quotes; a quoted wildcard often matches nothing, so the message suggests the unquoted form |
 | `proximity_ignored` | The query used `"a b"~N`. eCode360 has no proximity search, so the phrase was matched exactly; the message suggests the words joined with `AND` |
+| `title_attachments` | A note in the section says something is "included as an attachment to this title"; the title's PDFs are listed in `title_attachments` |
 | `ordinance_pdf` | `read_attachment` read an ordinance PDF: it is not code text, and extraction loses the marks that show deleted language |
 | `ordinance_pdf_available` | `find_ordinance`: the publisher holds this ordinance as a PDF; the message gives the link |
 | `ordinance_citing_sections` | `find_ordinance`: the table does not list the ordinance, so the sections that cite it were found by search; the message lists them with their citations |
