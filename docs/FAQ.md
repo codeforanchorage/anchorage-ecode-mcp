@@ -28,8 +28,11 @@ See [modelcontextprotocol.io](https://modelcontextprotocol.io).
 
 ### What is OpenContext?
 
-The framework this repo is forked from: a template for deploying one MCP
-server with one plugin. This fork runs the `ecode` plugin. See
+The City of Boston's template for deploying one MCP server with one plugin,
+which this project started from. The two have since diverged: the server
+core is now the separate `opencontext-core` package, the only plugin here is
+`ecode`, and upstream's setup steps do not apply. See the
+[README](../README.md#how-this-relates-to-opencontext) and
 [Architecture](ARCHITECTURE.md).
 
 ## Using it
@@ -76,11 +79,14 @@ limit get a 429. The values are in [Deployment](DEPLOYMENT.md).
 
 ### Can this serve another municipality's code?
 
-The plugin works with any eCode360 library: set `customer_id` and `city_name`
-in `config.yaml`. The API is licensed, though, and a key is scoped to the
+The plugin takes any eCode360 library: set `customer_id` and `city_name` in
+`config.yaml`. The API is licensed, though, and a key is scoped to the
 libraries General Code grants it. The key this project uses only grants
 Anchorage (`AN6998`); other libraries return 403. Another city needs its own
-key and its own deployment.
+key and its own deployment, and some tools are built on tables that
+Anchorage's code publishes.
+[Getting Started](GETTING_STARTED.md#serving-a-different-municipality) says
+which.
 
 ### Can one deployment serve several cities or several plugins?
 
@@ -109,9 +115,10 @@ Keep `config-ecode.yaml` identical to it.
 
 ### What AWS resources are created?
 
-A Lambda function, an API Gateway REST API with a custom domain and
-certificate, an IAM role, CloudWatch log groups and alarms, and a WAF
-association.
+A Lambda function, an API Gateway REST API (with a certificate and domain
+name if one is set), an IAM role, CloudWatch log groups and alarms, a WAF web
+ACL or an association with a shared one, and a private S3 bucket used as a
+cache.
 
 ### How do I update an existing deployment?
 
@@ -161,8 +168,8 @@ secrets and redeploy.
 
 ### A search returns nothing
 
-The code does not contain that text. The rule may be state law, repealed, or
-worded differently. Try fewer terms, synonyms joined with `OR`, or browse the
+No section matched the query as written. The rule may be state law, repealed,
+or worded differently. Try fewer terms, synonyms joined with `OR`, or browse the
 table of contents.
 
 ### A search returns hundreds of results

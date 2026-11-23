@@ -1,6 +1,6 @@
 # Scripts Directory
 
-This directory contains utility scripts for OpenContext MCP server.
+Utility scripts for the Anchorage Municipal Code MCP server.
 
 ## Scripts
 
@@ -17,31 +17,49 @@ Deployment script that validates configuration and deploys the MCP server to AWS
 
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
-| `--environment` | `-e` | Yes | `staging` or `prod` |
+| `--environment` | `-e` | Yes | `staging` or `prod`. Only `prod` has a tfvars file (`terraform/aws/prod.tfvars`) |
 | `--tfworkspace` | `-w` | No | Terraform workspace name (default: `anchorage-ecode-staging` or `anchorage-ecode-prod`) |
 | `--allow-dirty` | | No | Package the working tree even with uncommitted changes (emergencies only; the build is stamped as dirty) |
 | `--help` | `-h` | No | Show help |
 
 **Examples:**
 ```bash
-./scripts/deploy.sh --environment staging
 ./scripts/deploy.sh -e prod
-./scripts/deploy.sh --environment staging --tfworkspace my-workspace
-./scripts/deploy.sh -e prod -w anchorage-ecode-prod-v2
+./scripts/deploy.sh -e prod -w my-city-prod     # your own deployment
 ```
 
 **What it does:**
+- Refuses a working tree with uncommitted changes
 - Validates that exactly ONE plugin is enabled
-- Packages the code for Lambda deployment
+- Packages the code for Lambda with the versions in `uv.lock`
 - Selects (or creates) the specified Terraform workspace
 - Deploys to AWS using Terraform
 - Shows the plan, asks for confirmation, applies it, and prints the API Gateway URL
 
 **Requirements:**
-- Python 3.11+
+- Python 3.11+ and `uv`
 - AWS CLI configured
 - Terraform installed
 - Valid `config.yaml` in project root
+- `terraform/aws/secrets.auto.tfvars` with the eCode360 credentials
+
+### `smoke_prod.py`
+
+End-to-end check of a running server: transport rules, the protocol
+handshake, every tool and the refusals. It makes real calls to eCode360.
+
+```bash
+python scripts/smoke_prod.py                              # the hosted server
+python scripts/smoke_prod.py http://localhost:8000/mcp    # a local server
+```
+
+Many checks name Anchorage sections, so against another municipality's code
+those fail by design.
+
+### `setup-backend.sh`
+
+Left over from upstream OpenContext; it names its bucket after Boston. Use
+`terraform/bootstrap` instead (see `docs/GETTING_STARTED.md`).
 
 ### `local_server.py`
 

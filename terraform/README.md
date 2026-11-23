@@ -2,42 +2,36 @@
 
 ## AWS (Primary)
 
-Deploy OpenContext to AWS Lambda. See [Deployment Guide](../docs/DEPLOYMENT.md).
+Deploys the Anchorage Municipal Code MCP server to AWS Lambda behind API
+Gateway. See [Getting Started](../docs/GETTING_STARTED.md) to deploy your own
+copy and [Deployment](../docs/DEPLOYMENT.md) for the live deployment.
 
 ### First-time setup: Bootstrap backend
 
-The AWS configuration uses S3 for state storage. Run the bootstrap **once** to create the backend resources. See [bootstrap/README.md](bootstrap/README.md) for details:
+The AWS configuration keeps its state in S3. `aws/backend.tf` as checked in
+names this project's bucket, which you cannot use. In your own account, run
+the bootstrap **once** and then edit `aws/backend.tf` to match. See
+[bootstrap/README.md](bootstrap/README.md):
 
 ```bash
 cd bootstrap
 terraform init
-terraform apply
+terraform apply -var="state_bucket_name=<a-globally-unique-name>" -var="aws_region=<your-region>"
 ```
 
-### Deploy OpenContext
+### Deploy
 
-Use the main deploy script (recommended):
+Always through the deploy script, from the repo root:
 
 ```bash
-./scripts/deploy.sh
+./scripts/deploy.sh --environment prod
 ```
 
-Or deploy manually:
-
-```bash
-cd aws
-terraform init
-terraform plan -var="config_file=config.yaml"
-terraform apply
-```
-
-**Note:** The deploy script copies `config.yaml` into `terraform/aws/` before running Terraform. For manual runs from `terraform/aws/`, use `-var="config_file=../../config.yaml"` if running from project root.
-
-### Alternative: Per-account backend
-
-Use [scripts/setup-backend.sh](../scripts/setup-backend.sh) to create a per-account S3 bucket and DynamoDB table, then generate `terraform/aws/backend.tf` with custom bucket name. Use this if you need a separate state bucket per AWS account.
+The script builds the Lambda package and copies `config.yaml` into
+`terraform/aws/` before planning. A bare `terraform plan` in `aws/` reads a
+stale copy of both, so do not deploy by hand.
 
 ## Other Clouds
 
-- **GCP:** [gcp/](gcp/) – Coming soon
-- **Azure:** [azure/](azure/) – Coming soon
+`gcp/` and `azure/` are placeholders left from upstream OpenContext. Only AWS
+is implemented.

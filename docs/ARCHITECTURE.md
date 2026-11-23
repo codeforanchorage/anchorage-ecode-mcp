@@ -2,9 +2,11 @@
 
 ## Overview
 
-This repo is a fork of OpenContext, a plugin-based MCP framework. A deployment
-runs **one** server with **one** plugin. This one runs the `ecode` plugin and
-serves the Municipality of Anchorage municipal code from eCode360.
+This repo started as a fork of OpenContext, a plugin-based MCP framework, and
+keeps its shape: a deployment runs **one** server with **one** plugin. This
+one runs the `ecode` plugin and serves the Municipality of Anchorage
+municipal code from eCode360. The framework itself is no longer in the repo;
+it is the `opencontext-core` package (see Components).
 
 ## One Fork = One Server
 

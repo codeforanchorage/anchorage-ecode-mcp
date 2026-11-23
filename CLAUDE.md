@@ -35,7 +35,7 @@ pre-commit run --all-files
 cd client && make build
 
 # Deploy to AWS
-./scripts/deploy.sh --environment staging
+./scripts/deploy.sh --environment prod   # the only environment defined
 ```
 
 ## Architecture
@@ -86,6 +86,10 @@ Two AWS sizing values are read from `config.yaml` in preference to `terraform/aw
 `tests/test_deployment_config.py` pins this ordering so it cannot silently invert again.
 
 **Deploys are built from a commit and from `uv.lock`.** `scripts/deploy.sh` refuses a dirty working tree (`--allow-dirty` overrides, for emergencies), installs the exact versions in `uv.lock` (it needs `uv`, on `PATH` or as `python -m uv`; without it, it warns and falls back to `pip` and the lower bounds in `requirements.txt`), and writes `BUILD_INFO.json` (commit, dirty, locked) into the package. So commit before deploying, and to move a library version: `uv lock --upgrade-package <name>`, run the tests, commit `uv.lock`. Moving the `opencontext-core` pin means `requirements.txt`, `pyproject.toml` and `uv lock`.
+
+## Privacy of usage data
+
+The production logs hold client IP addresses and what users searched for. Never put a user's query, the topic they were researching, who the users are, or per-day usage counts into this repo: not in code comments, test names or docstrings, docs, commit messages, issues or PRs. Describe the behaviour and the fix ("a quoted wildcard returned nothing"), not who hit it or when. Examples in tests and tool descriptions should be ones written for the purpose.
 
 ## CI
 

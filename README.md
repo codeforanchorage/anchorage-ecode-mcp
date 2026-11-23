@@ -1,26 +1,18 @@
-# OpenContext
-
-<p align="center">
-  <img src="docs/opencontext_logo.png" alt="OpenContext Logo" width="400">
-</p>
+# Anchorage Municipal Code MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
 
----
-
-## Anchorage Municipal Code MCP
-
-This fork of OpenContext runs one plugin, `ecode`, which gives read-only
-access to the Municipality of Anchorage municipal code as published on
-eCode360. It is deployed at `https://anchorage-ecode.codeforanchorage.org/mcp`
-and can be added to Claude as a custom connector with that URL.
+An MCP server that gives AI assistants read-only access to the Municipality
+of Anchorage municipal code as published on eCode360. It is deployed at
+`https://anchorage-ecode.codeforanchorage.org/mcp` and can be added to Claude
+as a custom connector with that URL.
 
 Results are the published code text, not legal advice. Every result carries
 the section number and an `https://ecode360.com/<guid>` link for verification.
 
-### Tools
+## Tools
 
 | Tool | Arguments | What it does |
 | --- | --- | --- |
@@ -42,30 +34,56 @@ Tool names are prefixed with the plugin name on the wire, for example
 
 ---
 
-## Quick Start
+## Use the hosted server
 
-```bash
-# 1. Configure (create config, enable one data source)
-cp config-example.yaml config.yaml
-# Edit config.yaml - set enabled: true for one plugin
-
-# 2. Test locally
-pip install aiohttp
-python3 scripts/local_server.py
-
-# 3. Deploy
-./scripts/deploy.sh
-```
-
-Connect via **Claude Connectors** (same steps on both Claude.ai and Claude Desktop):
+Connect via **Claude Connectors** (same steps on Claude.ai and Claude Desktop):
 
 1. Go to **Settings** → **Connectors** (or **Customize** → **Connectors** on claude.ai)
 2. Click **Add custom connector**
-3. Enter a name (e.g. "Anchorage Municipal Code") and the server URL: `https://anchorage-ecode.codeforanchorage.org/mcp` for the hosted server, or your own API Gateway URL if you deployed a copy
+3. Enter a name (e.g. "Anchorage Municipal Code") and the URL `https://anchorage-ecode.codeforanchorage.org/mcp`
 
-Get the URL of your own deployment: `cd terraform/aws && terraform output -raw api_gateway_url`
+No account or key is needed. See the [Quick Start](docs/QUICKSTART.md).
 
-See [Getting Started](docs/GETTING_STARTED.md) for full setup.
+## Run your own copy
+
+You need your own eCode360 API key and secret from General Code, for your
+own code library. The hosted server's key is not in this repo and only
+covers Anchorage.
+
+```bash
+git clone https://github.com/codeforanchorage/anchorage-ecode-mcp.git
+cd anchorage-ecode-mcp
+python -m venv venv
+venv/bin/pip install -r requirements-dev.txt     # Windows: venv\Scripts\pip
+
+export ECODE_API_KEY=...  ECODE_API_SECRET=...
+venv/bin/python scripts/local_server.py          # http://localhost:8000/mcp
+```
+
+`config.yaml` in the repo root is this server's real configuration; there is
+nothing to copy or enable. To serve another municipality, or to deploy to
+your own AWS account, follow [Getting Started](docs/GETTING_STARTED.md): it
+lists every file that names Anchorage or this project's AWS account and what
+to put there instead.
+
+## How this relates to OpenContext
+
+This project began as a fork of
+[OpenContext](https://github.com/CityOfBoston/OpenContext), the City of
+Boston's template for deploying one MCP server with one plugin, and has since
+moved away from it. The upstream setup instructions no longer apply here:
+
+| | Upstream OpenContext | This repo |
+| --- | --- | --- |
+| MCP server core (`core/`, `server/`) | In the repo | The [`opencontext-core`](https://github.com/codeforanchorage/opencontext-core) package, pinned by tag in `requirements.txt`, `pyproject.toml` and `uv.lock` |
+| Plugins | Generic CKAN, ArcGIS and Socrata plugins; enable one | Only `plugins/ecode`, already enabled |
+| Configuration | Copy `config-example.yaml` and edit | `config.yaml` is checked in and is what production runs |
+| Secrets | `${VAR}` placeholders in the config, as `config-example.yaml` shows | Environment variables read by the plugin; `config.yaml` does not expand `${VAR}` |
+| Endpoint | Lambda Function URL | API Gateway with a WAF, throttles and an optional custom domain |
+| Deploy | `./scripts/deploy.sh` | `./scripts/deploy.sh --environment prod`, from a clean commit, with the versions in `uv.lock` |
+
+`config-example.yaml` and `custom_plugins/template/` remain from upstream as a
+starting point for a different plugin; this server does not use them.
 
 ---
 
@@ -75,7 +93,7 @@ See [Getting Started](docs/GETTING_STARTED.md) for full setup.
 | Doc                                        | Description                                     |
 | ------------------------------------------ | ----------------------------------------------- |
 | [Quick Start](docs/QUICKSTART.md)          | Use the hosted server from Claude               |
-| [Getting Started](docs/GETTING_STARTED.md) | Run it locally or deploy a copy                 |
+| [Getting Started](docs/GETTING_STARTED.md) | Run it locally, deploy your own copy, serve another city |
 | [The eCode plugin](docs/BUILT_IN_PLUGINS.md) | Tools, configuration and limits               |
 | [Architecture](docs/ARCHITECTURE.md)       | System design and plugins                       |
 | [Deployment](docs/DEPLOYMENT.md)           | AWS, Terraform, monitoring                      |
@@ -91,7 +109,7 @@ See [Getting Started](docs/GETTING_STARTED.md) for full setup.
 - **This server's configuration:** [config.yaml](config.yaml) (the `ecode` plugin, its settings and the instructions sent to clients)
 - **This server's plugin:** [plugins/ecode/plugin.py](plugins/ecode/plugin.py)
 - **Writing your own plugin:** [docs/CUSTOM_PLUGINS.md](docs/CUSTOM_PLUGINS.md)
-- **Generic CKAN, ArcGIS and Socrata plugins:** not in this fork; see upstream [CityOfBoston/OpenContext](https://github.com/CityOfBoston/OpenContext)
+- **Generic CKAN, ArcGIS and Socrata plugins:** not in this repo; see upstream [CityOfBoston/OpenContext](https://github.com/CityOfBoston/OpenContext)
 
 ---
 
@@ -112,6 +130,6 @@ Hooks: Ruff, yamllint, gofmt. Run manually: `pre-commit run --all-files`.
 
 MIT — see [LICENSE](LICENSE).
 
-**OpenContext author:** Srihari Raman, City of Boston Department of Innovation and Technology
+**OpenContext**, which this project started from, was written by Srihari Raman, City of Boston Department of Innovation and Technology.
 
-**This fork** (the Anchorage Municipal Code MCP server and its `ecode` plugin) is maintained by [Code for Anchorage](https://github.com/codeforanchorage).
+**This project** (the Anchorage Municipal Code MCP server and its `ecode` plugin) is maintained by [Code for Anchorage](https://github.com/codeforanchorage).

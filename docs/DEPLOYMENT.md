@@ -2,20 +2,25 @@
 
 The server runs on AWS Lambda behind API Gateway, deployed with Terraform by
 `scripts/deploy.sh`. Deploys are manual; CI checks the code but does not
-deploy. See [Getting Started](GETTING_STARTED.md) for the short version.
+deploy.
+
+This page describes the live deployment. To deploy a copy to your own AWS
+account, start with [Getting Started](GETTING_STARTED.md), which lists what
+to change first.
 
 ## Prerequisites
 
 - AWS account and the AWS CLI, configured
 - Terraform >= 1.0
-- Python 3.11+
+- Python 3.11+ and `uv`
 - eCode360 API credentials
 
 ## AWS permissions
 
 The deploying identity needs to manage Lambda, IAM roles and policies,
-CloudWatch Logs and alarms, API Gateway, ACM certificates and WAF
-associations, and to read and write the Terraform state bucket.
+CloudWatch Logs and alarms, API Gateway, ACM certificates, WAF web ACLs and
+associations and the cache S3 bucket; to read the WAF SSM parameter when the
+shared web ACL is used; and to read and write the Terraform state bucket.
 
 ## Deploying
 
@@ -140,8 +145,10 @@ CPU-bound, which is why the function runs at 1024 MB while using about 150 MB.
 aws logs tail /aws/lambda/anchorage-ecode-mcp-prod --follow
 ```
 
-The logs include client IP addresses and the queries users searched for.
-Treat downloaded logs as sensitive.
+The logs include client IP addresses and what was searched for. Treat
+downloaded logs, and anything derived from them, as private: do not put
+users' queries, or what they were researching, in commits, issues, code
+comments or documentation. Describe the behaviour that was fixed instead.
 
 ## Updating and removing
 
