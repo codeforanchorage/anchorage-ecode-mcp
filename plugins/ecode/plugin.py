@@ -196,12 +196,17 @@ _RECENT_CACHE: Dict[
 MAX_BATCH_SECTIONS = 10
 # Upstream requests in flight at once for one tool call.
 BATCH_CONCURRENCY = 5
-# Rendered text in a batch: the sections read share BATCH_TOTAL_CHARS
-# evenly, and none gets less than BATCH_SECTION_CHARS. Two sections get
-# 40,000 each, ten get 8,000 each. A section cut short names the
-# get_section offset to read on from; the full text is in structuredContent.
+# Rendered text in a batch: the sections read share BATCH_TOTAL_CHARS,
+# and none gets less than BATCH_SECTION_CHARS. A section shorter than its
+# even share passes what it does not use to the longer ones, so one long
+# section among short ones is shown whole when the batch has room for it.
+# Two long sections get 40,000 each, ten get 8,000 each. A section cut
+# short names the get_section offset to read on from; the full text is in
+# structuredContent.
 BATCH_TOTAL_CHARS = 80_000
 BATCH_SECTION_CHARS = 8000
+# Titles of left-out PDF documents named in a scoped search's note.
+UNPLACED_NAMES_SHOWN = 3
 
 # eCode360 publishes each defined term as its own node, numbered as the
 # defining section plus an index in braces: "8.05.015A{9}", titled with the
@@ -1847,7 +1852,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.18.1"
+    plugin_version = "1.18.2"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -3621,12 +3626,16 @@ class EcodePlugin(MCPPlugin):
         display = scope["display"]
         kept: List[Dict[str, Any]] = []
         documents = 0
+        document_names: List[str] = []
         unknown = 0
         for hit in hits:
             placed = self._hit_in_scope(hit, scope)
             if placed is None:
                 if hit.get("pdf") or hit.get("type") == "doc":
                     documents += 1
+                    name = self._strip_html(hit.get("title", ""))
+                    if name and name not in document_names:
+                        document_names.append(name)
                 else:
                     unknown += 1
             elif placed:
@@ -3708,7 +3717,10 @@ class EcodePlugin(MCPPlugin):
             what = " and ".join(
                 part
                 for part in (
-                    f"{documents} PDF document hit(s)" if documents else "",
+                    f"{documents} PDF document hit(s)"
+                    + self._document_names_note(document_names)
+                    if documents
+                    else "",
                     f"{unknown} hit(s) with no place in the outline"
                     if unknown
                     else "",
@@ -3764,6 +3776,19 @@ class EcodePlugin(MCPPlugin):
                 "query_total": query_total,
             },
         }
+
+    @staticmethod
+    def _document_names_note(names: List[str]) -> str:
+        """' ("A", "B" and 2 more)' for the documents a scoped search left
+        out, so the caller can tell whether one is worth a look."""
+        if not names:
+            return ""
+        shown = ", ".join(
+            '"' + (n if len(n) <= 80 else n[:77] + "...") + '"'
+            for n in names[:UNPLACED_NAMES_SHOWN]
+        )
+        more = len(names) - UNPLACED_NAMES_SHOWN
+        return f" ({shown}" + (f" and {more} more)" if more > 0 else ")")
 
     async def _resolve_section_number(self, ref: str) -> str:
         """Turn a section NUMBER into its guid via search.
@@ -5934,6 +5959,10 @@ class EcodePlugin(MCPPlugin):
             BATCH_SECTION_CHARS,
             BATCH_TOTAL_CHARS // max(1, len(outcomes) - len(failures)),
         )
+        # First at the even share; a section that did not fit is rendered
+        # again below if the shorter ones left it more room.
+        cut: List[int] = []
+        lengths: List[int] = []
         for raw, outcome in zip(requested, outcomes):
             if isinstance(outcome, BaseException):
                 message = str(outcome) or type(outcome).__name__
@@ -5970,10 +5999,36 @@ class EcodePlugin(MCPPlugin):
                 max_chars=per_section,
                 max_structured_chars=BATCH_STRUCTURED_CHARS,
             )
+            length = len(structured.get("text") or "")
+            lengths.append(length)
+            if length > per_section:
+                cut.append(len(blocks))
             blocks.append(f"=== {raw} ===\n{text}")
             sections.append(
                 {"requested": raw, "found": True, "error": None, **structured}
             )
+
+        allowances = self._batch_allowances(lengths)
+        read = [i for i, s in enumerate(sections) if s["found"]]
+        for index in cut:
+            allowance = allowances[read.index(index)]
+            if allowance <= per_section:
+                continue
+            raw = requested[index]
+            data, resolved_from = outcomes[index]
+            text, structured = self._format_content(
+                data,
+                resolved_from=resolved_from,
+                max_chars=allowance,
+                max_structured_chars=BATCH_STRUCTURED_CHARS,
+            )
+            blocks[index] = f"=== {raw} ===\n{text}"
+            sections[index] = {
+                "requested": raw,
+                "found": True,
+                "error": None,
+                **structured,
+            }
 
         if merged:
             entries.append(
@@ -5992,6 +6047,25 @@ class EcodePlugin(MCPPlugin):
             "summary": summary,
             "caveats": caveats,
         }
+
+    @staticmethod
+    def _batch_allowances(lengths: List[int]) -> List[int]:
+        """Characters of rendered text each section of a batch may show,
+        given the full length of each.
+
+        Shortest first: a section takes its even share of what is left, or
+        its whole length if that is less, and what it leaves goes to the
+        ones after it. No section gets less than BATCH_SECTION_CHARS."""
+        allowances = [0] * len(lengths)
+        left = BATCH_TOTAL_CHARS
+        order = sorted(range(len(lengths)), key=lambda i: lengths[i])
+        for position, index in enumerate(order):
+            share = max(
+                BATCH_SECTION_CHARS, left // (len(order) - position)
+            )
+            allowances[index] = share
+            left = max(0, left - min(lengths[index], share))
+        return allowances
 
     def _format_definitions(
         self,

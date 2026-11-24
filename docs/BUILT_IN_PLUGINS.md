@@ -71,7 +71,7 @@ requested node.
 - `total_count` is the number of hits inside the scope when every hit for the
   query was checked, and `null` otherwise, with a `scope_scan_partial` caveat.
 - PDF documents have no place in the outline and are left out, with a
-  `scope_unplaced_hits` caveat. The exception is a PDF attached to a whole
+  `scope_unplaced_hits` caveat that names them (the first three). The exception is a PDF attached to a whole
   title (the Charter Commission Commentary, the Title 21 use tables): it is
   kept when `within` takes in that title, and left out with the caveat when
   `within` is a chapter or section of it.
@@ -175,9 +175,10 @@ Up to 10 sections in one call, each given as a guid or a number. A section that
 cannot be fetched is reported in its place with a `section_unavailable` caveat,
 and the rest are still returned.
 
-The sections of a batch share 80,000 characters of text evenly, with at least
-8,000 each. One that is cut short names the `get_section` offset to read on
-from.
+The sections of a batch share 80,000 characters of text, with at least 8,000
+each. A section shorter than its even share leaves the rest to the longer
+ones, so one long section among short ones is shown whole when the batch has
+room. One that is cut short names the `get_section` offset to read on from.
 
 ### `find_definition(term)`
 

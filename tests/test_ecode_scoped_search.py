@@ -275,6 +275,37 @@ class TestUnplacedHits:
         assert "1 PDF document hit(s)" in sc["caveats"][0]["message"]
 
     @pytest.mark.asyncio
+    async def test_the_left_out_documents_are_named(self):
+        sc, _ = await _run(_plugin({0: MIXED}), "Title 21")
+        message = sc["caveats"][0]["message"]
+        assert '1 PDF document hit(s) ("Anchorage OLD Title 21") ' in message
+
+    @pytest.mark.asyncio
+    async def test_a_document_hit_twice_is_named_once(self):
+        marked = dict(PDF, title='Anchorage <em class="highlight">OLD</em>'
+                                 " Title 21")
+        sc, _ = await _run(_plugin({0: [PDF, marked, DUI]}), "Title 9")
+        message = sc["caveats"][0]["message"]
+        assert '2 PDF document hit(s) ("Anchorage OLD Title 21") ' in message
+
+    @pytest.mark.asyncio
+    async def test_only_the_first_few_names_are_listed(self):
+        loose = [dict(PDF, id=f"doc{i}", title=f"Document {i}")
+                 for i in range(5)]
+        sc, _ = await _run(_plugin({0: [*loose, DUI]}), "Title 9")
+        message = sc["caveats"][0]["message"]
+        assert ('5 PDF document hit(s) ("Document 0", "Document 1", '
+                '"Document 2" and 2 more) ') in message
+        assert "Document 3" not in message
+
+    @pytest.mark.asyncio
+    async def test_a_long_document_name_is_shortened(self):
+        long = dict(PDF, title="W" * 200)
+        sc, _ = await _run(_plugin({0: [long, DUI]}), "Title 9")
+        message = sc["caveats"][0]["message"]
+        assert '("' + "W" * 77 + '...")' in message
+
+    @pytest.mark.asyncio
     async def test_a_node_unknown_to_the_outline_is_not_guessed(self):
         sc, _ = await _run(_plugin({0: [ORPHAN, DUI]}), "Title 9")
         assert _guids(sc) == ["s928020"]

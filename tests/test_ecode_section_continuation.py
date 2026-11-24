@@ -222,6 +222,50 @@ class TestBatchAllowance:
         assert _line_numbers(text) == list(range(280)) * 2
 
     @pytest.mark.asyncio
+    async def test_a_long_section_uses_what_short_ones_leave(self):
+        # Six sections: an even share is 13,333, the long one is 17,000.
+        short = [_section(str(i), 20) for i in range(1, 6)]
+        result = await self._batch(*short, _section("6", 170))
+        text = result.content[0]["text"]
+        for section in result.structured_content["sections"]:
+            assert section["caveats"] == []
+        assert _line_numbers(text.split("=== 6 ===")[1]) == list(range(170))
+
+    @pytest.mark.asyncio
+    async def test_two_long_sections_split_what_short_ones_leave(self):
+        # 2,000 used by the short one leaves 39,000 for each long one.
+        result = await self._batch(
+            _section("1", 20), _section("2", 600), _section("3", 600)
+        )
+        text = result.content[0]["text"]
+        assert len(text) < BATCH_TOTAL_CHARS + 3 * 1500
+        short, *long = result.structured_content["sections"]
+        assert short["caveats"] == []
+        offsets = [
+            int(re.search(r"offset=(\d+)", s["caveats"][0]["message"])[1])
+            for s in long
+        ]
+        assert all(38_000 < offset <= 39_100 for offset in offsets)
+
+    def test_allowances_never_go_under_the_floor(self):
+        allowances = EcodePlugin._batch_allowances([50_000] * 10)
+        assert allowances == [BATCH_SECTION_CHARS] * 10
+        allowances = EcodePlugin._batch_allowances([79_000, 50_000, 100])
+        assert allowances[2] >= 100
+        assert min(allowances) >= BATCH_SECTION_CHARS
+
+    def test_allowances_follow_the_request_order(self):
+        assert EcodePlugin._batch_allowances([100, 90_000]) == [
+            40_000,
+            BATCH_TOTAL_CHARS - 100,
+        ]
+        assert EcodePlugin._batch_allowances([90_000, 100]) == [
+            BATCH_TOTAL_CHARS - 100,
+            40_000,
+        ]
+        assert EcodePlugin._batch_allowances([]) == []
+
+    @pytest.mark.asyncio
     async def test_ten_sections_get_the_floor_each(self):
         assert BATCH_TOTAL_CHARS // 10 <= BATCH_SECTION_CHARS
         sections = [_section(str(i), 120) for i in range(1, 11)]
