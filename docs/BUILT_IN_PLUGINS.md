@@ -351,9 +351,10 @@ Pass a URL from the `attachments` list of `get_section`, or from a
   `page`. Then read a page with `page=<that page>`.
 
   Finding needs the text of every page. That is kept per container, and for
-  documents of 20 pages or more in the shared cache bucket, under the same
-  rules as the Ordinance Disposition Table (current code date, under 7 days
-  old). Extracting a very long document can take more than one call: the
+  documents of 20 pages or more in the shared cache bucket. Stored text
+  carries the SHA-256 of its PDF: once the code's last-updated date has
+  changed, or the object is over 7 days old, the PDF is downloaded again and
+  the text is kept only if the file is unchanged. Extracting a very long document can take more than one call: the
   result then carries a `find_incomplete` caveat saying which pages were
   searched and `next_page` to continue from, and the pages already extracted
   are kept, so the following call picks up where this one stopped.

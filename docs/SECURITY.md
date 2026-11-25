@@ -217,7 +217,9 @@ to extract than one call may spend.
 - **Trust.** An object is read with a size cap, parsed as JSON and used only
   if it has the expected shape, was stored under the code's current
   last-updated date and is under 7 days old. Anything else is ignored and the
-  table is fetched from eCode360. Someone able to write to the bucket could
+  table is fetched from eCode360. Stored attachment text that is older than
+  that is used only if the PDF, downloaded again, has the SHA-256 recorded
+  with the text. Someone able to write to the bucket could
   change what `find_ordinance` reports, which is why only the Lambda role can.
 - **Failure.** The bucket is never a dependency. Missing, unreachable or slow
   (4 second limit per call), the plugin fetches from eCode360 as before and

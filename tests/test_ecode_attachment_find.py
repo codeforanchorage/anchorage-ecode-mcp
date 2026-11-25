@@ -79,6 +79,22 @@ def one_page_per_call(monkeypatch):
     monkeypatch.setattr(ecode_mod, "FIND_TIME_RESERVE_S", 10_000.0)
 
 
+@pytest.fixture
+def extractions(monkeypatch):
+    """One entry per run of the page-text extraction."""
+    runs = []
+    real = EcodePlugin._extract_page_texts
+
+    def counted(*args):
+        runs.append(1)
+        return real(*args)
+
+    monkeypatch.setattr(
+        EcodePlugin, "_extract_page_texts", staticmethod(counted)
+    )
+    return runs
+
+
 def new_container():
     ecode_mod._ATTACHMENT_CACHE.clear()
     ecode_mod._ATTACHMENT_TEXT_CACHE.clear()
@@ -370,20 +386,92 @@ class TestSharedCache:
         assert len(s3.puts) == 4
 
     @pytest.mark.asyncio
-    async def test_text_stored_for_an_earlier_code_date_is_rebuilt(self, s3):
+    async def test_a_code_update_keeps_the_text_of_an_unchanged_pdf(
+        self, s3, extractions
+    ):
         await _find(_attachment_plugin(_pdf_response(PAGES)), "kennel")
         new_container()
         s3.code_date = "2027-01-05"
         plugin = _attachment_plugin(_pdf_response(PAGES))
+        sc, _ = await _find(plugin, "conditional use")
+        assert [m["page"] for m in sc["find"]["matches"]] == [2, 3]
+        assert len(plugin.requests) == 1  # downloaded, to compare
+        assert len(extractions) == 1  # but not extracted again
+        # Stored again under the new date, so the next container need
+        # not download it.
+        assert len(s3.puts) == 2
+        new_container()
+        third = _attachment_plugin(_pdf_response(PAGES))
+        await _find(third, "kennel")
+        assert third.requests == [] and len(s3.puts) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_code_update_rebuilds_the_text_of_a_changed_pdf(
+        self, s3, extractions
+    ):
+        await _find(_attachment_plugin(_pdf_response(PAGES)), "kennel")
+        new_container()
+        s3.code_date = "2027-01-05"
+        plugin = _attachment_plugin(_pdf_response(["A cattery", "A kennel"]))
+        sc, _ = await _find(plugin, "kennel")
+        assert sc["page_count"] == 2
+        assert [m["page"] for m in sc["find"]["matches"]] == [2]
+        assert len(extractions) == 2
+
+    @pytest.mark.asyncio
+    async def test_old_text_is_checked_against_the_pdf_too(
+        self, s3, extractions, monkeypatch
+    ):
+        await _find(_attachment_plugin(_pdf_response(PAGES)), "kennel")
+        new_container()
+        monkeypatch.setattr(ecode_mod, "SHARED_CACHE_MAX_AGE_S", -1.0)
+        plugin = _attachment_plugin(_pdf_response(PAGES))
         await _find(plugin, "kennel")
         assert len(plugin.requests) == 1
-        assert len(s3.puts) == 2
+        assert len(extractions) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_warm_container_checks_its_own_text_after_an_update(
+        self, s3, extractions
+    ):
+        plugin = _attachment_plugin(_pdf_response(PAGES))
+        await _find(plugin, "kennel")
+        s3.code_date = "2027-01-05"
+        ecode_mod._ATTACHMENT_CACHE.clear()
+        changed = _attachment_plugin(_pdf_response(["A kennel"]))
+        sc, _ = await _find(changed, "kennel")
+        assert sc["page_count"] == 1
+        assert len(extractions) == 2
+
+    @pytest.mark.asyncio
+    async def test_unfinished_text_of_a_changed_pdf_is_started_again(
+        self, s3, one_page_per_call
+    ):
+        await _find(_attachment_plugin(_pdf_response(PAGES)), "access")
+        new_container()
+        plugin = _attachment_plugin(_pdf_response(["access", "none", "none"]))
+        sc, _ = await _find(plugin, "access")
+        assert sc["page_count"] == 3
+        assert [m["page"] for m in sc["find"]["matches"]] == [1]
 
     @pytest.mark.parametrize(
         "body",
         [
             b"not gzip",
             zlib.compress(b"[1, 2]", wbits=31),
+            zlib.compress(  # written before objects carried the PDF's hash
+                json.dumps(
+                    {
+                        "version": 1,
+                        "url": GOOD_URL.replace(" ", "%20"),
+                        "code_last_updated": CODE_DATE,
+                        "fetched_at": 0,
+                        "page_count": 1,
+                        "texts": ["no hash"],
+                    }
+                ).encode(),
+                wbits=31,
+            ),
             zlib.compress(
                 json.dumps(
                     {
@@ -392,6 +480,7 @@ class TestSharedCache:
                         "code_last_updated": CODE_DATE,
                         "fetched_at": 0,
                         "page_count": 1,
+                        "pdf_sha256": "0" * 64,
                         "texts": ["other document"],
                     }
                 ).encode(),

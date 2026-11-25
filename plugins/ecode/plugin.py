@@ -349,6 +349,12 @@ ATTACHMENT_CACHE_ENTRIES = 2
 # in this container, and in the shared cache bucket when there is one
 # (see SHARED_CACHE_ENV), where a call that ran out of time leaves what it
 # extracted for the next call to continue from.
+#
+# Stored text carries the SHA-256 of the PDF it came from. When the code's
+# last-updated date moves on (or the object passes its age limit) the PDF
+# is downloaded again, which takes a second, and the text is kept if the
+# PDF is byte for byte the same: a code update rarely touches a given
+# attachment, and re-extracting a long one costs several calls.
 FIND_MAX_CHARS = 200
 FIND_PAGES_LISTED = 25
 FIND_SNIPPETS_PER_PAGE = 2
@@ -1931,7 +1937,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.19.0"
+    plugin_version = "1.19.1"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -5960,6 +5966,7 @@ class EcodePlugin(MCPPlugin):
                 or not isinstance(texts, list)
                 or len(texts) > page_count
                 or not all(isinstance(text, str) for text in texts)
+                or not isinstance(stored.get("pdf_sha256"), str)
             ):
                 raise _SharedCacheUnusable("unexpected object shape")
         except Exception as e:  # noqa: BLE001 - never fail a tool call
@@ -5972,19 +5979,23 @@ class EcodePlugin(MCPPlugin):
                 str(e) or "timed out",
             )
             return None
-        if stored.get("code_last_updated") != code_date:
-            logger.info("shared cache %s is for an earlier code date", key)
-            return None
-        if not -300 <= age <= SHARED_CACHE_MAX_AGE_S:
-            logger.info("shared cache %s is %.0f s old; rebuilding", key, age)
-            return None
+        stale = (
+            stored.get("code_last_updated") != code_date
+            or not -300 <= age <= SHARED_CACHE_MAX_AGE_S
+        )
         logger.info(
-            "shared cache hit for %s (%d of %d pages)",
+            "shared cache hit for %s (%d of %d pages%s)",
             key,
             len(texts),
             page_count,
+            "; to be checked against the PDF" if stale else "",
         )
-        return {"page_count": page_count, "texts": texts}
+        return {
+            "page_count": page_count,
+            "texts": texts,
+            "pdf_sha256": stored["pdf_sha256"],
+            "stale": stale,
+        }
 
     async def _attachment_text_put(
         self,
@@ -6007,6 +6018,7 @@ class EcodePlugin(MCPPlugin):
                         "code_last_updated": code_date,
                         "fetched_at": time.time(),
                         "page_count": entry["page_count"],
+                        "pdf_sha256": entry["pdf_sha256"],
                         "texts": entry["texts"],
                     },
                     ensure_ascii=False,
@@ -6042,7 +6054,8 @@ class EcodePlugin(MCPPlugin):
         Taken from this container's memory, else the shared cache, and
         extended from the PDF for as long as this call's budget allows.
         `texts` is shorter than `page_count` when the budget ran out; the
-        next call continues from there.
+        next call continues from there. Text kept from before the code was
+        last updated is used only if the PDF is still the same file.
         """
         shared = self._shared_cache_client()
         # As for the ordinance table: without the code's date there is
@@ -6050,31 +6063,49 @@ class EcodePlugin(MCPPlugin):
         # alone.
         code_date = await self._code_last_updated() if shared else None
         entry = _ATTACHMENT_TEXT_CACHE.get(url)
-        if entry is not None and code_date and entry.get("code_date") not in (
-            None,
-            code_date,
-        ):
-            entry = None
-        if entry is None and shared and code_date:
+        if entry is not None:
+            entry = {
+                **entry,
+                "stale": bool(code_date)
+                and entry.get("code_date") not in (None, code_date),
+            }
+        elif shared and code_date:
             entry = await self._attachment_text_get(shared, url, code_date)
+        stale = bool(entry and entry["stale"])
         had = len(entry["texts"]) if entry else 0
-        if entry is None or had < entry["page_count"]:
+        if entry is None or stale or had < entry["page_count"]:
             pdf = await self._download_attachment(url)
-            page_count, texts = await asyncio.to_thread(
-                self._extract_page_texts,
-                pdf,
-                entry["texts"] if entry else [],
-                _call_deadline.get(),
-            )
-            entry = {"page_count": page_count, "texts": texts}
+            digest = hashlib.sha256(pdf).hexdigest()
+            if entry is not None and entry["pdf_sha256"] != digest:
+                logger.info("the PDF at %s has changed; extracting again", url)
+                entry, had = None, 0
+            if entry is None or had < entry["page_count"]:
+                page_count, texts = await asyncio.to_thread(
+                    self._extract_page_texts,
+                    pdf,
+                    entry["texts"] if entry else [],
+                    _call_deadline.get(),
+                )
+            else:
+                page_count, texts = entry["page_count"], entry["texts"]
+            entry = {
+                "page_count": page_count,
+                "texts": texts,
+                "pdf_sha256": digest,
+            }
             if (
                 shared
                 and code_date
-                and len(texts) > had
+                and (len(texts) > had or stale)
                 and page_count >= ATTACHMENT_TEXT_SHARED_MIN_PAGES
             ):
                 await self._attachment_text_put(shared, url, code_date, entry)
-        entry = {**entry, "code_date": code_date}
+        entry = {
+            "page_count": entry["page_count"],
+            "texts": entry["texts"],
+            "pdf_sha256": entry["pdf_sha256"],
+            "code_date": code_date,
+        }
         _ATTACHMENT_TEXT_CACHE.pop(url, None)
         while len(_ATTACHMENT_TEXT_CACHE) >= ATTACHMENT_CACHE_ENTRIES:
             _ATTACHMENT_TEXT_CACHE.pop(next(iter(_ATTACHMENT_TEXT_CACHE)))
