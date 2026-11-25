@@ -1,6 +1,6 @@
 ---
 server_name: "Anchorage Municipal Code MCP"
-server_version: "1.20.2"
+server_version: "1.21.0"
 description: "Municipality of Anchorage municipal code (eCode360) MCP server - Safe, conversational, read-only access to the Anchorage Municipal Code: search, browse, and read sections."
 organization: "Municipality of Anchorage"
 
@@ -93,6 +93,11 @@ instructions: |
      get_section, has a url: pass it to read_attachment(url) to read the
      table. Read cells by lining marks up under the column headers, say
      the reading came from extracted PDF text, and give the PDF link.
+     A PDF can run to hundreds of pages (the former zoning code is one
+     document). Do not page through it: call read_attachment(url,
+     find="phrase or section number") to list the pages where it occurs,
+     then read those pages with page=N. If the result says INCOMPLETE,
+     call again as it directs before saying the document lacks something.
      Some PDFs belong to a whole title rather than one section: the
      Charter Commission Commentary, the Title 21 use tables, exhibits.
      When a section's note says something is "included as an attachment

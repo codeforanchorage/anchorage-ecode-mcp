@@ -13,6 +13,7 @@ every request; all endpoints are GET under ``/v1`` and return JSON.
 import asyncio
 import contextvars
 import datetime
+import hashlib
 import io
 import html
 import json
@@ -20,6 +21,7 @@ import logging
 import os
 import re
 import time
+import zlib
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote, unquote, urlsplit
 
@@ -337,6 +339,33 @@ ATTACHMENT_TIME_RESERVE_S = 3.0
 # without downloading it again. Tiny on purpose: this is not a store.
 _ATTACHMENT_CACHE: Dict[str, bytes] = {}
 ATTACHMENT_CACHE_ENTRIES = 2
+
+# ── read_attachment(find=...) ───────────────────────────────────────────
+#
+# One attached document runs to several hundred pages and a call returns
+# about a dozen, so a search hit inside it could not be reached by paging.
+# `find` locates a phrase by page. That needs the text of every page, which
+# takes longer to extract than one call may spend, so the text is kept:
+# in this container, and in the shared cache bucket when there is one
+# (see SHARED_CACHE_ENV), where a call that ran out of time leaves what it
+# extracted for the next call to continue from.
+FIND_MAX_CHARS = 200
+FIND_PAGES_LISTED = 25
+FIND_SNIPPETS_PER_PAGE = 2
+FIND_SNIPPET_BEFORE = 100
+FIND_SNIPPET_AFTER = 140
+# Stop extracting when less than this is left of the call budget: the text
+# still has to be stored (one shared-cache call) and searched.
+FIND_TIME_RESERVE_S = 7.0
+ATTACHMENT_TEXT_PREFIX = "attachment-text"
+# Shorter documents are extracted again in well under a second, so their
+# text is not worth an object in the bucket.
+ATTACHMENT_TEXT_SHARED_MIN_PAGES = 20
+# Decompressed size above which a stored text object is not trusted.
+ATTACHMENT_TEXT_MAX_BYTES = 20_000_000
+# url -> {"page_count", "texts" (pages 1..n, whitespace collapsed),
+# "code_date"}.
+_ATTACHMENT_TEXT_CACHE: Dict[str, Dict[str, Any]] = {}
 _QUOTE_CHARS_RE = re.compile('["“”]')
 
 # ── Structured output ───────────────────────────────────────────────────
@@ -382,6 +411,10 @@ CAVEAT_NODE_TOO_LARGE = "node_too_large"
 CAVEAT_PDF_TEXT_EXTRACTION = "pdf_text_extraction"
 CAVEAT_MORE_ATTACHMENT_PAGES = "more_attachment_pages"
 CAVEAT_ATTACHMENT_PAGE_TRUNCATED = "attachment_page_truncated"
+CAVEAT_FIND_SNIPPETS = "find_snippets"
+CAVEAT_FIND_INCOMPLETE = "find_incomplete"
+CAVEAT_FIND_WORDS_NOT_PHRASE = "find_words_not_phrase"
+CAVEAT_FIND_MORE_PAGES = "find_more_pages"
 CAVEAT_ORDINANCE_PDF = "ordinance_pdf"
 CAVEAT_ORDINANCE_PDF_AVAILABLE = "ordinance_pdf_available"
 CAVEAT_ORDINANCE_CITING_SECTIONS = "ordinance_citing_sections"
@@ -1719,9 +1752,55 @@ ATTACHMENT_OUTPUT_SCHEMA = {
         "next_page": {
             "type": ["integer", "null"],
             "description": (
-                "Pass as `page` to continue; null when the last page of "
-                "the document has been returned."
+                "Pass as `page` to continue (with the same `find`, if "
+                "one was given); null when the last page of the document "
+                "has been returned or searched."
             ),
+        },
+        "find": {
+            "type": "object",
+            "description": (
+                "Present only when `find` was given: where the phrase "
+                "occurs. `pages` is then empty."
+            ),
+            "properties": {
+                "query": {"type": "string"},
+                "match": {
+                    "type": "string",
+                    "enum": ["phrase", "all_words"],
+                    "description": (
+                        "phrase: the words occur together, in order. "
+                        "all_words: the phrase occurs nowhere; these pages "
+                        "contain every word of it somewhere."
+                    ),
+                },
+                "searched_from": {"type": ["integer", "null"]},
+                "searched_to": {"type": ["integer", "null"]},
+                "pages_matched": {"type": "integer"},
+                "matches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "page": {"type": "integer"},
+                            "count": {"type": "integer"},
+                            "snippets": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["page", "count", "snippets"],
+                    },
+                },
+            },
+            "required": [
+                "query",
+                "match",
+                "searched_from",
+                "searched_to",
+                "pages_matched",
+                "matches",
+            ],
         },
         "summary": {"type": "string"},
         "caveats": _CAVEAT_SCHEMA,
@@ -1852,7 +1931,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.18.2"
+    plugin_version = "1.19.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2353,6 +2432,11 @@ class EcodePlugin(MCPPlugin):
                     "get_section (get_section 'Title 21' lists that "
                     "title's tables). Returns the text page by page; if "
                     "next_page is set, call again with page=next_page. "
+                    "To locate something in a long document instead of "
+                    "paging through it, pass find (a word, phrase or "
+                    "section number): the result lists the pages where it "
+                    "occurs, with a snippet of each; then read a page "
+                    "with page=<that page>. "
                     "With layout=true (the default) columns are kept "
                     "aligned with spaces: to read a table cell, line the "
                     "mark up with the column headers at the top of the "
@@ -2387,6 +2471,18 @@ class EcodePlugin(MCPPlugin):
                                 "Set false for plain running text."
                             ),
                             "default": True,
+                        },
+                        "find": {
+                            "type": "string",
+                            "maxLength": FIND_MAX_CHARS,
+                            "description": (
+                                "A word, phrase or section number to "
+                                "locate in the document, e.g. 'conditional "
+                                "use' or '21.40.030'. Not case-sensitive; "
+                                "no operators or wildcards. Returns the "
+                                "pages it is on instead of page text; "
+                                "searching starts at `page`."
+                            ),
                         },
                     },
                     "required": ["url"],
@@ -2637,6 +2733,29 @@ class EcodePlugin(MCPPlugin):
                 if not isinstance(layout, bool):
                     raise ToolInputError(
                         f"layout must be true or false (got {layout!r})."
+                    )
+                find = arguments.get("find")
+                if find is not None and not isinstance(find, str):
+                    raise ToolInputError(
+                        f"find must be a string (got {find!r})."
+                    )
+                find = " ".join((find or "").split())
+                if len(find) > FIND_MAX_CHARS:
+                    raise ToolInputError(
+                        f"find is {len(find)} characters; the limit is "
+                        f"{FIND_MAX_CHARS}. Pass a word, a short phrase or "
+                        "a section number."
+                    )
+                if find:
+                    entry = await self._attachment_page_texts(url)
+                    if page > entry["page_count"]:
+                        raise ToolInputError(
+                            f"page {page} is past the end: this document "
+                            f"has {entry['page_count']} page(s). Pages are "
+                            "1-indexed."
+                        )
+                    return self._ok(
+                        *self._format_find(url, find, page, entry)
                     )
                 pdf = await self._download_attachment(url)
                 extracted = await asyncio.to_thread(
@@ -5760,6 +5879,434 @@ class EcodePlugin(MCPPlugin):
         return data
 
     @staticmethod
+    def _extract_page_texts(
+        data: bytes, done: List[str], deadline: Optional[float]
+    ) -> Tuple[int, List[str]]:
+        """(page count, plain text of pages 1..n), continuing after the
+        pages already in `done`.
+
+        Synchronous and CPU-bound; called through asyncio.to_thread. Stops
+        when the call's time budget is nearly spent, always after at least
+        one more page, so every call makes progress. Whitespace is
+        collapsed: a phrase broken across lines is still one phrase.
+        """
+        from pypdf import PdfReader
+
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            if reader.is_encrypted:
+                reader.decrypt("")
+            page_count = len(reader.pages)
+        except Exception as e:
+            raise EcodeAPIError(
+                f"The attachment could not be opened as a PDF "
+                f"({type(e).__name__}); read it at its link instead.",
+                502,
+            ) from e
+        texts = list(done[:page_count])
+        added = 0
+        while len(texts) < page_count:
+            if added and deadline is not None and (
+                deadline - time.monotonic() < FIND_TIME_RESERVE_S
+            ):
+                break
+            try:
+                text = reader.pages[len(texts)].extract_text() or ""
+            except Exception:
+                text = ""
+            texts.append(" ".join(text.split()))
+            added += 1
+        return page_count, texts
+
+    @staticmethod
+    def _attachment_text_key(url: str) -> str:
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        return (
+            f"v{SHARED_CACHE_VERSION}/{ATTACHMENT_TEXT_PREFIX}/"
+            f"{digest}.json.gz"
+        )
+
+    async def _attachment_text_get(
+        self, shared: Tuple[Any, str], url: str, code_date: str
+    ) -> Optional[Dict[str, Any]]:
+        """The stored page texts for `url`, if current. Never raises."""
+        client, bucket = shared
+        key = self._attachment_text_key(url)
+
+        def read() -> bytes:
+            body = client.get_object(Bucket=bucket, Key=key)["Body"]
+            return body.read(SHARED_CACHE_MAX_BYTES + 1)
+
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(read), SHARED_CACHE_TIMEOUT_S
+            )
+            if len(raw) > SHARED_CACHE_MAX_BYTES:
+                raise _SharedCacheUnusable("object larger than expected")
+            inflater = zlib.decompressobj(31)
+            plain = inflater.decompress(raw, ATTACHMENT_TEXT_MAX_BYTES)
+            if inflater.unconsumed_tail:
+                raise _SharedCacheUnusable("text larger than expected")
+            stored = json.loads(plain)
+            age = time.time() - float(stored["fetched_at"])
+            page_count = stored["page_count"]
+            texts = stored["texts"]
+            if (
+                stored.get("version") != SHARED_CACHE_VERSION
+                or stored.get("url") != url
+                or not isinstance(page_count, int)
+                or isinstance(page_count, bool)
+                or page_count < 1
+                or not isinstance(texts, list)
+                or len(texts) > page_count
+                or not all(isinstance(text, str) for text in texts)
+            ):
+                raise _SharedCacheUnusable("unexpected object shape")
+        except Exception as e:  # noqa: BLE001 - never fail a tool call
+            missing = type(e).__name__ == "NoSuchKey" or "NoSuchKey" in str(e)
+            logger.log(
+                logging.INFO if missing else logging.WARNING,
+                "shared cache read of %s: %s: %s",
+                key,
+                type(e).__name__,
+                str(e) or "timed out",
+            )
+            return None
+        if stored.get("code_last_updated") != code_date:
+            logger.info("shared cache %s is for an earlier code date", key)
+            return None
+        if not -300 <= age <= SHARED_CACHE_MAX_AGE_S:
+            logger.info("shared cache %s is %.0f s old; rebuilding", key, age)
+            return None
+        logger.info(
+            "shared cache hit for %s (%d of %d pages)",
+            key,
+            len(texts),
+            page_count,
+        )
+        return {"page_count": page_count, "texts": texts}
+
+    async def _attachment_text_put(
+        self,
+        shared: Tuple[Any, str],
+        url: str,
+        code_date: str,
+        entry: Dict[str, Any],
+    ) -> None:
+        """Store page texts for the other containers. Never raises."""
+        client, bucket = shared
+        key = self._attachment_text_key(url)
+
+        def write() -> int:
+            packer = zlib.compressobj(6, zlib.DEFLATED, 31)
+            body = packer.compress(
+                json.dumps(
+                    {
+                        "version": SHARED_CACHE_VERSION,
+                        "url": url,
+                        "code_last_updated": code_date,
+                        "fetched_at": time.time(),
+                        "page_count": entry["page_count"],
+                        "texts": entry["texts"],
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ) + packer.flush()
+            if len(body) > SHARED_CACHE_MAX_BYTES:
+                raise _SharedCacheUnusable("text too large to share")
+            client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=body,
+                ContentType="application/gzip",
+            )
+            return len(body)
+
+        try:
+            size = await asyncio.wait_for(
+                asyncio.to_thread(write), SHARED_CACHE_TIMEOUT_S
+            )
+            logger.info("shared cache stored %s (%d bytes)", key, size)
+        except Exception as e:  # noqa: BLE001 - never fail a tool call
+            logger.warning(
+                "shared cache write of %s: %s: %s",
+                key,
+                type(e).__name__,
+                str(e) or "timed out",
+            )
+
+    async def _attachment_page_texts(self, url: str) -> Dict[str, Any]:
+        """Plain text of the document's pages, as far as it has been
+        extracted: {"page_count": n, "texts": [page 1, page 2, ...]}.
+
+        Taken from this container's memory, else the shared cache, and
+        extended from the PDF for as long as this call's budget allows.
+        `texts` is shorter than `page_count` when the budget ran out; the
+        next call continues from there.
+        """
+        shared = self._shared_cache_client()
+        # As for the ordinance table: without the code's date there is
+        # nothing to check a stored object against, so the bucket is left
+        # alone.
+        code_date = await self._code_last_updated() if shared else None
+        entry = _ATTACHMENT_TEXT_CACHE.get(url)
+        if entry is not None and code_date and entry.get("code_date") not in (
+            None,
+            code_date,
+        ):
+            entry = None
+        if entry is None and shared and code_date:
+            entry = await self._attachment_text_get(shared, url, code_date)
+        had = len(entry["texts"]) if entry else 0
+        if entry is None or had < entry["page_count"]:
+            pdf = await self._download_attachment(url)
+            page_count, texts = await asyncio.to_thread(
+                self._extract_page_texts,
+                pdf,
+                entry["texts"] if entry else [],
+                _call_deadline.get(),
+            )
+            entry = {"page_count": page_count, "texts": texts}
+            if (
+                shared
+                and code_date
+                and len(texts) > had
+                and page_count >= ATTACHMENT_TEXT_SHARED_MIN_PAGES
+            ):
+                await self._attachment_text_put(shared, url, code_date, entry)
+        entry = {**entry, "code_date": code_date}
+        _ATTACHMENT_TEXT_CACHE.pop(url, None)
+        while len(_ATTACHMENT_TEXT_CACHE) >= ATTACHMENT_CACHE_ENTRIES:
+            _ATTACHMENT_TEXT_CACHE.pop(next(iter(_ATTACHMENT_TEXT_CACHE)))
+        _ATTACHMENT_TEXT_CACHE[url] = entry
+        return entry
+
+    @staticmethod
+    def _find_in_pages(
+        texts: List[str], start_page: int, query: str
+    ) -> Dict[str, Any]:
+        """Where `query` occurs in pages start_page..len(texts).
+
+        The phrase as written (case and line breaks ignored) if it occurs
+        anywhere in that range; otherwise, for a phrase of several words,
+        the pages that contain every word.
+        """
+        needle = query.lower()
+
+        def snippet(text: str, lowered: str, at: int, length: int) -> str:
+            # Lower-casing can change a string's length for a few
+            # characters; positions then belong to the lowered text.
+            source = text if len(text) == len(lowered) else lowered
+            start = max(0, at - FIND_SNIPPET_BEFORE)
+            end = min(len(source), at + length + FIND_SNIPPET_AFTER)
+            return (
+                ("... " if start else "")
+                + source[start:end].strip()
+                + (" ..." if end < len(source) else "")
+            )
+
+        pages = [
+            (number, text, text.lower())
+            for number, text in enumerate(texts, 1)
+            if number >= start_page
+        ]
+        matches: List[Dict[str, Any]] = []
+        for number, text, lowered in pages:
+            count = lowered.count(needle)
+            if not count:
+                continue
+            snippets: List[str] = []
+            at = lowered.find(needle)
+            while at != -1 and len(snippets) < FIND_SNIPPETS_PER_PAGE:
+                snippets.append(snippet(text, lowered, at, len(needle)))
+                # The next snippet starts clear of this one.
+                at = lowered.find(
+                    needle, at + len(needle) + FIND_SNIPPET_AFTER
+                )
+            matches.append(
+                {"page": number, "count": count, "snippets": snippets}
+            )
+        if matches:
+            return {"match": "phrase", "matches": matches}
+        words = sorted(set(needle.split()), key=len, reverse=True)
+        if len(words) < 2:
+            return {"match": "phrase", "matches": []}
+        patterns = [
+            re.compile(rf"(?<!\w){re.escape(word)}(?!\w)") for word in words
+        ]
+        for number, text, lowered in pages:
+            first = [pattern.search(lowered) for pattern in patterns]
+            if all(first):
+                matches.append(
+                    {
+                        "page": number,
+                        "count": 1,
+                        "snippets": [
+                            snippet(
+                                text, lowered, first[0].start(), len(words[0])
+                            )
+                        ],
+                    }
+                )
+        return {
+            "match": "all_words" if matches else "phrase",
+            "matches": matches,
+        }
+
+    def _format_find(
+        self, url: str, query: str, start_page: int, entry: Dict[str, Any]
+    ) -> tuple:
+        texts = entry["texts"]
+        page_count = entry["page_count"]
+        searched_to = len(texts)
+        filename = unquote(url.rsplit("/", 1)[-1])
+        searched = searched_to >= start_page
+        found = (
+            self._find_in_pages(texts, start_page, query)
+            if searched
+            else {"match": "phrase", "matches": []}
+        )
+        matches = found["matches"]
+        listed = matches[:FIND_PAGES_LISTED]
+        again = f'read_attachment again with find="{query}"'
+
+        entries: List[tuple] = []
+        if self._is_ordinance_pdf(url):
+            entries.append(
+                (
+                    CAVEAT_ORDINANCE_PDF,
+                    "This is an ORDINANCE as the publisher holds it, not "
+                    "code text: it has not yet been worked into the "
+                    "published code, and extraction loses the marks that "
+                    "show which words it deletes. Read the page with "
+                    "read_attachment before relying on a snippet; that "
+                    "result explains the drafting marks.",
+                )
+            )
+        next_page: Optional[int] = None
+        if len(matches) > len(listed):
+            next_page = listed[-1]["page"] + 1
+            entries.append(
+                (
+                    CAVEAT_FIND_MORE_PAGES,
+                    f"{len(matches)} pages match; the first {len(listed)} "
+                    f"are listed. Call {again} and page={next_page} for "
+                    "the rest, or use a more specific phrase.",
+                )
+            )
+        elif not searched:
+            next_page = start_page
+            entries.append(
+                (
+                    CAVEAT_FIND_INCOMPLETE,
+                    f"NOT SEARCHED YET: the text of this {page_count}-page "
+                    f"document is still being prepared (pages 1-"
+                    f"{searched_to} are ready) and page {start_page} has "
+                    f"not been reached. Call {again} and page={start_page} "
+                    "to continue.",
+                )
+            )
+        elif searched_to < page_count:
+            next_page = searched_to + 1
+            entries.append(
+                (
+                    CAVEAT_FIND_INCOMPLETE,
+                    f"INCOMPLETE: only pages {start_page}-{searched_to} of "
+                    f"{page_count} have been searched; preparing the text "
+                    "of a document this long takes more than one call. "
+                    f"Call {again} and page={next_page} to search the "
+                    "rest before saying what the document does not "
+                    "contain.",
+                )
+            )
+        if found["match"] == "all_words":
+            entries.append(
+                (
+                    CAVEAT_FIND_WORDS_NOT_PHRASE,
+                    f'The phrase "{query}" does not occur in the pages '
+                    "searched. The pages listed contain every word of it, "
+                    "but not together: they are NOT matches for the "
+                    "phrase.",
+                )
+            )
+        if listed:
+            entries.append(
+                (
+                    CAVEAT_FIND_SNIPPETS,
+                    "Snippets are extracted PDF text with line breaks "
+                    "removed, to show where the phrase is. Read the page "
+                    "with read_attachment(url, page=<page>) before quoting "
+                    "or summarizing it.",
+                )
+            )
+        if searched and not any(texts[start_page - 1:]):
+            entries.append(
+                (
+                    CAVEAT_NO_TEXT_LAYER,
+                    "No text could be extracted from the pages searched "
+                    "-- they are probably scanned images or drawings, so "
+                    "nothing can be found in them here. Read the PDF at "
+                    "its link.",
+                )
+            )
+
+        span = (
+            f"pages {start_page}-{searched_to} of {page_count}"
+            if searched
+            else f"this {page_count}-page document"
+        )
+        if not searched:
+            summary = f'{filename}: "{query}" has not been searched for yet.'
+        elif not matches:
+            summary = (
+                f'{filename}: "{query}" was not found in {span}. PDF text '
+                "can differ from the printed page (hyphenation, columns, "
+                "spelling): try a shorter phrase or a single distinctive "
+                "word."
+            )
+        elif found["match"] == "all_words":
+            summary = (
+                f'{filename}: the phrase "{query}" was not found in '
+                f"{span}; {len(matches)} page(s) contain all of its words."
+            )
+        else:
+            total = sum(match["count"] for match in matches)
+            summary = (
+                f'{filename}: "{query}" occurs {total} time(s) on '
+                f"{len(matches)} page(s) in {span}."
+            )
+        caveats, caveat_lines = self._caveats(entries)
+        lines = [summary, f"link: {url}"] + caveat_lines
+        for match in listed:
+            lines.append("")
+            lines.append(
+                f"--- page {match['page']} of {page_count} "
+                f"({match['count']} match"
+                f"{'' if match['count'] == 1 else 'es'}) ---"
+                if found["match"] == "phrase"
+                else f"--- page {match['page']} of {page_count} ---"
+            )
+            lines.extend(match["snippets"])
+        return "\n".join(lines), {
+            "url": url,
+            "filename": filename,
+            "page_count": page_count,
+            "layout": False,
+            "pages": [],
+            "next_page": next_page,
+            "find": {
+                "query": query,
+                "match": found["match"],
+                "searched_from": start_page if searched else None,
+                "searched_to": searched_to if searched else None,
+                "pages_matched": len(matches),
+                "matches": listed,
+            },
+            "summary": summary,
+            "caveats": caveats,
+        }
+
+    @staticmethod
     def _extract_pdf(
         data: bytes, start_page: int, layout: bool, deadline: Optional[float]
     ) -> Dict[str, Any]:
@@ -5886,7 +6433,9 @@ class EcodePlugin(MCPPlugin):
                 (
                     CAVEAT_MORE_ATTACHMENT_PAGES,
                     f"Showing {span} of {page_count}. Call read_attachment "
-                    f"again with page={next_page} to continue.",
+                    f"again with page={next_page} to continue. To locate a "
+                    "word, phrase or section number in this document "
+                    "without paging, pass find instead.",
                 )
             )
         if extracted["truncated_page"]:

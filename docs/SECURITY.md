@@ -192,14 +192,23 @@ refusals.
 
 `terraform/aws/shared_cache.tf` creates one private S3 bucket,
 `<lambda name>-cache-<account id>`, and passes its name to the Lambda as
-`ECODE_SHARED_CACHE_BUCKET`. The plugin stores one thing in it: eCode360's
-response for the Ordinance Disposition Table, which takes about 9 seconds to
-fetch and which every new Lambda container would otherwise fetch again.
+`ECODE_SHARED_CACHE_BUCKET`. The plugin stores two kinds of thing in it:
+eCode360's response for the Ordinance Disposition Table, which takes about 9
+seconds to fetch and which every new Lambda container would otherwise fetch
+again; and the extracted text of long PDF attachments (20 pages or more),
+which `read_attachment` needs in full to find a phrase and which takes longer
+to extract than one call may spend.
 
 - **Contents.** Published code text only, the same text ecode360.com serves
-  to anyone. No credentials, no caller input, no logs. Nothing a caller sends
-  chooses the object key: it is built from the configured library and the
-  table's guid from the table of contents.
+  to anyone. No credentials, no logs, and nothing a caller typed: not the
+  phrase searched for, only the document's text. The table's key is built
+  from the configured library and the table's guid from the table of
+  contents. An attachment's key is the SHA-256 of its URL. That URL does come
+  from the caller, but only after it has passed the `read_attachment` URL
+  check and eCode360 has served a PDF of 20 pages or more from it, so a
+  caller can cause an object to be written only for a real document of this
+  library. Objects are small (the longest is about half a megabyte) and
+  expire.
 - **Access.** All public access is blocked, objects are encrypted at rest
   (SSE-S3), and the Lambda role may only `s3:GetObject` and `s3:PutObject` on
   the bucket's objects and `s3:ListBucket` on the bucket (so a missing object

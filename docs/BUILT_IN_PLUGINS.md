@@ -329,7 +329,7 @@ Fine and penalty sections are listed first and reference tables last.
 `section` must be a full section number, optionally with a subsection
 (`9.28.019B`). A chapter or title number is refused.
 
-### `read_attachment(url, page=1, layout=true)`
+### `read_attachment(url, page=1, layout=true, find=None)`
 
 The text of a PDF the code publishes as an attachment. Some tables exist only
 as PDFs, notably Table 21.05-1, the table of allowed uses by zoning district.
@@ -340,6 +340,23 @@ Pass a URL from the `attachments` list of `get_section`, or from a
   more pages remain.
 - `layout=true` keeps the column alignment of tables. Set it to `false` for
   plain reading order.
+- `find` locates a word, phrase or section number in the document instead of
+  returning page text. Some attached documents run to hundreds of pages and a
+  call returns about a dozen, so paging is no way to reach a passage. The
+  result has an empty `pages` list and a `find` object: the pages the phrase
+  is on (the first 25), how often on each, and a snippet or two. Matching
+  ignores case and line breaks and has no operators. If the phrase occurs
+  nowhere, pages containing all of its words are listed instead, marked
+  `all_words` with a `find_words_not_phrase` caveat. Searching starts at
+  `page`. Then read a page with `page=<that page>`.
+
+  Finding needs the text of every page. That is kept per container, and for
+  documents of 20 pages or more in the shared cache bucket, under the same
+  rules as the Ordinance Disposition Table (current code date, under 7 days
+  old). Extracting a very long document can take more than one call: the
+  result then carries a `find_incomplete` caveat saying which pages were
+  searched and `next_page` to continue from, and the pages already extracted
+  are kept, so the following call picks up where this one stopped.
 
 It also reads an ordinance that `search_code` returns as a PDF (a hit of type
 `law`, labelled "Ordinance PDF", with a URL like
@@ -389,6 +406,10 @@ code and a message. The ones seen most often:
 | `proximity_ignored` | The query used `"a b"~N`. eCode360 has no proximity search, so the phrase was matched exactly; the message suggests the words joined with `AND` |
 | `title_attachments` | A note in the section says something is "included as an attachment to this title"; the title's PDFs are listed in `title_attachments` |
 | `ordinance_pdf` | `read_attachment` read an ordinance PDF: it is not code text, and extraction loses the marks that show deleted language |
+| `find_incomplete` | `read_attachment` with `find`: only part of the document has been searched so far; call again from `next_page` |
+| `find_more_pages` | `read_attachment` with `find`: more than 25 pages match; the rest follow from `next_page` |
+| `find_words_not_phrase` | `read_attachment` with `find`: the phrase occurs nowhere; the pages listed contain all of its words, apart |
+| `find_snippets` | `read_attachment` with `find`: snippets only locate the phrase; read the page before quoting |
 | `ordinance_pdf_available` | `find_ordinance`: the publisher holds this ordinance as a PDF; the message gives the link |
 | `ordinance_citing_sections` | `find_ordinance`: the table does not list the ordinance, so the sections that cite it were found by search; the message lists them with their citations |
 | `ordinances_not_yet_codified` | `recent_ordinances`: ordinances adopted but not yet in the code text, newer than the whole list, with their PDF links |
