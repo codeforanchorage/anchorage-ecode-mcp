@@ -310,6 +310,31 @@ class TestOutOfTime:
         assert [m["page"] for m in sc["find"]["matches"]] == [3]
 
 
+    @pytest.mark.asyncio
+    async def test_a_long_list_from_part_of_the_document_says_so(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(ecode_mod, "FIND_PAGES_LISTED", 1)
+        calls = iter([2, 99])
+
+        real = EcodePlugin._extract_page_texts
+
+        def two_pages(data, done, _deadline):
+            count, texts = real(data, done, None)
+            return count, texts[: len(done) + next(calls)]
+
+        monkeypatch.setattr(
+            EcodePlugin, "_extract_page_texts", staticmethod(two_pages)
+        )
+        plugin = _attachment_plugin(_pdf_response(["kennel"] * 4))
+        sc, _ = await _find(plugin, "kennel")
+        assert _codes(sc)[:2] == [CAVEAT_FIND_MORE_PAGES, CAVEAT_FIND_INCOMPLETE]
+        assert sc["next_page"] == 2
+        sc, _ = await _find(plugin, "kennel", page=2)
+        assert sc["find"]["searched_to"] == 4
+        assert CAVEAT_FIND_INCOMPLETE not in _codes(sc)
+
+
 class TestSharedCache:
     @pytest.mark.asyncio
     async def test_another_container_does_not_download_the_pdf(self, s3):

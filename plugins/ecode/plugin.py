@@ -6194,6 +6194,16 @@ class EcodePlugin(MCPPlugin):
                     "the rest, or use a more specific phrase.",
                 )
             )
+            if searched_to < page_count:
+                entries.append(
+                    (
+                        CAVEAT_FIND_INCOMPLETE,
+                        f"INCOMPLETE: only pages {start_page}-{searched_to} "
+                        f"of {page_count} have been searched so far, so "
+                        "the count above is not the whole document's. The "
+                        "same call continues the search.",
+                    )
+                )
         elif not searched:
             next_page = start_page
             entries.append(
