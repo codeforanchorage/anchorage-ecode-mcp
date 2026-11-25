@@ -139,7 +139,11 @@ CPU-bound, which is why the function runs at 1024 MB while using about 150 MB.
   14-day retention
 - **API Gateway access logs:** a separate log group, 30-day retention
 - **Alarms:** Lambda errors, Lambda throttles, Lambda duration near the
-  timeout, and API Gateway 5xx
+  timeout, and API Gateway 5xx. Two more count log lines, because a failed
+  tool call is still an HTTP 200: `upstream-auth` fires when eCode360 refuses
+  the server's API key even once (a wrong or revoked key, or a short fault at
+  the publisher), and `tool-errors` fires on five failed tool calls in 15
+  minutes.
 
 ```bash
 aws logs tail /aws/lambda/anchorage-ecode-mcp-prod --follow
@@ -171,6 +175,6 @@ terraform destroy -var-file=prod.tfvars
 | "Multiple Plugins Enabled" | Enable only one plugin in `config.yaml` |
 | Plan shows no change after a config edit | Terraform was run directly; use the deploy script |
 | Plan touches unexpected resources | Wrong workspace; check `terraform workspace show` |
-| Tool errors that mention credentials | The Lambda's `ECODE_API_KEY` / `ECODE_API_SECRET` are missing or wrong |
+| Tool errors that mention credentials, or the `upstream-auth` alarm | The Lambda's `ECODE_API_KEY` / `ECODE_API_SECRET` are missing or wrong, or eCode360 is refusing a good key for a while. The log line starting `upstream auth failure` has eCode360's own answer. If it does not clear in a few minutes, check the key. |
 | 504 from the gateway | The Lambda outlived 29 s; check the timeout ordering |
 | 5xx | Check the CloudWatch logs |

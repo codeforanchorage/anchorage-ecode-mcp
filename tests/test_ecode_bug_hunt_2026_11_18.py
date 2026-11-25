@@ -106,7 +106,7 @@ class TestUpstreamRefusals:
         _respond(plugin, lambda path, params: {
             "status_code": 403, "json": {"message": "Forbidden"}})
         result = await plugin.execute_tool("search_code", {"query": "snow"})
-        assert "rejected this server's credentials" in result.error_message
+        assert "refusing this server's credentials" in result.error_message
 
     @pytest.mark.asyncio
     async def test_node_above_chapter_level_is_explained_without_retries(self, plugin):

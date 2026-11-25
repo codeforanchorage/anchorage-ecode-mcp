@@ -114,6 +114,10 @@ TOOL_CALL_BUDGET_S = 24.0
 # full per-request timeout, and a second one cannot fit in the budget.
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF_S = 0.4
+# Logged when eCode360 refuses the server's credentials. A CloudWatch
+# metric filter matches this exact phrase (terraform/aws/
+# cloudwatch_alarms.tf), so change the two together.
+UPSTREAM_AUTH_LOG = "upstream auth failure"
 RETRY_ONLY_WITHIN_S = 6.0
 
 # Deadline (monotonic seconds) of the tool call currently executing. A
@@ -1937,7 +1941,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.19.1"
+    plugin_version = "1.19.2"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -4087,15 +4091,39 @@ class EcodePlugin(MCPPlugin):
                     await self._backoff(attempt, path, f"HTTP {status}")
                     continue
                 if status in (401, 403):
-                    # Our credentials, not the caller's request. This is
-                    # where a bad or rotated key shows up now that
-                    # initialize() no longer probes.
+                    # Our credentials, not the caller's request: either a
+                    # bad or rotated key, or the publisher's gateway
+                    # refusing a good one for a few minutes (it has). The
+                    # caller cannot tell which and can fix neither, so it
+                    # is told what to do; the detail goes to the log, under
+                    # a fixed phrase an alarm counts (UPSTREAM_AUTH_LOG).
+                    if attempt == 1 and self._may_retry(attempt, started):
+                        await self._backoff(attempt, path, f"HTTP {status}")
+                        continue
+                    logger.error(
+                        "%s: HTTP %s for %s after %d attempt(s): %s. If it "
+                        "persists, check ECODE_API_KEY / ECODE_API_SECRET.",
+                        UPSTREAM_AUTH_LOG,
+                        status,
+                        path,
+                        attempt,
+                        detail,
+                    )
+                    library = self.plugin_config.customer_id
                     raise EcodeAPIError(
-                        f"eCode360 rejected this server's credentials "
-                        f"(HTTP {status}) for {path}: {detail}. This is a "
-                        "server configuration problem (check "
-                        "ECODE_API_KEY / ECODE_API_SECRET), not a problem "
-                        "with the request.",
+                        "eCode360 is refusing this server's credentials "
+                        f"right now (HTTP {status}). Nothing is wrong with "
+                        "the request, and repeating it straight away will "
+                        "not help. This has been a short fault at the "
+                        "publisher before; if it lasts, the server's "
+                        "operator has to fix the credentials. Tell the "
+                        "user the code could not be read just now and to "
+                        "try again in a few minutes. Do not answer from "
+                        "memory instead; the code can be read at "
+                        f"https://ecode360.com/{library}. (For the "
+                        "operator: if this does not clear, check "
+                        "ECODE_API_KEY / ECODE_API_SECRET; the server log "
+                        "has eCode360's own answer.)",
                         status,
                     ) from e
                 suffix = f" after {attempt} attempt(s)" if attempt > 1 else ""
@@ -4589,8 +4617,11 @@ class EcodePlugin(MCPPlugin):
                 )
             elif is_pdf:
                 lines.append(
-                    "   (PDF document — not code text; pass the link below "
-                    "to read_attachment)"
+                    "   (PDF document — not code text. The excerpt may be "
+                    "the start of the document, not where the words "
+                    "matched: call read_attachment with the link below and "
+                    "find=<a word or phrase> to list the pages it is on, "
+                    "then read those pages)"
                 )
             if snippet:
                 lines.append(f"   …{snippet}…")

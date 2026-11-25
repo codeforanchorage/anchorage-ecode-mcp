@@ -97,3 +97,82 @@ resource "aws_cloudwatch_metric_alarm" "apigw_5xx" {
   alarm_actions = local.alarm_actions
   ok_actions    = local.alarm_actions
 }
+
+###############################################################################
+# Tool errors.
+#
+# A tool call that fails is still an HTTP 200 with a JSON-RPC body, so none of
+# the alarms above see it. These two count log lines instead.
+#
+# upstream_auth: eCode360 refused the server's API key. Either the key is
+# wrong or was revoked, or the publisher's gateway is refusing a good key for
+# a few minutes. One occurrence is worth an email: until it clears, no tool
+# can read the code. The pattern is the plugin's UPSTREAM_AUTH_LOG constant;
+# tests/test_ecode_upstream_auth.py checks the two agree.
+#
+# tool_errors: any tool call that failed for a reason other than its
+# arguments (timeouts, upstream errors, bugs). A single one is ordinary, so
+# this alarms on a run of them.
+###############################################################################
+
+resource "aws_cloudwatch_log_metric_filter" "upstream_auth" {
+  name           = "${local.lambda_name}-upstream-auth"
+  log_group_name = aws_cloudwatch_log_group.lambda_logs.name
+  pattern        = "\"upstream auth failure\""
+
+  metric_transformation {
+    name          = "${local.lambda_name}-upstream-auth"
+    namespace     = "MCPServer/Tools"
+    value         = "1"
+    default_value = "0"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "upstream_auth" {
+  alarm_name          = "${local.lambda_name}-upstream-auth"
+  alarm_description   = "eCode360 refused the server's API key: no tool can read the code until this clears. If it lasts, check ECODE_API_KEY / ECODE_API_SECRET."
+  namespace           = "MCPServer/Tools"
+  metric_name         = "${local.lambda_name}-upstream-auth"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+
+  depends_on = [aws_cloudwatch_log_metric_filter.upstream_auth]
+}
+
+resource "aws_cloudwatch_log_metric_filter" "tool_errors" {
+  name           = "${local.lambda_name}-tool-errors"
+  log_group_name = aws_cloudwatch_log_group.lambda_logs.name
+  pattern        = "\"Error executing tool\""
+
+  metric_transformation {
+    name          = "${local.lambda_name}-tool-errors"
+    namespace     = "MCPServer/Tools"
+    value         = "1"
+    default_value = "0"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "tool_errors" {
+  alarm_name          = "${local.lambda_name}-tool-errors"
+  alarm_description   = "Several tool calls failed for a reason other than their arguments (upstream errors, timeouts or a bug). See the Lambda log for 'Error executing tool'."
+  namespace           = "MCPServer/Tools"
+  metric_name         = "${local.lambda_name}-tool-errors"
+  statistic           = "Sum"
+  period              = 900
+  evaluation_periods  = 1
+  threshold           = 5
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+
+  depends_on = [aws_cloudwatch_log_metric_filter.tool_errors]
+}
