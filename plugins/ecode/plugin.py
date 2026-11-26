@@ -673,6 +673,35 @@ _CAVEAT_SCHEMA = {
     },
 }
 
+# The building codes of Title 23 print a section heading ("§ 23.10.103
+# Enforcement.") as a section with no text, and its parts ("§ 23.10.103.1",
+# "§ 23.10.103.2") as separate sections beside it in the chapter, not as
+# its children. A read of the heading then returned a bare header, and the
+# structure endpoint lists no children for it. Such a read now lists the
+# sections the outline numbers under the heading.
+CAVEAT_SECTION_TEXT_IN_PARTS = "section_text_in_parts"
+PARTS_SHOWN = 40
+
+_PARTS_SCHEMA = {
+    "type": "array",
+    "description": (
+        "Filled only for a section that is a heading with no text of its "
+        "own: the sections the outline numbers under it (N.1, N.2 ...), "
+        "which hold its text. Read them with get_sections. Empty "
+        "otherwise."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "guid": {"type": "string"},
+            "ref": {"type": "string"},
+            "title": {"type": ["string", "null"]},
+            "url": {"type": "string"},
+        },
+        "required": ["guid", "ref", "title", "url"],
+    },
+}
+
 # A node as it appears in the outline. `ref` is the section number
 # (e.g. "21.05.010"); `guid` is the opaque id every other tool takes.
 _NODE_SCHEMA = {
@@ -919,6 +948,11 @@ HISTORY_EFFECTIVE_RE = re.compile(
     r"(?i)\beff(?:ective)?\.?\s+(\d{1,2}-\d{1,2}-\d{4})"
 )
 HISTORY_ENTRY_CHARS = 300
+# The history note is printed at the end of a section. When a response
+# stops before the end, the note is repeated in the header (up to this
+# many characters, newest entries kept), so that learning which ordinances
+# amended a long section does not take a read of its last part.
+HISTORY_HEAD_CHARS = 3000
 
 _HISTORY_SCHEMA = {
     "type": ["object", "null"],
@@ -1001,6 +1035,7 @@ SECTION_OUTPUT_SCHEMA = {
         "has_attachment": {"type": "boolean"},
         "attachments": _ATTACHMENTS_SCHEMA,
         "title_attachments": _TITLE_ATTACHMENTS_SCHEMA,
+        "parts": _PARTS_SCHEMA,
         "is_pdf": {"type": "boolean"},
         "code_last_updated": _CODE_LAST_UPDATED_SCHEMA,
         "caveats": _CAVEAT_SCHEMA,
@@ -1048,6 +1083,7 @@ SECTIONS_OUTPUT_SCHEMA = {
                     "has_attachment": {"type": "boolean"},
                     "attachments": _ATTACHMENTS_SCHEMA,
                     "title_attachments": _TITLE_ATTACHMENTS_SCHEMA,
+                    "parts": _PARTS_SCHEMA,
                     "is_pdf": {"type": "boolean"},
                     "caveats": _CAVEAT_SCHEMA,
                 },
@@ -1837,6 +1873,7 @@ STRUCTURE_OUTPUT_SCHEMA = {
         "parent": {"type": ["string", "null"]},
         "url": {"type": ["string", "null"]},
         "children": {"type": "array", "items": _NODE_SCHEMA},
+        "parts": _PARTS_SCHEMA,
         "summary": {"type": "string"},
         "caveats": _CAVEAT_SCHEMA,
     },
@@ -1941,7 +1978,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.19.2"
+    plugin_version = "1.20.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -2200,7 +2237,12 @@ class EcodePlugin(MCPPlugin):
                     f"Up to {MAX_CONTENT_CHARS:,} characters of text are "
                     "returned per call; a longer section says so and "
                     "gives the `offset` to call again with for the rest "
-                    "-- read it all before summarizing the section."
+                    "-- read it all before summarizing the section. The "
+                    "history note (the ordinances that amended the "
+                    "section) is in the header of every part, so there "
+                    "is no need to read to the end for it. A section "
+                    "that is only a heading lists the sections numbered "
+                    "under it, which hold its text."
                 ),
                 input_schema={
                     "type": "object",
@@ -2618,7 +2660,13 @@ class EcodePlugin(MCPPlugin):
                 )
                 # structure responses wrap the node in an {error, results} envelope
                 node = data.get("results", data) if isinstance(data, dict) else data
-                return self._ok(*self._format_structure(node))
+                parts: List[Dict[str, Any]] = []
+                if isinstance(node, dict) and not node.get("children"):
+                    parts = await self._parts_of(
+                        str(node.get("guid") or node.get("id") or ""),
+                        node.get("number"),
+                    )
+                return self._ok(*self._format_structure(node, parts))
 
             if tool_name == "get_section":
                 offset = self._int_arg(arguments, "offset", 0)
@@ -2903,6 +2951,22 @@ class EcodePlugin(MCPPlugin):
     def _sections_arg(args: Dict[str, Any]) -> Tuple[List[str], int]:
         """(distinct requested sections in order, how many repeats merged)."""
         raw = args.get("sections")
+        if raw is None:
+            # get_section's argument is `guid`, and a caller moving from
+            # one tool to the other carries the name over. What is meant
+            # is not in doubt, so take it.
+            for other in ("guids", "guid", "section"):
+                if args.get(other) is not None:
+                    raw = args[other]
+                    break
+        if isinstance(raw, str) and raw.strip().startswith("["):
+            # The list written out as a JSON string.
+            try:
+                decoded = json.loads(raw)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, list):
+                raw = decoded
         if isinstance(raw, str):
             # A model that has one section in hand often passes a bare
             # string. That is unambiguous, so take it.
@@ -3012,14 +3076,98 @@ class EcodePlugin(MCPPlugin):
             if subsection:
                 # A copy: cached responses are shared and read-only.
                 data = {**data, "_subsection": subsection}
-            return await self._with_title_attachments(data), resolved_from
+            data = await self._with_title_attachments(data)
+            return await self._with_parts(data), resolved_from
         else:
             guid = self._guid_arg({"guid": raw})
             resolved_from = None
         data = await self._get_recent_json(
             self._cust_path(f"/code/content/{quote(guid, safe='')}")
         )
-        return await self._with_title_attachments(data), resolved_from
+        data = await self._with_title_attachments(data)
+        return await self._with_parts(data), resolved_from
+
+    # ── A heading section and its parts ─────────────────────────────────
+
+    def _outline_parts(
+        self, toc: Any, guid: str, number: Any
+    ) -> List[Dict[str, Any]]:
+        """Sections the outline numbers under section `number` ('N.1',
+        'N.2', 'N.2.1'), in outline order. See _PARTS_SCHEMA."""
+        base = self._norm_number(number if isinstance(number, str) else "")
+        if base.count(".") < 2:
+            return []
+        prefix = base + "."
+        parts: List[Dict[str, Any]] = []
+        seen = {guid}
+
+        def walk(node: Any) -> None:
+            if not isinstance(node, dict):
+                return
+            node_guid = str(node.get("guid") or "")
+            if (
+                node.get("type") == "section"
+                and node_guid
+                and node_guid not in seen
+                and self._norm_number(node.get("number")).startswith(prefix)
+            ):
+                seen.add(node_guid)
+                parts.append(
+                    {
+                        "guid": node_guid,
+                        "ref": " ".join((node.get("number") or "").split()),
+                        "title": (node.get("title") or "").strip() or None,
+                        "url": PUBLIC_URL.format(guid=node_guid),
+                    }
+                )
+            for child in node.get("children") or []:
+                walk(child)
+
+        walk(toc)
+        return parts
+
+    async def _parts_of(self, guid: str, number: Any) -> List[Dict[str, Any]]:
+        """_outline_parts from the cached outline. Decorates a result and
+        must never fail one."""
+        if self._norm_number(
+            number if isinstance(number, str) else ""
+        ).count(".") < 2:
+            return []
+        try:
+            return self._outline_parts(await self._get_toc(), guid, number)
+        except (EcodeAPIError, ToolInputError) as e:
+            logger.warning("could not list the parts of %s: %s", number, e)
+            return []
+
+    async def _with_parts(self, data: Any) -> Any:
+        """`data` with the sections numbered under it, when it is a section
+        with no text of its own."""
+        if (
+            not isinstance(data, dict)
+            or data.get("pdf")
+            or data.get("attachments")
+            # The API gives a heading's own title as its content, which
+            # the rendering drops; anything longer is text.
+            or self._content_chars(data)
+            > len(data.get("title") or "") + 2
+        ):
+            return data
+        body = self._render_content_node(
+            data,
+            depth=0,
+            budget=[self._UNCAPPED],
+            heading_shown=True,
+            notes={"inferred": 0, "uncertain": 0},
+        )
+        if body.strip():
+            return data
+        parts = await self._parts_of(
+            str(data.get("id") or data.get("guid") or ""), data.get("number")
+        )
+        if not parts:
+            return data
+        # A copy: cached responses are shared and read-only.
+        return {**data, "_parts": parts}
 
     # ── Attachments of a whole title ────────────────────────────────────
 
@@ -5313,7 +5461,27 @@ class EcodePlugin(MCPPlugin):
             "caveats": caveats,
         }
 
-    def _format_structure(self, data: Dict[str, Any]) -> tuple:
+    @staticmethod
+    def _part_lines(parts: List[Dict[str, Any]]) -> List[str]:
+        lines = [
+            "part: "
+            + " ".join(p for p in (part["ref"], part["title"] or "") if p)
+            + f"  [guid: {part['guid']}]"
+            for part in parts[:PARTS_SHOWN]
+        ]
+        if len(parts) > PARTS_SHOWN:
+            lines.append(
+                f"(and {len(parts) - PARTS_SHOWN} more part(s): "
+                "browse_structure on the chapter lists them all)"
+            )
+        return lines
+
+    def _format_structure(
+        self,
+        data: Dict[str, Any],
+        parts: Optional[List[Dict[str, Any]]] = None,
+    ) -> tuple:
+        parts = [dict(part) for part in parts or []]
         guid = str(data.get("guid") or data.get("id", "") or "ROOT")
         url = PUBLIC_URL.format(guid=guid) if guid and guid != "ROOT" else None
         lines = [
@@ -5337,7 +5505,18 @@ class EcodePlugin(MCPPlugin):
         children = self._structured_children(raw_children)
 
         entries: List[tuple] = []
-        if not children:
+        if not children and parts:
+            entries.append(
+                (
+                    CAVEAT_SECTION_TEXT_IN_PARTS,
+                    "This section has no children, but the outline numbers "
+                    f"{len(parts)} section(s) under it, listed above as "
+                    "`part`. A section set out this way is usually a "
+                    "heading whose text is in those parts: read them with "
+                    "get_sections.",
+                )
+            )
+        elif not children:
             entries.append(
                 (
                     CAVEAT_NODE_HAS_NO_CHILDREN,
@@ -5347,8 +5526,16 @@ class EcodePlugin(MCPPlugin):
                 )
             )
 
-        lines.extend(body or ["  (none — this may be a leaf section; "
-                              "use get_section to read its text)"])
+        if body:
+            lines.extend(body)
+        elif parts:
+            lines.append("  (none)")
+            lines.extend(self._part_lines(parts))
+        else:
+            lines.append(
+                "  (none — this may be a leaf section; "
+                "use get_section to read its text)"
+            )
         caveats, caveat_lines = self._caveats(entries)
         lines.extend(caveat_lines)
 
@@ -5367,6 +5554,7 @@ class EcodePlugin(MCPPlugin):
             "parent": data.get("parent") or None,
             "url": url,
             "children": children,
+            "parts": parts,
             "summary": summary,
             "caveats": caveats,
         }
@@ -5678,6 +5866,19 @@ class EcodePlugin(MCPPlugin):
                 )
             )
 
+        parts = [dict(part) for part in data.get("_parts") or []]
+        if parts:
+            entries.append(
+                (
+                    CAVEAT_SECTION_TEXT_IN_PARTS,
+                    f"{ref or 'This section'} is a heading with no text of "
+                    f"its own. Its text is in the {len(parts)} section(s) "
+                    "numbered under it, listed below as `part`: read them "
+                    "with get_sections before saying what "
+                    f"{ref or 'the section'} provides.",
+                )
+            )
+
         caveats, caveat_lines = self._caveats(entries)
         history = self._parse_history(data.get("content"))
 
@@ -5695,6 +5896,29 @@ class EcodePlugin(MCPPlugin):
                 f"{history['latest_citation']}, {history['latest_date']} "
                 "(adoption date as printed)"
             )
+        if history and shown_end < len(full_body):
+            # The note is at the end of the section, past what is shown.
+            shown_entries: List[str] = []
+            used = 0
+            for entry in reversed(history["entries"]):
+                printed = " ".join(entry["text"].split())
+                if shown_entries and used + len(printed) > HISTORY_HEAD_CHARS:
+                    break
+                shown_entries.append(printed)
+                used += len(printed) + 2
+            left_out = len(history["entries"]) - len(shown_entries)
+            head.append(
+                "history note (printed at the end of this section, after "
+                "the text shown here; oldest first"
+                + (
+                    f"; the {left_out} oldest entries are left out"
+                    if left_out
+                    else ""
+                )
+                + "): "
+                + "; ".join(reversed(shown_entries))
+            )
+        head.extend(self._part_lines(parts))
         if images:
             head.append(f"images: {len(images)} (relative links on ecode360.com)")
         for item in attachment_list:
@@ -5727,6 +5951,7 @@ class EcodePlugin(MCPPlugin):
             "has_attachment": has_attachment,
             "attachments": attachment_list,
             "title_attachments": title_attachments,
+            "parts": parts,
             "is_pdf": is_pdf,
             "caveats": caveats,
         }
@@ -6608,6 +6833,7 @@ class EcodePlugin(MCPPlugin):
                         "has_attachment": False,
                         "attachments": [],
                         "title_attachments": [],
+                        "parts": [],
                         "is_pdf": False,
                         "caveats": [],
                     }

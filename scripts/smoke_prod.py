@@ -604,6 +604,38 @@ except Exception as e:
     check("get_section: Charter 3.01 lists the Commission Commentary PDF",
           False, repr(e))
 
+# A building-code heading has no text of its own; its parts are separate
+# sections, and the read names them.
+try:
+    r = call_tool("get_section", {"guid": "23.70.705"})
+    sc = structured_of(r) or {}
+    ok, why = conforms("ecode__get_section", sc)
+    refs = [p.get("ref") for p in sc.get("parts") or []]
+    check("get_section: a heading section lists the sections under it",
+          ok
+          and any(c["code"] == "section_text_in_parts"
+                  for c in sc["caveats"])
+          and bool(refs)
+          and all((ref or "").replace("\xa0", " ").startswith("§ 23.70.705.")
+                  for ref in refs),
+          why or f"parts={refs}")
+except Exception as e:
+    check("get_section: a heading section lists the sections under it",
+          False, repr(e))
+
+# A section longer than one response shows its history note up front.
+try:
+    r = call_tool("get_section", {"guid": "9.28.020"})
+    sc = structured_of(r) or {}
+    length = sc.get("length") or {}
+    cut = length.get("shown_to", 0) < length.get("text_chars", 0)
+    check("get_section: a section cut short shows its history note",
+          not cut or "history note (printed at the end" in text_of(r),
+          f"cut={cut}")
+except Exception as e:
+    check("get_section: a section cut short shows its history note",
+          False, repr(e))
+
 try:
     r = call_tool("search_code", {"query": "commentary", "within": "Charter"})
     sc = structured_of(r) or {}

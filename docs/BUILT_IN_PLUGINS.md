@@ -111,6 +111,11 @@ its guid lists them. For this code that is about 480 entries.
 One node of the hierarchy and its immediate children. Start at `ROOT` and walk
 down by child guid.
 
+A section with no children that is a heading for other sections (see `parts`
+under `get_section`) lists those sections as `parts`, with a
+`section_text_in_parts` caveat in place of the usual note that the node is a
+leaf.
+
 ### `get_section(guid, offset=0)`
 
 The full text of a section with its nested subsections, the public
@@ -169,9 +174,23 @@ gives one (`eff. 4-1-2025`), and the entry as printed. `latest_date` and
 section last amended" as far as the published code knows. Old entries carry no
 date. `history` is null for a node with no note of its own, such as a chapter.
 
+The note is printed at the end of a section. When the text block stops before
+the end, the header repeats the note (up to 3,000 characters, newest entries
+kept), so finding out which ordinances amended a long section does not take a
+read of its last part.
+
+`parts` is filled for a section that is only a heading. The building codes of
+Title 23 print a heading as a section with no text, and its parts (numbered
+`N.1`, `N.2`) as separate sections beside it in the chapter. Reading the
+heading returns no text, so the result lists the sections the outline numbers
+under it, each with its guid, and carries a `section_text_in_parts` caveat.
+Read them with `get_sections`. `parts` is empty for every other section.
+
 ### `get_sections(sections)`
 
-Up to 10 sections in one call, each given as a guid or a number. A section that
+Up to 10 sections in one call, each given as a guid or a number. The list is
+also accepted under the names `guids` and `guid`, and written out as a JSON
+string. A section that
 cannot be fetched is reported in its place with a `section_unavailable` caveat,
 and the rest are still returned.
 
@@ -419,6 +438,7 @@ code and a message. The ones seen most often:
 | `no_match_in_scope` | The query matches elsewhere in the code but not inside the `within` scope |
 | `scope_unplaced_hits` | PDF documents and nodes outside the outline were left out of a `within` search |
 | `section_unavailable` | One section of a batch could not be fetched |
+| `section_text_in_parts` | The section is a heading with no text; `parts` lists the sections numbered under it, which hold the text |
 | `multiple_definitions` | The term is defined in more than one place |
 | `no_definition_found` | No definition node matched the term |
 | `no_references_found` | Nothing else in the code cites the section; a general penalty provision may still cover it |
