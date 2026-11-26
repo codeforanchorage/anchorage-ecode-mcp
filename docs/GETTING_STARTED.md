@@ -121,8 +121,9 @@ deploy.
   `0` creates no WAF at all, which leaves a public, unauthenticated endpoint
   with only the API Gateway throttle in front of it.
 - **`alarm_sns_topic_arn`** is this project's topic. Create an SNS topic with
-  an email subscription and put its ARN here, or set `""`; with `""` the
-  alarms still exist but notify nobody.
+  an email subscription and put its ARN here, or set `""`; with `""` no
+  alarms are created, so nothing watches for errors, throttles or a refused
+  API key.
 - **`custom_domain`** is this project's domain. See step 4 of Part 3, or set
   `""`.
 - **`lambda_name`** must be unique in your account and region. It also names
