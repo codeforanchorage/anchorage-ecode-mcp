@@ -47,6 +47,11 @@ PUBLIC_URL = "https://ecode360.com/{guid}"
 # that shows the model only the text block never sees
 # structuredContent.text. 40,000 returns most long sections whole;
 # anything longer is read on with get_section's `offset`.
+#
+# structuredContent.text holds the same characters as the text block.
+# It used to hold the whole section on every part, so a section read in
+# three parts was sent three times over and a response for a long
+# section ran to several times the size of what it showed.
 MAX_CONTENT_CHARS = 40_000
 
 # Node guids are opaque alphanumeric identifiers (in this library, all
@@ -207,8 +212,7 @@ BATCH_CONCURRENCY = 5
 # even share passes what it does not use to the longer ones, so one long
 # section among short ones is shown whole when the batch has room for it.
 # Two long sections get 40,000 each, ten get 8,000 each. A section cut
-# short names the get_section offset to read on from; the full text is in
-# structuredContent.
+# short names the get_section offset to read on from.
 BATCH_TOTAL_CHARS = 80_000
 BATCH_SECTION_CHARS = 8000
 # Titles of left-out PDF documents named in a scoped search's note.
@@ -901,22 +905,27 @@ _CODE_LAST_UPDATED_SCHEMA = {
 _LENGTH_SCHEMA = {
     "type": "object",
     "description": (
-        "Lengths in characters. Offsets (`offset`, shown_from, shown_to) "
-        "all index `text` as returned in this result."
+        "Lengths in characters. `text` is the part of the section "
+        "from shown_from to shown_to; offsets (`offset`, shown_from, "
+        "shown_to) count from the start of the whole section."
     ),
     "properties": {
         "text_chars": {
             "type": "integer",
-            "description": "Length of `text` in this result.",
+            "description": (
+                "Length of the whole section as this server formats it. "
+                "`text` is all of it only when shown_from is 0 and "
+                "shown_to equals this."
+            ),
         },
         "shown_from": {
             "type": "integer",
-            "description": "0-based start of the text block within `text`.",
+            "description": "0-based start of `text` within the section.",
         },
         "shown_to": {
             "type": "integer",
             "description": (
-                "0-based end (exclusive) of the text block within `text`; "
+                "0-based end (exclusive) of `text` within the section; "
                 "pass it as `offset` to read on when it is less than "
                 "text_chars."
             ),
@@ -924,10 +933,10 @@ _LENGTH_SCHEMA = {
         "whole_node_chars": {
             "type": ["integer", "null"],
             "description": (
-                "null when `text` is the whole node. Otherwise the node "
-                "was cut (node_too_large): this is the approximate length "
-                "of ALL its code text as the API holds it, of which `text` "
-                "is only the first part."
+                "null unless the node is a whole chapter or title too "
+                "large to return (node_too_large): then this is the "
+                "approximate length of ALL its code text as the API holds "
+                "it, of which text_chars covers only the first part."
             ),
         },
     },
@@ -1022,12 +1031,12 @@ SECTION_OUTPUT_SCHEMA = {
         "text": {
             "type": "string",
             "description": (
-                "The full section body, including nested subsections. NOT "
-                "clipped for any real section: the markdown block caps its "
-                "rendering for readability, but truncating the "
-                "machine-readable half would defeat its purpose. Only a "
-                "whole chapter or title larger than 200,000 characters is "
-                "cut, and then a `node_too_large` caveat says so."
+                "The section body, including nested subsections: the "
+                "same characters as the text block. A section longer "
+                "than one response comes in parts; `length` says which "
+                "part this is, and a `rendered_text_truncated` caveat "
+                "gives the offset of the next. Join the parts in order "
+                "for the whole section."
             ),
         },
         "length": _LENGTH_SCHEMA,
@@ -1076,7 +1085,11 @@ SECTIONS_OUTPUT_SCHEMA = {
                     "url": {"type": ["string", "null"]},
                     "text": {
                         "type": ["string", "null"],
-                        "description": "Full section body, NOT clipped.",
+                        "description": (
+                            "The section body as far as the batch had "
+                            "room for it; `length` says how far, and "
+                            "get_section with that offset reads on."
+                        ),
                     },
                     "length": _LENGTH_SCHEMA,
                     "history": _HISTORY_SCHEMA,
@@ -1978,7 +1991,7 @@ class EcodePlugin(MCPPlugin):
 
     plugin_name = "ecode"
     plugin_type = PluginType.CUSTOM_API
-    plugin_version = "1.20.0"
+    plugin_version = "1.21.0"
 
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
@@ -5704,9 +5717,9 @@ class EcodePlugin(MCPPlugin):
         total_chars = self._content_chars(data)
         too_large = total_chars > max_structured_chars
 
-        # Render once, whole, for structuredContent. The text block shows a
-        # window of that same rendering, so a caller can read on from the
-        # character where one response stopped (`offset`).
+        # Render once, whole. The text block and structuredContent.text
+        # both show one window of that rendering, so a caller can read on
+        # from the character where one response stopped (`offset`).
         notes: Dict[str, int] = {"inferred": 0, "uncertain": 0}
         full_body = self._render_content_node(
             data,
@@ -5794,8 +5807,8 @@ class EcodePlugin(MCPPlugin):
                     f"(1) The whole node holds about {total_chars:,} "
                     "characters of code text. (2) This server returns "
                     f"only the first part of it: {len(full_body):,} "
-                    "characters as formatted here, which is all that "
-                    "structuredContent.text holds. (3) The text below is "
+                    "characters as formatted here, which is as far as "
+                    "`offset` reaches. (3) The text below is "
                     f"characters {offset + 1:,}-{shown_end:,} of those "
                     f"{len(full_body):,}. Most of the node is therefore "
                     "NOT in this result. Call browse_structure with guid "
@@ -5810,8 +5823,7 @@ class EcodePlugin(MCPPlugin):
                     f"INCOMPLETE: the text below is characters "
                     f"{offset + 1:,}-{shown_end:,} of {len(full_body):,} "
                     "in this section. To read on, call get_section with "
-                    f"guid {guid} and offset={shown_end}. (The complete "
-                    "body is also in structuredContent.text.)",
+                    f"guid {guid} and offset={shown_end}.",
                 )
             )
         elif offset:
@@ -5940,7 +5952,7 @@ class EcodePlugin(MCPPlugin):
             "ref": ref,
             "title": title,
             "url": url,
-            "text": full_body,
+            "text": display_body,
             "length": {
                 "text_chars": len(full_body),
                 "shown_from": offset,
@@ -6846,7 +6858,7 @@ class EcodePlugin(MCPPlugin):
                 max_chars=per_section,
                 max_structured_chars=BATCH_STRUCTURED_CHARS,
             )
-            length = len(structured.get("text") or "")
+            length = structured["length"]["text_chars"]
             lengths.append(length)
             if length > per_section:
                 cut.append(len(blocks))

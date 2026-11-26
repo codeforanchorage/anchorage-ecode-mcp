@@ -165,8 +165,9 @@ class TestLengthReporting:
 
         length = sc["length"]
         assert length["whole_node_chars"] == whole
-        assert length["text_chars"] == len(sc["text"]) < whole
+        assert length["text_chars"] < whole
         assert length["shown_from"] == 0 and length["shown_to"] < length["text_chars"]
+        assert len(sc["text"]) == length["shown_to"]
 
         note = next(c["message"] for c in sc["caveats"]
                     if c["code"] == CAVEAT_NODE_TOO_LARGE)

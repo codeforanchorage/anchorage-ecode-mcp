@@ -114,10 +114,14 @@ class TestContinuation:
         assert "get_section with guid 77" in message
         offset = int(re.search(r"offset=(\d+)", message).group(1))
         assert 0 < offset <= MAX_CONTENT_CHARS
-        assert f"of {len(sc['text']):,}" in message
-        # structuredContent still carries everything.
-        assert _line_numbers(sc["text"]) == list(range(900))
+        assert f"of {sc['length']['text_chars']:,}" in message
+        assert sc["length"]["shown_to"] == offset
+        # structuredContent carries the same part as the text block, not
+        # the whole section over again.
+        assert len(sc["text"]) == offset
+        assert _line_numbers(sc["text"]) == _line_numbers(text)
         assert _line_numbers(text)[0] == 0
+        assert "structuredContent" not in message
 
     @pytest.mark.asyncio
     async def test_following_the_offsets_reads_every_line_exactly_once(self):
@@ -137,6 +141,30 @@ class TestContinuation:
             pytest.fail("never reached the end of the section")
 
         assert seen == list(range(900))
+
+    @pytest.mark.asyncio
+    async def test_the_structured_parts_join_into_the_whole_section(self):
+        section = _section("77", 900)
+        plugin = _plugin(section)
+        parts = []
+        offset = 0
+        for _ in range(10):
+            sc, text = await _read(plugin, "77", offset=offset)
+            validate(sc, SECTION_OUTPUT_SCHEMA)
+            length = sc["length"]
+            # Each part is the window `length` describes, and no more.
+            assert length["shown_from"] == offset
+            assert len(sc["text"]) == length["shown_to"] - offset
+            assert sc["text"] in text
+            parts.append(sc["text"])
+            offset = length["shown_to"]
+            if offset >= length["text_chars"]:
+                break
+        else:
+            pytest.fail("never reached the end of the section")
+
+        assert len(parts) == 3
+        assert "".join(parts) == section["content"]
 
     @pytest.mark.asyncio
     async def test_a_part_ends_on_a_line_break(self):

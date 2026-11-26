@@ -406,10 +406,10 @@ class TestSectionStructure:
         assert "four months" in structured["text"]
 
     @pytest.mark.asyncio
-    async def test_long_body_is_clipped_in_text_but_not_in_structured(
+    async def test_long_body_is_clipped_alike_in_text_and_structured(
         self, plugin
     ):
-        """Truncating the machine-readable half would defeat its purpose."""
+        """Both halves carry the same part, and `length` says which."""
         body = "x" * (MAX_CONTENT_CHARS + 5000)
         _wire(
             plugin,
@@ -425,8 +425,12 @@ class TestSectionStructure:
         structured = _structured(result)
         validate(structured, SECTION_OUTPUT_SCHEMA)
 
-        assert len(structured["text"]) > MAX_CONTENT_CHARS
-        assert len(_text(result)) < len(structured["text"])
+        length = structured["length"]
+        assert length["text_chars"] == len(body)
+        assert length["shown_from"] == 0
+        assert len(structured["text"]) == length["shown_to"]
+        assert length["shown_to"] <= MAX_CONTENT_CHARS
+        assert structured["text"] in _text(result)
         assert any(
             c["code"] == CAVEAT_RENDERED_TEXT_TRUNCATED
             for c in structured["caveats"]

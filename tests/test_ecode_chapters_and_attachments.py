@@ -363,7 +363,10 @@ class TestLargeNodes:
         assert CAVEAT_NODE_TOO_LARGE in codes
         # one caveat about size, not two that contradict each other
         assert CAVEAT_RENDERED_TEXT_TRUNCATED not in codes
-        assert cap * 0.9 < len(sc["text"]) < cap * 1.1
+        # `offset` reaches about as far as the cap; the text is one part.
+        assert cap * 0.9 < sc["length"]["text_chars"] < cap * 1.1
+        assert len(sc["text"]) == sc["length"]["shown_to"]
+        assert len(sc["text"]) <= ecode_mod.MAX_CONTENT_CHARS
         message = next(
             c["message"] for c in sc["caveats"]
             if c["code"] == CAVEAT_NODE_TOO_LARGE
@@ -372,14 +375,21 @@ class TestLargeNodes:
         assert message in result.content[0]["text"]
 
     @pytest.mark.asyncio
-    async def test_an_ordinary_long_section_is_still_whole(self):
+    async def test_an_ordinary_long_section_is_read_whole_in_parts(self):
         body = "x" * 61_000  # about the size of the largest real sections
         p = _plugin(content={"1": _content("1", content=body)})
         sc = (
             await p.execute_tool("get_section", {"guid": "1"})
         ).structured_content
+        rest = (
+            await p.execute_tool(
+                "get_section",
+                {"guid": "1", "offset": sc["length"]["shown_to"]},
+            )
+        ).structured_content
 
-        assert sc["text"] == body
+        assert sc["length"]["text_chars"] == len(body)
+        assert sc["text"] + rest["text"] == body
         codes = [c["code"] for c in sc["caveats"]]
         assert CAVEAT_NODE_TOO_LARGE not in codes
         assert CAVEAT_RENDERED_TEXT_TRUNCATED in codes

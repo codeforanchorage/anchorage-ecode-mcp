@@ -625,13 +625,23 @@ except Exception as e:
 
 # A section longer than one response shows its history note up front.
 try:
-    r = call_tool("get_section", {"guid": "9.28.020"})
+    # The Title 21 definitions: far longer than one response.
+    r = call_tool("get_section", {"guid": "21.15.040"})
     sc = structured_of(r) or {}
+    ok, why = conforms("ecode__get_section", sc)
     length = sc.get("length") or {}
     cut = length.get("shown_to", 0) < length.get("text_chars", 0)
     check("get_section: a section cut short shows its history note",
-          not cut or "history note (printed at the end" in text_of(r),
-          f"cut={cut}")
+          ok and cut and "history note (printed at the end" in text_of(r),
+          why or f"cut={cut}")
+    # ... and its structured text is the part shown, not the whole
+    # section again.
+    check("get_section: structured text of a cut section is the part shown",
+          cut
+          and len(sc.get("text") or "")
+          == length["shown_to"] - length["shown_from"]
+          and (sc.get("text") or "")[:200] in text_of(r),
+          f"text={len(sc.get('text') or '')} length={length}")
 except Exception as e:
     check("get_section: a section cut short shows its history note",
           False, repr(e))
@@ -854,7 +864,9 @@ try:
     sc = structured_of(r) or {}
     ln = sc.get("length") or {}
     check("Title 21: every reported length is labelled and consistent",
-          ln.get("text_chars") == len(sc.get("text") or "")
+          ln.get("shown_to", 0) - ln.get("shown_from", 0)
+          == len(sc.get("text") or "")
+          and ln.get("shown_to", 0) < ln.get("text_chars", 0)
           and (ln.get("whole_node_chars") or 0) > ln.get("text_chars", 0)
           and "Three different lengths apply" in text_of(r),
           json.dumps(ln))

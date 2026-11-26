@@ -241,14 +241,21 @@ class TestGetSections:
         assert p.calls == []
 
     @pytest.mark.asyncio
-    async def test_long_body_is_capped_in_text_but_whole_in_structured(self):
+    async def test_long_body_is_capped_in_text_and_in_structured(self):
         # One section in the batch gets the whole batch allowance.
         body = "x" * (ecode_mod.BATCH_TOTAL_CHARS + 500)
         long = _section("111", "§\xa01.01.010", "Long.", content=body)
         result = await p_execute(long)
 
         section = result.structured_content["sections"][0]
-        assert section["text"] == body
+        # The structured text is the part shown, and says how long the
+        # whole section is.
+        length = section["length"]
+        assert length["text_chars"] == len(body)
+        assert length["shown_from"] == 0
+        assert section["text"] == body[: length["shown_to"]]
+        assert length["shown_to"] == ecode_mod.BATCH_TOTAL_CHARS
+        assert section["text"] in result.content[0]["text"]
         codes = [c["code"] for c in section["caveats"]]
         assert CAVEAT_RENDERED_TEXT_TRUNCATED in codes
         assert len(result.content[0]["text"]) < len(body)

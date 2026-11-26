@@ -148,13 +148,16 @@ The text block holds up to 40,000 characters. A longer section is marked
 `INCOMPLETE` with a `rendered_text_truncated` caveat that gives the character
 range shown and the `offset` to pass on the next call; each part ends on a
 line break and the next one starts exactly there. `structuredContent.text`
-always carries the whole section.
+carries the same part as the text block, not the whole section: join the parts
+in order for the whole. (Up to 1.22.0 it carried the whole section on every
+part, which made each response for a long section several times the size of
+what it showed.)
 
 `length` reports every size in characters, each named for what it measures:
-`text_chars` (the length of `text`), `shown_from` and `shown_to` (the part of
-`text` in the text block; offsets index `text`), and `whole_node_chars`, which
-is null unless a chapter or title was cut, and is then the size of all its
-text.
+`text_chars` (the length of the whole section as formatted), `shown_from` and
+`shown_to` (the part of the section that `text` and the text block hold;
+offsets count from the start of the section), and `whole_node_chars`, which is
+null unless a chapter or title was cut, and is then the size of all its text.
 
 The section heading appears once, in the heading line. Subsections show their
 label (`A.`, `1.`, `a.`) and their own text. The history note (`(AO No. ...)`)
@@ -402,7 +405,8 @@ Every tool returns two forms of the same result:
 - a text block for the model to read, capped for readability (40,000
   characters for a section)
 - `structuredContent`, validated against the tool's declared `outputSchema`,
-  which carries the complete text
+  with the same content as fields; for a section longer than one response it
+  holds the same part as the text block
 
 Conditions the caller should know about are reported as `caveats`, each with a
 code and a message. The ones seen most often:
@@ -410,7 +414,7 @@ code and a message. The ones seen most often:
 | Caveat | Meaning |
 | --- | --- |
 | `resolved_from_section_number` | The reference was a number and was resolved to a guid |
-| `rendered_text_truncated` | The text block shows part of the section; the caveat gives the `offset` for the next part, and the full text is in `structuredContent` |
+| `rendered_text_truncated` | The text block shows part of the section; the caveat gives the `offset` for the next part, and `length` says which part this is |
 | `list_position_inferred` | A list was placed after the colon that introduces it, because the API does not say where in the paragraph it sits; check the order at the link |
 | `no_match_in_code` | No section matched the query as written; not proof the text is absent |
 | `ordinance_list_scope` | On every `recent_ordinances` result: what the table covers, that dates are adoption dates, and how to get from an ordinance to its sections |
